@@ -1,0 +1,52 @@
+# MacOS
+.DS_Store
+
+# IDE
+.idea
+
+# Python
+*.pyc
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# Virtual environments
+.venv/
+venv/
+ENV/
+env/
+
+# Testing
+.pytest_cache/
+.coverage
+.tox/
+htmlcov/
+
+# Build artifacts
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# Linting/formatting
+.ruff_cache/
+.mypy_cache/
+
+# Logs
+*.log
+logs/
+
+# Temporary files
+tmp/
+temp/
+*.tmp
+*.bak
+*.swp
+*~
+.cache
+
+# Documentation
+docs/build*
+.hatchery/worktrees/
