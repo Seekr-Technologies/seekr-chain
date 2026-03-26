@@ -1,0 +1,1 @@
+A multi-role step where multiple roles run in parallel within the same step. Step `a` runs first, then step `b` launches two roles simultaneously, each running on 2 nodes. Use this pattern for server/worker architectures or any workload that needs heterogeneous containers running together.

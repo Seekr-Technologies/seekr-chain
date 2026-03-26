@@ -1,0 +1,32 @@
+line-length = 120
+target-version = "py311"
+exclude = [
+  ".git",
+  ".venv",
+  "__pycache__",
+]
+
+[lint]
+# E (pycodestyle), F (pyflakes), I (isort) — same coverage as your current trio.
+select = ["E", "F", "I"]
+# select = ["E", "F", "I", "UP", "B", "C4", "SIM"]
+ignore = [
+  "E501", # Line length
+  "E203", # White space before ':'
+  "E251"  # White space around '='
+]
+
+[lint.isort]
+known-first-party = ["seekr_chain"]
+section-order = ["future", "standard-library", "third-party", "first-party", "local-folder"]
+# Matches isort’s Black profile behavior for trailing-comma splitting
+split-on-trailing-comma = true
+
+[format]
+# Ruff's formatter; aims for Black-like stability, uses preview gating for changes
+quote-style = "double"
+indent-style = "space"
+line-ending = "auto"
+
+[lint.per-file-ignores]
+"__init__.py" = ["I001"]
