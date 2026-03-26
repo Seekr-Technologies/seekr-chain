@@ -23,8 +23,7 @@ jobs:
 
   deploy:
     name: Deploy versioned docs
-    # if: github.event_name == 'release'
-    if: false
+    if: github.event_name == 'release'
     runs-on: ubuntu-latest
     permissions:
       contents: write

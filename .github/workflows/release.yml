@@ -10,8 +10,7 @@ permissions: read-all
 jobs:
   compute-version:
     name: Compute next version
-    # if: github.event.pull_request.merged == true
-    if: false
+    if: github.event.pull_request.merged == true
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -101,8 +100,7 @@ jobs:
   create-release:
     name: Create release
     needs: compute-version
-    # if: needs.compute-version.outputs.skip_release == 'false'
-    if: false # Temporarily disabled — not ready for PyPI release
+    if: needs.compute-version.outputs.skip_release == 'false'
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -133,7 +131,6 @@ jobs:
     name: Publish to PyPI
     needs: create-release
     runs-on: ubuntu-latest
-    if: false # Temporarily disabled — not ready for PyPI release
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
