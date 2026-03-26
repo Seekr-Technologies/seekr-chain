@@ -1,0 +1,30 @@
+name: "dag"
+namespace: "argo-workflows"
+ttl: "10:00"
+code:
+  path: "./"
+steps:
+  - name: "a"
+    image: "python:3.12"
+    shell: "/bin/bash"
+    script: python step_a.py
+  - name: "b1"
+    image: "python:3.12"
+    shell: "/bin/bash"
+    script: |
+      python step_b.py 1
+    depends_on: ["a"]
+    resources:
+      num_nodes: 2
+  - name: "b2"
+    image: "python:3.12"
+    shell: "/bin/bash"
+    script: python step_b.py 2
+    depends_on: ["a"]
+    resources:
+      num_nodes: 2
+  - name: "c"
+    image: "python:3.12"
+    shell: "/bin/bash"
+    script: python step_c.py
+    depends_on: ["b1", "b2"]

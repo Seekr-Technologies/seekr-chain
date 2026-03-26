@@ -1,0 +1,25 @@
+name: "multirole"
+namespace: "argo-workflows"
+ttl: "10:00"
+code:
+  path: "./"
+steps:
+  - name: "a"
+    image: "python:3.12"
+    script: |
+      python step_a.py
+  - name: "b"
+    depends_on: ["a"]
+    roles:
+      - name: "1"
+        image: "python:3.12"
+        script: |
+          python step_b.py 1
+        resources:
+          num_nodes: 2
+      - name: "2"
+        image: "python:3.12"
+        script: |
+          python step_b.py 2
+        resources:
+          num_nodes: 2

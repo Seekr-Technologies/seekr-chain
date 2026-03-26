@@ -1,0 +1,45 @@
+name: Docs
+
+on:
+  pull_request:
+    branches: [main]
+  release:
+    types: [published]
+
+permissions: read-all
+
+jobs:
+  build:
+    name: Build (strict)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+      - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7.6.0
+      - run: uv sync --group docs
+      - run: uv run mkdocs build --strict
+
+  deploy:
+    name: Deploy versioned docs
+    # if: github.event_name == 'release'
+    if: false
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+      - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7.6.0
+      - run: uv sync --group docs
+      - name: Configure git identity
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+      - name: Deploy docs
+        run: |
+          uv run mike deploy --push --update-aliases ${{ github.ref_name }} latest
+          uv run mike set-default --push latest
