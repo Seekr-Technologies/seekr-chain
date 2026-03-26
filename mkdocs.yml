@@ -1,0 +1,108 @@
+site_name: seekr-chain
+site_description: A no-nonsense job launcher for distributed workloads on Kubernetes
+site_url: https://seekr-technologies.github.io/seekr-chain
+repo_url: https://github.com/seekr-technologies/seekr-chain
+repo_name: seekr-technologies/seekr-chain
+
+theme:
+  name: material
+  palette:
+    # Dark mode
+    - scheme: slate
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/brightness-4
+        name: Switch to light mode
+    # Light mode
+    - scheme: default
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+  features:
+    - navigation.tabs
+    - navigation.sections
+    - navigation.expand
+    - navigation.top
+    - search.suggest
+    - search.highlight
+    - content.code.copy
+    - content.code.annotate
+
+plugins:
+  - search
+  - macros:
+      module_name: docs/macros # Point to your macros file
+  - gen-files:
+      scripts:
+        - docs/scripts/gen_api_pages.py
+        - docs/scripts/gen_config_page.py
+        - docs/scripts/gen_examples_page.py
+  - mkdocstrings:
+      handlers:
+        python:
+          options:
+            docstring_style: google
+            show_source: true
+            show_root_heading: true
+            show_root_full_path: false
+            heading_level: 2
+  - mike:
+      alias_type: redirect
+      # redirect_template: null
+      # deploy_prefix: ""
+      # canonical_version: null
+      # version_selector: true
+      # css_dir: css
+      # javascript_dir: js
+
+markdown_extensions:
+  - admonition
+  - pymdownx.details
+  - pymdownx.superfences
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.inlinehilite
+  - pymdownx.snippets
+  - pymdownx.tabbed:
+      alternate_style: true
+  - tables
+  - attr_list
+  - md_in_html
+  - toc:
+      permalink: true
+  - mkdocs-click
+
+nav:
+  - Home: index.md
+  - Getting Started:
+      - Installation: installation.md
+      - Quick Start: getting-started.md
+      - Examples: examples.md
+  - User Guide:
+      - Features: features.md
+      - Interactive Jobs: guides/interactive-jobs.md
+      - Multi-node Training: guides/multi-node-training.md
+      - Working with PVCs: guides/persistent-volumes.md
+      - Secrets Management: guides/secrets.md
+  - Reference:
+      - Configuration: reference/configuration.md
+      - Environment Variables: reference/environment-variables.md
+      - CLI Reference: reference/cli.md
+      - API Reference: api/seekr_chain/index.md
+  - Development:
+      - Contributing: developer/contributing.md
+      - Changelog: developer/CHANGELOG.md
+      - Roadmap: roadmap.md
+  - Comparison: comparison.md
+
+extra:
+  social:
+    - icon: fontawesome/brands/github
+      link: https://github.com/seekr-technologies/seekr-chain
+  version:
+    provider: mike
+# extra_css:
+#   - stylesheets/extra.css

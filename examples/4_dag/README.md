@@ -1,0 +1,1 @@
+A workflow with step dependencies forming a DAG (Directed Acyclic Graph). Step `a` runs first, then `b1` and `b2` run in parallel, and finally `c` runs after both complete. Use `depends_on` to define the execution order.

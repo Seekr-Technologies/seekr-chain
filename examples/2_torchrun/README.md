@@ -1,0 +1,1 @@
+Single-node distributed training with `torchrun`. Requests 8 GPUs and uses the environment variables provided by seekr-chain (`$NNODES`, `$NODE_RANK`, `$MASTER_ADDR`, `$MASTER_PORT`, `$GPUS_PER_NODE`) to configure the distributed launch.

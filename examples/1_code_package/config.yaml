@@ -1,0 +1,14 @@
+name: "code-upload"
+namespace: "argo-workflows"
+ttl: "10:00"
+code:
+  path: "./"
+steps:
+  - name: "step"
+    image: "python:3.12"
+    shell: "/bin/bash"
+    script: |
+      echo Contents
+      ls
+      echo Running python script
+      python job.py
