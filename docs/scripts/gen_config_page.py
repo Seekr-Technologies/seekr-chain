@@ -326,7 +326,7 @@ def main() -> None:
     with mkdocs_gen_files.open(OUT_PATH, "w") as f:
         f.write(content)
 
-    print(f"[gen_config_page] Done.", file=sys.stderr)
+    print("[gen_config_page] Done.", file=sys.stderr)
 
 
 try:
