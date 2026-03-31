@@ -1,0 +1,261 @@
+apiVersion: jobset.x-k8s.io/v1alpha2
+kind: JobSet
+metadata:
+  name: {{ js_name }}
+  labels:
+    seekr-chain/job-id: {{ job_id }}
+    seekr-chain/step-name: {{ step_name }}
+spec:
+  network:
+    enableDNSHostnames: true
+    subdomain: {{ js_name }}
+    publishNotReadyAddresses: true
+  {% if success_policy %}
+  successPolicy:
+    operator: {{ success_policy.operator }}
+    {% if success_policy.targetReplicatedJobs %}
+    targetReplicatedJobs:
+    {% for role_name in success_policy.targetReplicatedJobs %}
+    - {{ role_name }}
+    {% endfor %}
+    {% endif %}
+  {% endif %}
+  {% if failure_policy %}
+  failurePolicy:
+    maxRestarts: {{ failure_policy.maxRestarts }}
+  {% endif %}
+  replicatedJobs:
+  {% for role in roles %}
+  - name: {{ role.name }}
+    replicas: {{ role.replicas }}
+    template:
+      spec:
+        backoffLimit: 0
+        template:
+          metadata:
+            labels:
+              seekr-chain/role: {{ role.name }}
+              seekr-chain/job-id: {{ job_id }}
+              seekr-chain/step: {{ step_name }}
+          spec:
+            restartPolicy: Never
+            hostNetwork: true
+            dnsPolicy: ClusterFirstWithHostNet
+            terminationGracePeriodSeconds: 30
+            initContainers:
+            - name: download-assets
+              image: {{ role.init_aws_cli_image }}
+              workingDir: /seekr-chain
+              command: ["sh", "-c"]
+              args:
+              - >-
+                aws s3 cp {{ remote_assets_path }} /seekr-chain/assets.tar.gz
+                && {{ role.init_upload_md_cmd }}
+              volumeMounts:
+              - name: workspace
+                mountPath: /seekr-chain
+              env:
+              - name: AWS_ACCESS_KEY_ID
+                valueFrom:
+                  secretKeyRef:
+                    name: {{ workflow_name }}
+                    key: AWS_ACCESS_KEY_ID
+              - name: AWS_SECRET_ACCESS_KEY
+                valueFrom:
+                  secretKeyRef:
+                    name: {{ workflow_name }}
+                    key: AWS_SECRET_ACCESS_KEY
+              - name: AWS_ENDPOINT_URL
+                valueFrom:
+                  secretKeyRef:
+                    name: {{ workflow_name }}
+                    key: AWS_ENDPOINT_URL
+                    optional: true
+              - name: NODE_RANK
+                valueFrom:
+                  fieldRef:
+                    fieldPath: "metadata.annotations['jobset.sigs.k8s.io/job-index']"
+              - name: SEEKR_CHAIN_POD_INSTANCE_ID
+                valueFrom:
+                  fieldRef:
+                    fieldPath: metadata.name
+              - name: RESTART_ATTEMPT
+                valueFrom:
+                  fieldRef:
+                    fieldPath: "metadata.annotations['jobset.sigs.k8s.io/restart-attempt']"
+            - name: unpack-assets
+              image: {{ role.init_alpine_image }}
+              workingDir: /seekr-chain
+              command: ["sh", "-c"]
+              args:
+              - >-
+                set -e
+                && tar -xzf /seekr-chain/assets.tar.gz -C /seekr-chain
+                && rm -r /seekr-chain/assets.tar.gz
+                && ln -s {{ role.role_asset_path }}/* ./
+              volumeMounts:
+              - name: workspace
+                mountPath: /seekr-chain
+            - name: inject-shell
+              image: {{ role.init_busybox_image }}
+              workingDir: /seekr-chain
+              command:
+              - sh
+              - -c
+              - |
+                cp /bin/busybox /seekr-chain/busybox
+                mkdir /seekr-chain/bin
+                ln -sf /seekr-chain/busybox /seekr-chain/bin/sh
+                ln -sf /seekr-chain/busybox /seekr-chain/bin/tee
+                ln -sf /seekr-chain/busybox /seekr-chain/bin/touch
+                ln -sf /seekr-chain/busybox /seekr-chain/bin/sleep
+                ln -sf /seekr-chain/busybox /seekr-chain/bin/head
+                ln -sf /seekr-chain/busybox /seekr-chain/bin/awk
+                ln -sf /seekr-chain/busybox /seekr-chain/bin/cat
+              volumeMounts:
+              - name: workspace
+                mountPath: /seekr-chain
+            containers:
+            - name: main
+              image: {{ role.image }}
+              securityContext:
+                privileged: {{ role.privileged | to_yaml_bool }}
+              command: ["/seekr-chain/bin/sh", "-c"]
+              args:
+              - {{ role.step_args }}
+              workingDir: /seekr-chain/workspace
+              resources:
+                limits:
+                  {% for k, v in role.resources.items() %}
+                  {{ k }}: {{ v }}
+                  {% endfor %}
+                requests:
+                  {% for k, v in role.resources.items() %}
+                  {{ k }}: {{ v }}
+                  {% endfor %}
+              env:
+              {% for e in role.env %}
+              - name: {{ e.name }}
+                {% if e.kind == 'value' %}
+                value: {{ e.value | tojson }}
+                {% elif e.kind == 'fieldRef' %}
+                valueFrom:
+                  fieldRef:
+                    fieldPath: {{ e.fieldPath | tojson }}
+                {% elif e.kind == 'secretKeyRef' %}
+                valueFrom:
+                  secretKeyRef:
+                    name: {{ e.secret_name }}
+                    key: {{ e.key }}
+                    {% if e.optional %}
+                    optional: true
+                    {% endif %}
+                {% endif %}
+              {% endfor %}
+              volumeMounts:
+              - name: workspace
+                mountPath: /seekr-chain
+              - name: shm
+                mountPath: /dev/shm
+              - name: tmp
+                mountPath: /tmp
+              {% for mount in role.pvc_mounts %}
+              - name: {{ mount.name }}
+                mountPath: {{ mount.mountPath }}
+              {% endfor %}
+              lifecycle:
+                preStop:
+                  exec:
+                    command: ["sh", "-c", "touch /seekr-chain/.shutdown || true; sleep 20 || true;"]
+            - name: log-sidecar
+              image: {{ role.log_sidecar_image }}
+              workingDir: /seekr-chain
+              command: ["sh", "-c"]
+              args: ["sh /seekr-chain/resources/fluentbit.sh"]
+              env:
+              - name: AWS_ACCESS_KEY_ID
+                valueFrom:
+                  secretKeyRef:
+                    name: {{ workflow_name }}
+                    key: AWS_ACCESS_KEY_ID
+              - name: AWS_SECRET_ACCESS_KEY
+                valueFrom:
+                  secretKeyRef:
+                    name: {{ workflow_name }}
+                    key: AWS_SECRET_ACCESS_KEY
+              - name: RESTART_ATTEMPT
+                valueFrom:
+                  fieldRef:
+                    fieldPath: "metadata.annotations['jobset.sigs.k8s.io/restart-attempt']"
+              - name: S3_BUCKET
+                value: {{ role.log_sidecar_s3_bucket | tojson }}
+              - name: S3_STEP_DATA_PREFIX
+                value: {{ role.log_sidecar_s3_prefix | tojson }}
+              - name: SEEKR_CHAIN_WORKFLOW_ID
+                value: {{ workflow_name | tojson }}
+              - name: SEEKR_CHAIN_POD_INSTANCE_ID
+                valueFrom:
+                  fieldRef:
+                    fieldPath: metadata.name
+              - name: SEEKR_CHAIN_LOGS
+                value: /seekr-chain/logs.txt
+              - name: FB_S3_ENDPOINT
+                valueFrom:
+                  secretKeyRef:
+                    name: {{ workflow_name }}
+                    key: FB_S3_ENDPOINT
+                    optional: true
+              - name: FB_UPLOAD_TIMEOUT
+                value: {{ role.log_sidecar_upload_timeout | tojson }}
+              - name: NODE_RANK
+                valueFrom:
+                  fieldRef:
+                    fieldPath: "metadata.annotations['jobset.sigs.k8s.io/job-index']"
+              volumeMounts:
+              - name: workspace
+                mountPath: /seekr-chain
+              lifecycle:
+                preStop:
+                  exec:
+                    command: ["sh", "-c", "sleep 10 || true"]
+              resources:
+                requests:
+                  cpu: 100m
+                  memory: 256Mi
+                limits:
+                  cpu: 1000m
+                  memory: 512Mi
+            volumes:
+            - name: workspace
+              emptyDir: {}
+            - name: tmp
+              emptyDir: {}
+            - name: shm
+              emptyDir:
+                medium: Memory
+                {% if not role.shm_unlimited %}
+                sizeLimit: {{ role.shm_size }}
+                {% endif %}
+            {% for pvc in role.pvcs %}
+            - name: {{ pvc.name }}
+              persistentVolumeClaim:
+                claimName: {{ pvc.name }}
+            {% endfor %}
+            {% if affinity %}
+            affinity:
+              nodeAffinity:
+                requiredDuringSchedulingIgnoredDuringExecution:
+                  nodeSelectorTerms:
+                  {% for term in affinity.nodeAffinity.requiredDuringSchedulingIgnoredDuringExecution.nodeSelectorTerms %}
+                  - matchExpressions:
+                    {% for expr in term.matchExpressions %}
+                    - key: {{ expr.key }}
+                      operator: {{ expr.operator }}
+                      values:
+                      {% for v in expr['values'] %}
+                      - {{ v }}
+                      {% endfor %}
+                    {% endfor %}
+                  {% endfor %}
+            {% endif %}
+  {% endfor %}

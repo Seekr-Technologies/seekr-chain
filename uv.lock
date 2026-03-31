@@ -1,5 +1,5 @@
 version = 1
-revision = 2
+revision = 3
 requires-python = ">=3.10"
 resolution-markers = [
     "python_full_version >= '3.13'",
@@ -1307,6 +1307,7 @@ source = { editable = "." }
 dependencies = [
     { name = "boto3" },
     { name = "click" },
+    { name = "jinja2" },
     { name = "kubernetes" },
     { name = "loggerado" },
     { name = "pydantic" },
@@ -1352,6 +1353,7 @@ docs = [
 requires-dist = [
     { name = "boto3", specifier = ">=1.38.23" },
     { name = "click", specifier = ">=8.2.1" },
+    { name = "jinja2", specifier = ">=3.1.0" },
     { name = "kubernetes", specifier = ">=32.0.1" },
     { name = "loggerado", specifier = ">=0.3.0" },
     { name = "pydantic", specifier = ">=2.11.5" },
