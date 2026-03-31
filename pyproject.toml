@@ -22,6 +22,7 @@ keywords = ["kubernetes", "argo-workflows", "distributed-training", "job-launche
 dependencies = [
     "boto3>=1.38.23",
     "click>=8.2.1",
+    "jinja2>=3.1.0",
     "kubernetes>=32.0.1",
     "loggerado>=0.3.0",
     "pydantic>=2.11.5",
