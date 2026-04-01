@@ -211,7 +211,7 @@ class TestLogs:
                 "steps": [
                     {
                         "name": "step",
-                        "image": "python:3.12",
+                        "image": "python:3.12-alpine",
                         "script": "python oom.py",
                         # "script": "pwd && echo hello world && exit 1 && echo error",
                         "resources": {

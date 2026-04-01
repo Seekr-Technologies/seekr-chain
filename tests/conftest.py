@@ -5,8 +5,10 @@ import fcntl
 import inspect
 import os
 import re
+import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 import boto3
@@ -87,6 +89,31 @@ def unique_test_name(request):
     parts.append(func_name)
 
     return "::".join(parts)
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _podman_socket():
+    """Start the podman socket service so k3d can reach it (podman-in-podman setup).
+
+    Only active when the podman-socket-start helper is present (i.e., inside the
+    hatchery sandbox). Sets DOCKER_HOST so k3d picks up the socket automatically.
+    """
+    helper = Path("/usr/local/bin/podman-socket-start")
+    if not helper.exists():
+        yield
+        return
+
+    socket_path = Path("/tmp/podman-hermetic.sock")
+    if not socket_path.exists():
+        subprocess.run(["sudo", "-n", str(helper)], check=False)
+        # Brief wait; the helper loops until the socket appears before returning
+        for _ in range(20):
+            if socket_path.exists():
+                break
+            time.sleep(0.2)
+
+    os.environ.setdefault("DOCKER_HOST", f"unix://{socket_path}")
+    yield
 
 
 @pytest.fixture(scope="session")
@@ -291,7 +318,7 @@ def patch_configs_for_testing(job_name, datastore_root, monkeypatch, hermetic_fl
         config.name = _job_name
         config.ttl = datetime.timedelta(hours=1)
         if _hermetic:
-            config.logging.upload_timeout = datetime.timedelta(seconds=5)
+            config.logging.upload_timeout = datetime.timedelta(seconds=30)
         if _datastore_root is not None:
             config.datastore_root = _datastore_root
         if config.code:

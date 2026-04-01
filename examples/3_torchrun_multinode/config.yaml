@@ -9,8 +9,8 @@ steps:
     resources:
       num_nodes: 2
       gpu_type: "amd.com/gpu"
-      cpus_per_node: null # When requesting GPUs, setting CPU/Mem to null will automatically request 1/8th of a node of CPU/Mem per GPU
-      mem_per_node: null
+      cpus_per_node: 64
+      mem_per_node: "512Gi"
       gpus_per_node: 8
     script: |
       echo NNODES=$NNODES

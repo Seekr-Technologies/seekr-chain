@@ -30,6 +30,25 @@ ARGO_CONTROLLER_NAMESPACE = "argo"
 ARGO_WORKFLOW_NAMESPACE = "argo-workflows"
 KUBECONFIG_PATH = Path(tempfile.gettempdir()) / f"{CLUSTER_NAME}-kubeconfig.yaml"
 
+# Images pre-pulled and imported into the k3d cluster before tests run.
+# This prevents Docker Hub rate limits from causing silent ImagePullBackOff
+# failures mid-test. Add an image here whenever a new one is used in tests.
+# Images pre-pulled and imported into every k3d node before tests run.
+# Keep this list small — each image consumes space in the k3d node's
+# containerd storage, which is limited on CI runners.
+# Only include images pulled on every test job (init containers + log sidecar).
+# Larger test-job images (ubuntu, python, etc.) pull through Docker Hub
+# registry auth configured in registries.yaml.
+HERMETIC_IMAGES = [
+    "amazon/aws-cli:2.25.11",
+    "alpine:3.22.0",
+    "busybox:1.37-uclibc",
+    "fluent/fluent-bit:2.2-debug",
+    "ubuntu:24.04",
+    "python:3.12-alpine",
+    "python:3.13-alpine",
+]
+
 
 # Grant the Argo workflow-controller SA permission to manage JobSet resources.
 # The SA is named 'argo' and lives in the 'argo' namespace (install.yaml default).
@@ -228,7 +247,7 @@ class HermeticCluster:
                 "--servers",
                 "1",
                 "--agents",
-                "2",
+                "1",
                 "--no-lb",
                 "--k3s-arg",
                 "--disable=traefik@server:0",
@@ -409,8 +428,31 @@ class HermeticCluster:
         # 'containerRuntimeExecutor' configmap field was removed in v3 — patching
         # it crashes the controller. No configmap patch is needed for k3d.
 
+        self._preload_images()
+
         print(f"[hermetic] Cluster ready. Kubeconfig: {KUBECONFIG_PATH}", file=sys.stderr)
         return KUBECONFIG_PATH
+
+    def _preload_images(self):
+        """Pull all hermetic test images and import them into the k3d cluster.
+
+        Pulling upfront means rate limit failures are visible immediately at
+        cluster setup time rather than appearing as silent hangs mid-test.
+
+        Each image is pulled, imported, then pruned before moving to the next
+        so that only one image's tarball is on disk at a time.
+        """
+        for image in HERMETIC_IMAGES:
+            print(f"[hermetic] Pre-pulling {image}...", file=sys.stderr)
+            result = subprocess.run(["docker", "pull", image], capture_output=True, text=True)
+            if result.returncode != 0:
+                print(
+                    f"[hermetic] WARNING: failed to pull {image}:\n{result.stderr.strip()}",
+                    file=sys.stderr,
+                )
+                continue
+            _run(["k3d", "image", "import", image, "--cluster", CLUSTER_NAME])
+            subprocess.run(["docker", "image", "rm", image], capture_output=True)
 
     def destroy(self):
         """Delete the k3d cluster."""

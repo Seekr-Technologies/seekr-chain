@@ -119,18 +119,53 @@ def _generate_role_asset_path(step_name: str, role_name: str, parent: Optional[P
     return out
 
 
-def _get_init_containers(
-    role_config,
-    job_info,
-    asset_mount,
-    workflow_name: str,
-    step_name: str,
-):
-    init_containers = []
+def _normalize_env(env_list: list[dict]) -> list[dict]:
+    """Normalize env var dicts to a flat form suitable for the Jinja2 template.
 
-    role_path = _generate_role_asset_path(
-        step_name=step_name, role_name=role_config.name, parent=constants.JOB_ASSET_PATH
-    )
+    Each entry becomes one of three shapes:
+      {"name": ..., "kind": "value",       "value": str}
+      {"name": ..., "kind": "fieldRef",    "fieldPath": str}
+      {"name": ..., "kind": "secretKeyRef","secret_name": str, "key": str, "optional": bool}
+    """
+    result = []
+    for e in env_list:
+        if "value" in e:
+            result.append({"name": e["name"], "kind": "value", "value": str(e["value"])})
+        elif "valueFrom" in e:
+            vf = e["valueFrom"]
+            if "fieldRef" in vf:
+                result.append({"name": e["name"], "kind": "fieldRef", "fieldPath": vf["fieldRef"]["fieldPath"]})
+            elif "secretKeyRef" in vf:
+                skr = vf["secretKeyRef"]
+                result.append(
+                    {
+                        "name": e["name"],
+                        "kind": "secretKeyRef",
+                        "secret_name": skr["name"],
+                        "key": skr["key"],
+                        "optional": skr.get("optional", False),
+                    }
+                )
+    return result
+
+
+def _build_role_context(
+    role_config,
+    workflow_config,
+    workflow_secrets: list[dict],
+    workflow_name: str,
+    js_name: str,
+    job_info,
+    interactive: bool,
+    step_name: str,
+    assets_path: Path,
+) -> dict:
+    """Build the Jinja2 template context dict for a single replicated job (role)."""
+    js_pod_name = role_config.name
+    subdomain = js_name
+    master_addr = f"{js_name}-{js_pod_name}-0-0.{subdomain}"
+
+    # S3 path where the init container uploads pod metadata
     remote_md_path = s3_utils.join(
         job_info["remote_step_data_path"],
         f"step={step_name}",
@@ -141,118 +176,12 @@ def _get_init_containers(
         "md.json",
     )
 
-    init_containers += [
-        {
-            "name": "download-assets",
-            "image": resolve_image("amazon/aws-cli:2.25.11"),
-            "workingDir": constants.JOB_ROOT,
-            "command": ["sh", "-c"],
-            "args": [
-                " && ".join(
-                    [
-                        f"aws s3 cp {job_info['remote_assets_path']} {constants.JOB_ASSET_TAR_PATH}",
-                        # A bit of a dirty way to generate a json. But I wanted to prevent needing to create a custom image
-                        # with additional tooling for initContainers
-                        f'printf \'{{"pod_name":"%s"}}\' $SEEKR_CHAIN_POD_INSTANCE_ID | aws s3 cp - {remote_md_path}',
-                    ]
-                )
-            ],
-            "volumeMounts": [asset_mount],
-            "env": [
-                {
-                    "name": "AWS_ACCESS_KEY_ID",
-                    "valueFrom": {
-                        "secretKeyRef": {
-                            "name": workflow_name,
-                            "key": "AWS_ACCESS_KEY_ID",
-                        }
-                    },
-                },
-                {
-                    "name": "AWS_SECRET_ACCESS_KEY",
-                    "valueFrom": {
-                        "secretKeyRef": {
-                            "name": workflow_name,
-                            "key": "AWS_SECRET_ACCESS_KEY",
-                        }
-                    },
-                },
-                {
-                    "name": "AWS_ENDPOINT_URL",
-                    "valueFrom": {
-                        "secretKeyRef": {
-                            "name": workflow_name,
-                            "key": "AWS_ENDPOINT_URL",
-                            "optional": True,
-                        }
-                    },
-                },
-                {
-                    "name": "NODE_RANK",
-                    "valueFrom": {"fieldRef": {"fieldPath": "metadata.annotations['jobset.sigs.k8s.io/job-index']"}},
-                },
-                {"name": "SEEKR_CHAIN_POD_INSTANCE_ID", "valueFrom": {"fieldRef": {"fieldPath": "metadata.name"}}},
-                {
-                    "name": "RESTART_ATTEMPT",
-                    "valueFrom": {
-                        "fieldRef": {"fieldPath": "metadata.annotations['jobset.sigs.k8s.io/restart-attempt']"}
-                    },
-                },
-            ],
-        },
-        {
-            "name": "unpack-assets",
-            "image": resolve_image("alpine:3.22.0"),
-            "workingDir": constants.JOB_ROOT,
-            "command": ["sh", "-c"],
-            "args": [
-                " && ".join(
-                    [
-                        # UNPACK ASSETS
-                        "set -e",
-                        f"tar -xzf {constants.JOB_ASSET_TAR_PATH} -C {constants.JOB_ROOT}",
-                        f"rm -r {constants.JOB_ASSET_TAR_PATH}",
-                        # LINK ASSETS
-                        f"ln -s {role_path}/* ./",
-                    ]
-                )
-            ],
-            "volumeMounts": [asset_mount],
-        },
-        {
-            "name": "inject-shell",
-            "image": resolve_image("busybox:1.37-uclibc"),
-            "workingDir": constants.JOB_ROOT,
-            "command": [
-                "sh",
-                "-c",
-                textwrap.dedent(f"""
-                cp /bin/busybox {constants.JOB_ROOT}/busybox
-                mkdir {constants.JOB_ROOT}/bin
-                ln -sf {constants.JOB_ROOT}/busybox {constants.JOB_ROOT}/bin/sh
-                ln -sf {constants.JOB_ROOT}/busybox {constants.JOB_ROOT}/bin/tee
-                ln -sf {constants.JOB_ROOT}/busybox {constants.JOB_ROOT}/bin/touch
-                ln -sf {constants.JOB_ROOT}/busybox {constants.JOB_ROOT}/bin/sleep
-                ln -sf {constants.JOB_ROOT}/busybox {constants.JOB_ROOT}/bin/head
-                ln -sf {constants.JOB_ROOT}/busybox {constants.JOB_ROOT}/bin/awk
-                ln -sf {constants.JOB_ROOT}/busybox {constants.JOB_ROOT}/bin/cat
-                """),
-            ],
-            "volumeMounts": [asset_mount],
-        },
-    ]
+    # Local path inside the container where role-specific assets are extracted
+    role_asset_path = _generate_role_asset_path(
+        step_name=step_name, role_name=role_config.name, parent=constants.JOB_ASSET_PATH
+    )
 
-    return init_containers
-
-
-def _get_log_sidecar(
-    role_config,
-    job_info,
-    asset_mount,
-    workflow_name,
-    step_name: str,
-    upload_timeout: int = 60,
-):
+    # S3 path for log sidecar output
     remote_step_data_path = s3_utils.join(
         job_info["remote_step_data_path"],
         f"step={step_name}",
@@ -261,58 +190,67 @@ def _get_log_sidecar(
         "pod_index=${JOB_COMPLETION_INDEX}",
     )
     s3_bucket, s3_step_data_prefix = s3_utils.parse_s3_uri(remote_step_data_path)
+    upload_timeout = int(workflow_config.logging.upload_timeout.total_seconds())
 
-    log_sidecar = {
-        "name": "log-sidecar",
-        "image": resolve_image("fluent/fluent-bit:2.2-debug"),
-        "workingDir": constants.JOB_ROOT,
-        "env": [
-            {
-                "name": "AWS_ACCESS_KEY_ID",
-                "valueFrom": {"secretKeyRef": {"name": workflow_name, "key": "AWS_ACCESS_KEY_ID"}},
-            },
-            {
-                "name": "AWS_SECRET_ACCESS_KEY",
-                "valueFrom": {"secretKeyRef": {"name": workflow_name, "key": "AWS_SECRET_ACCESS_KEY"}},
-            },
-            {
-                "name": "RESTART_ATTEMPT",
-                "valueFrom": {"fieldRef": {"fieldPath": "metadata.annotations['jobset.sigs.k8s.io/restart-attempt']"}},
-            },
-            {"name": "S3_BUCKET", "value": s3_bucket},
-            {"name": "S3_STEP_DATA_PREFIX", "value": s3_step_data_prefix},
-            {"name": "SEEKR_CHAIN_WORKFLOW_ID", "value": workflow_name},
-            {"name": "SEEKR_CHAIN_POD_INSTANCE_ID", "valueFrom": {"fieldRef": {"fieldPath": "metadata.name"}}},
-            {"name": "SEEKR_CHAIN_LOGS", "value": constants.JOB_LOGS_PATH},
-            {
-                "name": "FB_S3_ENDPOINT",
-                "valueFrom": {
-                    "secretKeyRef": {
-                        "name": workflow_name,
-                        "key": "FB_S3_ENDPOINT",
-                        "optional": True,
-                    }
-                },
-            },
-            {
-                "name": "FB_UPLOAD_TIMEOUT",
-                "value": str(upload_timeout),
-            },
-            {
-                "name": "NODE_RANK",
-                "valueFrom": {"fieldRef": {"fieldPath": "metadata.annotations['jobset.sigs.k8s.io/job-index']"}},
-            },
-        ],
-        "command": ["sh", "-c"],
-        "args": [f"sh {constants.JOB_RESOURCES_PATH}/fluentbit.sh"],
-        "volumeMounts": [asset_mount],
-        "lifecycle": {"preStop": {"exec": {"command": ["sh", "-c", "sleep 10 || true"]}}},
-        "resources": {
-            "requests": {"cpu": "100m", "memory": "256Mi"},
-            "limits": {"cpu": "1000m", "memory": "512Mi"},
-        },
+    # Main container command
+    if interactive:
+        timeout = 1 * 60 * 60  # auto-timeout of 1 hour
+        logger.warning("Setting auto-timeout of 1 hour")
+        step_args = f"sleep {timeout}"
+    else:
+        step_args = f"{constants.JOB_RESOURCES_PATH}/chain-entrypoint.sh"
+
+    pvcs_raw, pvc_mounts = _get_pvcs(role_config)
+    # Template only needs the volume name; structure is defined in the template
+    pvcs = [{"name": v["name"]} for v in pvcs_raw]
+
+    shm_unlimited = role_config.resources.shm_size.upper() in {"UNLIMITED"}
+
+    raw_env = _get_env(
+        workflow_config,
+        role_config,
+        workflow_secrets,
+        master_addr,
+        workflow_name=workflow_name,
+        jobset_name=js_name,
+    )
+
+    _construct_hostfile(
+        js_name,
+        js_pod_name,
+        subdomain,
+        role_config=role_config,
+        assets_path=assets_path,
+        step_name=step_name,
+    )
+
+    return {
+        "name": js_pod_name,
+        "replicas": role_config.resources.num_nodes,
+        "image": resolve_image(role_config.image),
+        "privileged": role_config.resources.security.privileged,
+        "resources": _get_step_resources(role_config),
+        "env": _normalize_env(raw_env),
+        "pvcs": pvcs,
+        "pvc_mounts": pvc_mounts,
+        "shm_size": role_config.resources.shm_size,
+        "shm_unlimited": shm_unlimited,
+        "step_args": step_args,
+        # Init container images and computed paths
+        "init_aws_cli_image": resolve_image("amazon/aws-cli:2.25.11"),
+        "init_alpine_image": resolve_image("alpine:3.22.0"),
+        "init_busybox_image": resolve_image("busybox:1.37-uclibc"),
+        "remote_md_path": remote_md_path,
+        "role_asset_path": str(role_asset_path),
+        "init_upload_md_cmd": (
+            f'printf \'{{"pod_name":"%s"}}\' $SEEKR_CHAIN_POD_INSTANCE_ID | aws s3 cp - {remote_md_path}'
+        ),
+        # Log sidecar
+        "log_sidecar_image": resolve_image("fluent/fluent-bit:2.2-debug"),
+        "log_sidecar_s3_bucket": s3_bucket,
+        "log_sidecar_s3_prefix": s3_step_data_prefix,
+        "log_sidecar_upload_timeout": str(upload_timeout),
     }
-    return log_sidecar
 
 
 def _build_affinity(workflow_config):
@@ -384,144 +322,6 @@ def _build_affinity(workflow_config):
         }
 
     return affinity
-
-
-def _build_replicated_job(
-    role_config,
-    workflow_config,
-    workflow_secrets: dict,
-    workflow_name: str,
-    js_name: str,
-    job_info,
-    interactive: bool,
-    step_name: str,
-    assets_path: Path,
-) -> dict:
-    asset_mount = {"name": "workspace", "mountPath": constants.JOB_ROOT}
-    js_pod_name = role_config.name
-
-    resources = _get_step_resources(role_config)
-
-    subdomain = js_name
-    master_addr = f"{js_name}-{js_pod_name}-0-0.{subdomain}"
-    _construct_hostfile(
-        js_name,
-        js_pod_name,
-        subdomain,
-        role_config=role_config,
-        assets_path=assets_path,
-        step_name=step_name,
-    )
-
-    init_containers = _get_init_containers(
-        role_config,
-        job_info,
-        asset_mount,
-        workflow_name,
-        step_name=step_name,
-    )
-
-    pvcs, pvc_mounts = _get_pvcs(role_config)
-
-    # command = ["/bin/bash", "-c"]
-    command = [f"{constants.JOB_ROOT}/bin/sh", "-c"]
-    if interactive:
-        timeout = 1 * 60 * 60  # auto-timeout of 1 hour
-        logger.warning("Setting auto-timeout of 1 hour")
-        step_args = [f"sleep {timeout}"]
-    else:
-        step_args = [f"{constants.JOB_RESOURCES_PATH}/chain-entrypoint.sh"]
-    step_args = [" && ".join(step_args)]
-
-    out = {
-        "name": js_pod_name,
-        "replicas": role_config.resources.num_nodes,
-        "template": {
-            "spec": {
-                # "volumeClaimTemplates": vcts,
-                "backoffLimit": 0,  # Don't retry at all
-                "template": {
-                    "metadata": {
-                        "labels": {
-                            "seekr-chain/role": role_config.name,
-                            "seekr-chain/job-id": job_info["id"],
-                            "seekr-chain/step": step_name,
-                        },
-                    },
-                    "spec": {
-                        "restartPolicy": "Never",
-                        "hostNetwork": True,
-                        "dnsPolicy": "ClusterFirstWithHostNet",
-                        "terminationGracePeriodSeconds": 30,
-                        "containers": [
-                            {
-                                "name": "main",
-                                "image": resolve_image(role_config.image),
-                                "securityContext": {
-                                    "privileged": role_config.resources.security.privileged,
-                                },
-                                "command": command,
-                                "args": step_args,
-                                "resources": {"limits": resources, "requests": resources},
-                                "workingDir": constants.JOB_WORKSPACE,
-                                "env": _get_env(
-                                    workflow_config,
-                                    role_config,
-                                    workflow_secrets,
-                                    master_addr,
-                                    workflow_name=workflow_name,
-                                    jobset_name=js_name,
-                                ),
-                                "volumeMounts": [
-                                    asset_mount,
-                                    {"mountPath": "/dev/shm", "name": "shm"},
-                                    {"mountPath": "/tmp", "name": "tmp"},
-                                ]
-                                + pvc_mounts,
-                                "lifecycle": {
-                                    "preStop": {
-                                        "exec": {
-                                            "command": [
-                                                "sh",
-                                                "-c",
-                                                f"touch {constants.JOB_SHUTDOWN_PATH} || true; sleep 20 || true;",
-                                            ],
-                                        }
-                                    }
-                                },
-                            },
-                            _get_log_sidecar(
-                                role_config,
-                                job_info,
-                                asset_mount,
-                                workflow_name,
-                                step_name,
-                                upload_timeout=int(workflow_config.logging.upload_timeout.total_seconds()),
-                            ),
-                        ],
-                        "initContainers": init_containers,
-                        "volumes": [
-                            {"name": "workspace", "emptyDir": {}},
-                            {"name": "tmp", "emptyDir": {}},
-                            {
-                                "name": "shm",
-                                "emptyDir": {
-                                    "medium": "Memory",
-                                    **(
-                                        {"sizeLimit": role_config.resources.shm_size}
-                                        if role_config.resources.shm_size.upper() not in {"UNLIMITED"}
-                                        else {}
-                                    ),
-                                },
-                            },
-                        ]
-                        + pvcs,
-                    },
-                },
-            },
-        },
-    }
-    return out
 
 
 def _get_step_resources(config) -> dict:
@@ -648,9 +448,14 @@ def _write_peermaps_and_scripts(role_configs, js_name, step_config, assets_path)
             json.dump(peermap, f, sort_keys=True)
 
 
-def create_jobset_manifest(
+def build_jobset_context(
     workflow_config, step_index, job_info, workflow_name, workflow_secrets, interactive: bool, assets_path: Path
 ) -> tuple[str, dict]:
+    """Build the Jinja2 template context for a JobSet manifest.
+
+    Returns (js_name, context_dict). The context dict is passed directly to
+    the jobset.yaml.j2 template.
+    """
     step_config = workflow_config.steps[step_index]
     step_name = step_config.name
     js_name = f"{workflow_name}-{step_name}-js"
@@ -665,7 +470,6 @@ def create_jobset_manifest(
     # Check if we will be over 63 character limit
     for role_config in role_configs:
         if len(f"{js_name}-{role_config.name}-00-00-abcde") > 63:
-            # step_name = f"s{step_index:02d}"
             js_name = f"{workflow_name.split('-')[-1]}-s{step_index:02d}-js"
             logger.warning(f"Generated jobset name is too long! Shortening to {js_name}")
             break
@@ -674,45 +478,53 @@ def create_jobset_manifest(
         role_configs=role_configs, js_name=js_name, step_config=step_config, assets_path=assets_path
     )
 
-    jobset_manifest = {
-        "apiVersion": "jobset.x-k8s.io/v1alpha2",
-        "kind": "JobSet",
-        "metadata": {
-            "name": js_name,
-            "labels": {
-                "seekr-chain/job-id": job_info["id"],
-                "seekr-chain/step-name": step_name,
-            },
-        },
-        "spec": {
-            "network": {
-                "enableDNSHostnames": True,
-                "subdomain": js_name,
-                "publishNotReadyAddresses": True,
-            },
-            "replicatedJobs": [
-                _build_replicated_job(
-                    role_config=role_config,
-                    workflow_config=workflow_config,
-                    workflow_secrets=workflow_secrets,
-                    workflow_name=workflow_name,
-                    js_name=js_name,
-                    job_info=job_info,
-                    interactive=interactive,
-                    step_name=step_name,
-                    assets_path=assets_path,
-                )
-                for role_config in role_configs
-            ],
-        },
+    context = {
+        "js_name": js_name,
+        "job_id": job_info["id"],
+        "step_name": step_name,
+        "workflow_name": workflow_name,
+        "remote_assets_path": job_info["remote_assets_path"],
+        "success_policy": _build_success_policy(step_config),
+        "failure_policy": _build_failure_policy(step_config),
+        "affinity": _build_affinity(workflow_config),
+        "roles": [
+            _build_role_context(
+                role_config=role_config,
+                workflow_config=workflow_config,
+                workflow_secrets=workflow_secrets,
+                workflow_name=workflow_name,
+                js_name=js_name,
+                job_info=job_info,
+                interactive=interactive,
+                step_name=step_name,
+                assets_path=assets_path,
+            )
+            for role_config in role_configs
+        ],
     }
-    if success_policy := _build_success_policy(step_config):
-        jobset_manifest["spec"]["successPolicy"] = success_policy
-    if failure_policy := _build_failure_policy(step_config):
-        jobset_manifest["spec"]["failurePolicy"] = failure_policy
 
-    if affinity := _build_affinity(workflow_config):
-        for item in jobset_manifest["spec"]["replicatedJobs"]:
-            item["template"]["spec"]["template"]["spec"]["affinity"] = affinity
+    return js_name, context
 
-    return js_name, jobset_manifest
+
+def create_jobset_manifest(
+    workflow_config, step_index, job_info, workflow_name, workflow_secrets, interactive: bool, assets_path: Path
+) -> tuple[str, str]:
+    """Build and render the JobSet manifest.
+
+    Returns (js_name, rendered_yaml_string).
+    """
+    from seekr_chain.backends.argo import render
+
+    js_name, context = build_jobset_context(
+        workflow_config=workflow_config,
+        step_index=step_index,
+        job_info=job_info,
+        workflow_name=workflow_name,
+        workflow_secrets=workflow_secrets,
+        interactive=interactive,
+        assets_path=assets_path,
+    )
+
+    rendered = render.render("jobset.yaml.j2", context)
+
+    return js_name, rendered

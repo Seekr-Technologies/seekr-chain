@@ -4,7 +4,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable
 
-from packaging.version import Version
+# Schema version written to S3 alongside each job's data. Increment this when
+# the on-disk/S3 directory layout changes, NOT when the package version changes.
+DATA_SCHEMA_VERSION = "1"
 
 
 @dataclass(frozen=True)
@@ -203,35 +205,8 @@ class LogStore:
         return root
 
 
-def _nested_setter(d: dict, keys: list[Any], value: Any) -> None:
-    """
-    This helper is essentially equivalent to a recursive defaultdict of dicts, but
-    we don't have to recursively cast back to a normal dict when we're done.
-
-    Also skips keys when key==''
-    """
-    leaf = d
-    for key in keys[:-1]:
-        if key == "":
-            continue
-        if key not in leaf:
-            leaf[key] = {}
-        leaf = leaf[key]
-
-    leaf[keys[-1]] = value
-
-
-def _parse_version(path: Path) -> Version:
-    version_path = path / "version"
-    if not version_path.exists():
-        return Version("0.2.0")
-
-    with open(version_path, "r") as f:
-        data = f.readlines()
-    return Version(data[0])
-
-
-def _parse_logs_v0_3(path, timestamps) -> LogStore:
+def parse_logs(path: Path, timestamps: bool = False) -> LogStore:
+    """Parse job logs from a local directory synced from S3."""
     logs = LogStore()
 
     for step_dir in path.glob("step=*/role=*/job_index=*/pod_index=*/attempt=*"):
@@ -253,42 +228,5 @@ def _parse_logs_v0_3(path, timestamps) -> LogStore:
                 if timestamps is False:
                     data = [item["log"] for item in data]
                 logs.append(**log_key, lines=data)
-    return logs
-
-
-def _parse_logs_v0_2(path, timestamps) -> LogStore:
-    logs = LogStore()
-
-    for step_dir in path.glob("step=*/role=*/job_index=*/pod_index=*"):
-        step_parts = {k: v for k, v in [item.split("=", 1) for item in step_dir.relative_to(path).parts]}
-        log_key = {
-            "step": step_parts["step"],
-            "role": step_parts["role"],
-            "index": int(step_parts["job_index"]),
-            "attempt": 0,
-        }
-
-        with open(step_dir / "md.json", "r") as f:
-            step_md = json.load(f)
-
-        logs.set_pod_name(**log_key, pod_name=step_md["pod_name"])
-        for log_file in sorted(step_dir.glob("**/*.log.gz*")):
-            with gzip.open(log_file, "rt") as f:
-                data = [json.loads(line) for line in f.read().splitlines()]
-                if timestamps is False:
-                    data = [item["log"] for item in data]
-                logs.append(**log_key, lines=data)
 
     return logs
-
-
-def parse_logs(path: Path, timestamps: bool = False) -> LogStore:
-    """
-    Parse logs
-    """
-    logs_version = _parse_version(path)
-
-    if logs_version >= Version("0.3.0"):
-        return _parse_logs_v0_3(path, timestamps)
-    else:
-        return _parse_logs_v0_2(path, timestamps)

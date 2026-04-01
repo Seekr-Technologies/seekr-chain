@@ -13,12 +13,13 @@ import kubernetes
 import yaml
 from botocore.client import BaseClient
 
-from seekr_chain import WorkflowConfig, __version__, k8s_utils, s3_utils, utils
+from seekr_chain import WorkflowConfig, k8s_utils, s3_utils, utils
+from seekr_chain.backends.argo import render
 from seekr_chain.backends.argo.argo_workflow import ArgoWorkflow
 from seekr_chain.backends.argo.job_info import JobInfo, get_job_info
 from seekr_chain.backends.argo.jobset import create_jobset_manifest
+from seekr_chain.backends.argo.parse_logs import DATA_SCHEMA_VERSION
 from seekr_chain.config import StepConfig
-from seekr_chain.literal_safe_dumper import LiteralSafeDumper
 from seekr_chain.symlink import symlink
 from seekr_chain.tar_directory import tar_directory
 
@@ -86,7 +87,7 @@ def _create_step_manifest(
 ):
     step_config = workflow_config.steps[step_index]
 
-    js_name, js_manifest = create_jobset_manifest(
+    js_name, js_yaml = create_jobset_manifest(
         workflow_config=workflow_config,
         step_index=step_index,
         job_info=job_info,
@@ -96,40 +97,18 @@ def _create_step_manifest(
         assets_path=assets_path,
     )
 
-    manifest = {
+    return {
         "name": step_config.name,
-        "metadata": {
-            "labels": {
-                "seekr-chain/system-pod": "false",
-                "seekr-chain/is-jobset": "true",
-                "seekr-chain/step": step_config.name,
-                "seekr-chain/jobset-name": js_name,
-                "seekr-chain/job-id": job_info["id"],
-                "seekr-chain/job-name": workflow_config.name,
-                "seekr-chain/is-step-pod": "true",
-            },
-        },
-        "resource": {
-            "action": "create",
-            # Ensure the argo pod waits for the jobset to complete or fail
-            "successCondition": "status.terminalState == Completed",
-            "failureCondition": "status.terminalState == Failed",
-            "manifest": yaml.safe_dump(js_manifest),
-            "setOwnerReference": True,  # Ensure kubernetes cleans this up when deleting the argo workflow
-        },
+        "jobset_name": js_name,
+        "jobset_yaml": js_yaml,
     }
 
-    return manifest
 
-
-def _create_dag_step(step_config: StepConfig) -> dict:
-    out = {
+def _create_dag_task(step_config: StepConfig) -> dict:
+    return {
         "name": step_config.name,
-        "template": step_config.name,
+        "dependencies": step_config.depends_on or [],
     }
-    if step_config.depends_on:
-        out["dependencies"] = step_config.depends_on
-    return out
 
 
 def _create_workflow_secrets(config: WorkflowConfig, workflow_name: str, s3_creds: dict) -> list[dict]:
@@ -162,7 +141,7 @@ def _create_workflow_manifest(
     config: WorkflowConfig, s3_creds, job_info: JobInfo, interactive: bool, assets_path: Path
 ) -> tuple[dict, str]:
     """
-    Create the overal workflow manifest from the WorkflowConfig
+    Create the overall workflow manifest from the WorkflowConfig.
     """
 
     workflow_name = f"{job_info['id']}"
@@ -175,7 +154,7 @@ def _create_workflow_manifest(
             raise ValueError("Interactive jobs may only have a single step")
 
     # Create step manifests. These are the full definitions of each step.
-    step_manifests = [
+    steps = [
         _create_step_manifest(
             workflow_config=config,
             step_index=i,
@@ -188,42 +167,22 @@ def _create_workflow_manifest(
         for i in range(len(config.steps))
     ]
 
-    # Create dag steps. This is basically just the step name and its dependencies
-    dag_steps = [_create_dag_step(step_config) for step_config in config.steps]
-
-    manifest = {
-        "apiVersion": "argoproj.io/v1alpha1",
-        "kind": "Workflow",
-        "metadata": {
-            "name": workflow_name,
-            "labels": {
-                "seekr-chain/job-id": job_info["id"],
-                "seekr-chain/job-name": config.name[:63],
-                "seekr-chain/user": os.environ.get("USER", "unknown")[:63],
-            },
-            "annotations": {
-                "seekr-chain/datastore-root": datastore_root,
-            },
-        },
-        "spec": {
-            "entrypoint": "seekr-chain-main",
-            "ttlStrategy": {"secondsAfterCompletion": int(config.ttl.total_seconds())},
-            "volumeClaimGC": {"strategy": "onWorkflowCompletion"},
-            "volumes": [{"name": "workspace", "emptyDir": {}}],
-            "templates": [
-                {
-                    "name": "seekr-chain-main",
-                    "dag": {
-                        "tasks": dag_steps,
-                    },
-                },
-            ]
-            + step_manifests,
-        },
+    # Create dag tasks. This is basically just the step name and its dependencies
+    context = {
+        "workflow_name": workflow_name,
+        "job_id": job_info["id"],
+        "job_name": config.name[:63],
+        "user": os.environ.get("USER", "unknown")[:63],
+        "datastore_root": datastore_root,
+        "ttl_seconds": int(config.ttl.total_seconds()),
+        "dag_tasks": [_create_dag_task(step_config) for step_config in config.steps],
+        "steps": steps,
     }
 
-    logger.debug(f"Workflow manifest:\n\n{yaml.dump(manifest, default_flow_style=False, Dumper=LiteralSafeDumper)}\n")
+    rendered = render.render("workflow.yaml.j2", context)
+    logger.debug(f"Workflow manifest:\n\n{rendered}\n")
 
+    manifest = yaml.safe_load(rendered)
     return manifest, workflow_name
 
 
@@ -326,7 +285,7 @@ def _generate_job_info(s3_client: BaseClient, datastore_root: str = None) -> Job
     s3_utils.touch(job_info["remote_sentinel"], s3_client)
     with tempfile.NamedTemporaryFile() as tmpfile:
         with open(tmpfile.name, "w") as f:
-            f.write(__version__)
+            f.write(DATA_SCHEMA_VERSION)
         s3_utils.upload_file(tmpfile.name, job_info["remote_version_path"], s3_client)
     return job_info
 
