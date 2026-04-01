@@ -243,8 +243,7 @@ def _build_role_context(
         "remote_md_path": remote_md_path,
         "role_asset_path": str(role_asset_path),
         "init_upload_md_cmd": (
-            f'printf \'{{"pod_name":"%s"}}\' $SEEKR_CHAIN_POD_INSTANCE_ID'
-            f" | aws s3 cp - {remote_md_path}"
+            f'printf \'{{"pod_name":"%s"}}\' $SEEKR_CHAIN_POD_INSTANCE_ID | aws s3 cp - {remote_md_path}'
         ),
         # Log sidecar
         "log_sidecar_image": resolve_image("fluent/fluent-bit:2.2-debug"),

@@ -1,16 +1,11 @@
 """Tests for Jinja2 template rendering of Argo/JobSet manifests."""
 
-import tempfile
-from pathlib import Path
-
-import pytest
 import yaml
 
 from seekr_chain.backends.argo import render
 from seekr_chain.backends.argo.job_info import get_job_info
 from seekr_chain.backends.argo.jobset import build_jobset_context
 from seekr_chain.config import WorkflowConfig
-
 
 DATASTORE_ROOT = "s3://test-bucket/seekr-chain/"
 
@@ -154,7 +149,9 @@ class TestJobsetTemplateRendering:
             step_index=0,
             job_info=job_info,
             workflow_name="ab1234",
-            workflow_secrets=[{"name": "MY_SECRET", "valueFrom": {"secretKeyRef": {"name": "ab1234", "key": "MY_SECRET"}}}],
+            workflow_secrets=[
+                {"name": "MY_SECRET", "valueFrom": {"secretKeyRef": {"name": "ab1234", "key": "MY_SECRET"}}}
+            ],
             interactive=False,
             assets_path=tmp_path / "assets",
         )

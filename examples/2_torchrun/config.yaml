@@ -7,9 +7,9 @@ steps:
   - name: "step"
     image: "rocm/pytorch:rocm7.2_ubuntu24.04_py3.12_pytorch_release_2.7.1"
     resources:
-      cpus_per_node: "AUTO" # When requesting GPUs, setting CPU/Mem to AUTO will automatically request 1/8th of a node of CPU/Mem per GPU
-      mem_per_node: "AUTO"
-      ephemeral_storage_per_node: "AUTO"
+      cpus_per_node: 64
+      mem_per_node: "512Gi"
+      ephemeral_storage_per_node: "200Gi"
       gpus_per_node: 8
       gpu_type: "amd.com/gpu"
     script: |

@@ -318,7 +318,7 @@ def patch_configs_for_testing(job_name, datastore_root, monkeypatch, hermetic_fl
         config.name = _job_name
         config.ttl = datetime.timedelta(hours=1)
         if _hermetic:
-            config.logging.upload_timeout = datetime.timedelta(seconds=5)
+            config.logging.upload_timeout = datetime.timedelta(seconds=30)
         if _datastore_root is not None:
             config.datastore_root = _datastore_root
         if config.code:

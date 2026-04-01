@@ -14,11 +14,11 @@ import yaml
 from botocore.client import BaseClient
 
 from seekr_chain import WorkflowConfig, k8s_utils, s3_utils, utils
-from seekr_chain.backends.argo.parse_logs import DATA_SCHEMA_VERSION
 from seekr_chain.backends.argo import render
 from seekr_chain.backends.argo.argo_workflow import ArgoWorkflow
 from seekr_chain.backends.argo.job_info import JobInfo, get_job_info
 from seekr_chain.backends.argo.jobset import create_jobset_manifest
+from seekr_chain.backends.argo.parse_logs import DATA_SCHEMA_VERSION
 from seekr_chain.config import StepConfig
 from seekr_chain.symlink import symlink
 from seekr_chain.tar_directory import tar_directory

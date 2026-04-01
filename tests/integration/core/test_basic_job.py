@@ -374,7 +374,7 @@ class TestBasic:
                 "steps": [
                     {
                         "name": "step",
-                        "image": "python:3.11",
+                        "image": "python:3.12-alpine",
                         "script": "python3 -c 'import os, json, sys; print(f\"DATA: {json.dumps(dict(os.environ))}\")'",
                     }
                 ],
@@ -565,6 +565,11 @@ class TestBasic:
 
 
 class TestAffinity:
+    @pytest.fixture(autouse=True)
+    def require_two_worker_nodes(self, cpu_nodes):
+        if len(cpu_nodes) < 2:
+            pytest.skip("requires 2+ worker nodes")
+
     def test_node_include(self, cpu_nodes, v1_api):
         target = cpu_nodes[0]
         config = seekr_chain.WorkflowConfig.model_validate(
@@ -647,7 +652,7 @@ class TestCodeUpload:
                 "steps": [
                     {
                         "name": "step",
-                        "image": "python:3.12",
+                        "image": "python:3.12-alpine",
                         "script": """
                             pwd
                             ls
@@ -891,7 +896,7 @@ class TestCodeUpload:
                 "steps": [
                     {
                         "name": "step",
-                        "image": "python:3.12",
+                        "image": "python:3.12-alpine",
                         "script": """
                             pwd
                             python print_contents.py

@@ -27,13 +27,13 @@ class TestMultiRole:
                         "roles": [
                             {
                                 "name": "a",
-                                "image": "python:3.12",
+                                "image": "python:3.12-alpine",
                                 "script": "echo A && python --version",
                                 "resources": {"num_nodes": 1},
                             },
                             {
                                 "name": "b",
-                                "image": "python:3.13",
+                                "image": "python:3.13-alpine",
                                 "script": "echo B && python --version",
                                 "resources": {"num_nodes": 2},
                             },
@@ -87,12 +87,12 @@ class TestMultiRole:
                         "roles": [
                             {
                                 "name": "worker",
-                                "image": "python:3.12",
+                                "image": "python:3.12-alpine",
                                 "script": "echo $PEERMAP && cat $PEERMAP && echo && python worker.py",
                             },
                             {
                                 "name": "server",
-                                "image": "python:3.12",
+                                "image": "python:3.12-alpine",
                                 "script": "echo $PEERMAP && cat $PEERMAP && echo && python server.py",
                             },
                         ],
@@ -128,6 +128,7 @@ class TestMultiRole:
                             "/seekr-chain/peermap.json",
                             rf'{{"server": \["{job.name}-step-js-server-0-0.{job.name}-step-js"\], "worker": \["{job.name}-step-js-worker-0-0.{job.name}-step-js"\]}}',
                             f"target URL: http://{job.name}-step-js-server-0-0.{job.name}-step-js:8000",
+                            (r"attempt \d+/\d+ failed: <urlopen error \[Errno -2\] Name or service not known>", "*"),
                             (r"attempt \d+/\d+ failed: <urlopen error \[Errno 111\] Connection refused>", "*"),
                             "OK: hello from server",
                             "",

@@ -21,10 +21,9 @@ _CI_JOB_ID = os.environ.get("CI_JOB_ID", "")
 _CLUSTER_SUFFIX = f"-{_CI_JOB_ID}" if _CI_JOB_ID else ""
 _IN_CI = bool(os.environ.get("CI"))
 
-# In CI, use podman to avoid hitting the host Docker socket.
-# Locally, prefer docker (matches k3d's network namespace on macOS/Docker Desktop);
-# fall back to podman if docker is absent.
-_RUNTIME = "podman" if _IN_CI else ("docker" if shutil.which("docker") else "podman")
+# MinIO must join the k3d Docker network, so use docker when available.
+# Fall back to podman only if docker is not installed.
+_RUNTIME = "docker" if shutil.which("docker") else "podman"
 
 MINIO_CONTAINER_NAME = f"seekr-hermetic{_CLUSTER_SUFFIX}-minio"
 MINIO_IMAGE = "quay.io/minio/minio:RELEASE.2025-01-20T14-49-07Z"
