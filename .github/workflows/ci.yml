@@ -50,6 +50,6 @@ jobs:
           DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
           DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
         run: |
-          export RUN_TESTS="uv run pytest tests -v -n 2 --durations=10 -s"
+          export RUN_TESTS="uv run pytest tests -v -n 4 --durations=10 -s"
           $RUN_TESTS || true
           $RUN_TESTS --last-failed --last-failed-no-failures=none || [ $? -eq 5 ]
