@@ -26,6 +26,7 @@ dependencies = [
     "kubernetes>=32.0.1",
     "loggerado>=0.3.0",
     "pydantic>=2.11.5",
+    "python-dotenv>=1.0.0",
     "rich>=14.0.0",
 ]
 

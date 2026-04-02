@@ -267,8 +267,6 @@ class WorkflowConfig(BaseModel):
     name : Workflow name (must be DNS-compliant)
     namespace : Kubernetes namespace for the Argo workflow
     code : Local code directory to upload into job containers
-    datastore_root : S3 root path for workflow assets (e.g. ``s3://my-bucket/seekr-chain/``).
-        Can also be set via ``SEEKRCHAIN_DATASTORE_ROOT`` env var.
     ttl : Time-to-live after completion before automatic cleanup
     steps : List of workflow steps
     secrets : Secrets injected as environment variables in each step
@@ -280,7 +278,6 @@ class WorkflowConfig(BaseModel):
     name: str
     namespace: Optional[str] = "argo"
     code: Optional[CodeConfig] = None
-    datastore_root: Optional[str] = None
     ttl: datetime.timedelta = datetime.timedelta(days=7)
     steps: list[StepConfig]
     secrets: Optional[dict[str, str]] = None

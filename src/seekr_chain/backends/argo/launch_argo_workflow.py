@@ -16,7 +16,7 @@ from botocore.client import BaseClient
 from seekr_chain import WorkflowConfig, k8s_utils, s3_utils, utils
 from seekr_chain.backends.argo import render
 from seekr_chain.backends.argo.argo_workflow import ArgoWorkflow
-from seekr_chain.backends.argo.job_info import JobInfo, get_job_info
+from seekr_chain.backends.argo.job_info import JobInfo, _resolve_datastore_root, get_job_info
 from seekr_chain.backends.argo.jobset import create_jobset_manifest
 from seekr_chain.backends.argo.parse_logs import DATA_SCHEMA_VERSION
 from seekr_chain.config import StepConfig
@@ -145,7 +145,7 @@ def _create_workflow_manifest(
     """
 
     workflow_name = f"{job_info['id']}"
-    datastore_root = config.datastore_root or os.environ.get("SEEKRCHAIN_DATASTORE_ROOT")
+    datastore_root = _resolve_datastore_root()
 
     workflow_secrets = _create_workflow_secrets(config, workflow_name, s3_creds)
 
@@ -308,7 +308,7 @@ def launch_argo_workflow(
 
     s3_client, s3_creds = _get_s3_client_and_creds()
 
-    job_info = _generate_job_info(s3_client, datastore_root=config.datastore_root)
+    job_info = _generate_job_info(s3_client)
 
     with tempfile.TemporaryDirectory() as staging_dir:
         staging_dir = Path(staging_dir)

@@ -1,7 +1,25 @@
 import os
 from typing import TypedDict
 
+import dotenv
+
 from seekr_chain import s3_utils
+
+
+def _resolve_datastore_root() -> str | None:
+    """Resolve the datastore root from the environment or a .env file.
+
+    Resolution order:
+    1. ``SEEKRCHAIN_DATASTORE_ROOT`` environment variable
+    2. ``SEEKRCHAIN_DATASTORE_ROOT`` key in a ``.env`` file (found by walking up from CWD)
+    """
+    value = os.environ.get("SEEKRCHAIN_DATASTORE_ROOT")
+    if value:
+        return value
+    dotenv_path = dotenv.find_dotenv(usecwd=True)
+    if dotenv_path:
+        value = dotenv.dotenv_values(dotenv_path).get("SEEKRCHAIN_DATASTORE_ROOT")
+    return value or None
 
 
 class JobInfo(TypedDict):
@@ -25,13 +43,14 @@ def get_job_info(id: str, datastore_root: str | None = None) -> JobInfo:
                        Falls back to SEEKRCHAIN_DATASTORE_ROOT env var. Required.
     """
     if datastore_root is None:
-        datastore_root = os.environ.get("SEEKRCHAIN_DATASTORE_ROOT")
+        datastore_root = _resolve_datastore_root()
 
     if datastore_root is None:
         raise ValueError(
-            "datastore_root must be specified via WorkflowConfig.datastore_root "
-            "or SEEKRCHAIN_DATASTORE_ROOT environment variable. "
-            "Example: s3://my-bucket/seekr-chain/"
+            "datastore_root could not be determined. "
+            "Set SEEKRCHAIN_DATASTORE_ROOT in your environment or in a .env file. "
+            "Example: SEEKRCHAIN_DATASTORE_ROOT=s3://my-bucket/seekr-chain/\n"
+            "When reconnecting to an existing job, use the same value that was set at submit time."
         )
 
     s3_path = s3_utils.join(datastore_root, "jobs", id[:2], id[2:])
