@@ -2,6 +2,7 @@
 
 import datetime
 import logging
+import os
 import re
 import shutil
 import subprocess
@@ -345,7 +346,7 @@ class ArgoWorkflow(Workflow):
         self._k8s_custom = k8s_utils.get_custom_objects_api()
 
         if namespace is None:
-            _, active_ctx = k8s.config.list_kube_config_contexts()
+            _, active_ctx = k8s.config.list_kube_config_contexts(config_file=os.environ.get("KUBECONFIG"))
             namespace = active_ctx["context"].get("namespace", "default")
         self._namespace = namespace
 

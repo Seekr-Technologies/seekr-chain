@@ -13,7 +13,6 @@ DATASTORE_ROOT = "s3://test-bucket/seekr-chain/"
 def _minimal_config(**kwargs) -> WorkflowConfig:
     defaults = {
         "name": "test-job",
-        "datastore_root": DATASTORE_ROOT,
         "steps": [
             {
                 "name": "train",
