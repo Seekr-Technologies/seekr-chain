@@ -225,7 +225,7 @@ CI will be set up to run unittests on PR
 ### Commit conventions
 
 Releases are triggered automatically on merge to `main`. The version bump is determined
-by the highest-priority conventional commit prefix found in the MR's commits:
+by the highest-priority conventional commit prefix found in the PR's commits:
 
 | Prefix | Bump |
 |--------|------|

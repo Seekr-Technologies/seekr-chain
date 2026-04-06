@@ -8,11 +8,19 @@ It is recommended to install as a dependency in your project environment. You ca
 
     Make sure you have `kubectl` installed and configured for your cluster
 
-## Install from `pip` (Coming soon)
- 
-```
-uv add seekr-chain
-```
+## Install from PyPI
+
+- `uv`
+
+   ```
+   uv add seekr-chain
+   ```
+
+- `pip`
+
+   ```
+   pip install seekr-chain
+   ```
 
 ## Developer Install
 
