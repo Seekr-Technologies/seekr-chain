@@ -26,7 +26,7 @@ On job launch, {{package}} will:
     
     When using secrets, it is recommended to dynamically generate your configuration usign the Python API.
     
-    Support for securely loading secrets from your environment or other sources is comming soon.
+    Support for securely loading secrets from your environment or other sources is coming soon.
 
 ## Secret Lifecycle Management
 
@@ -35,4 +35,4 @@ On job launch, {{package}} will:
 
 ## Using cluster secrets
 
-Access to cluster secrets comming soon
+Access to cluster secrets coming soon

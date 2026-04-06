@@ -169,8 +169,8 @@ When requesting features:
 
 ## Release Process
 
-Releases are triggered automatically when an MR is merged into `main`. The version bump is
-determined by scanning all commit messages in the MR for conventional commit prefixes:
+Releases are triggered automatically when a PR is merged into `main`. The version bump is
+determined by scanning all commit messages in the PR for conventional commit prefixes:
 
 | Prefix | Bump | Examples |
 |--------|------|---------|
@@ -178,12 +178,12 @@ determined by scanning all commit messages in the MR for conventional commit pre
 | `feat:` | **minor** | `feat: add new command` |
 | `fix:`, `perf:`, `refactor:`, `revert:`, `test:` | **patch** | `fix: handle empty input` |
 | `ci:`, `chore:`, `docs:`, `style:`, `build:` | **skip** (no release) | `docs: update readme` |
-| `no-bump:` (MR title only) | **skip** | `no-bump: internal cleanup` |
+| `no-bump:` (PR title only) | **skip** | `no-bump: internal cleanup` |
 
-If no commits use conventional format, the MR title is used as fallback.
+If no commits use conventional format, the PR title is used as fallback.
 The highest bump level across all commits wins.
 
-Before merging, the `preview-release` CI job posts a comment on the MR showing
+Before merging, the `preview-release` CI job posts a comment on the PR showing
 the computed next version and a changelog preview. If the bump is major, the
 `warn-major-bump` job fails visibly as an extra safeguard.
 
