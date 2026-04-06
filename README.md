@@ -1,5 +1,14 @@
 # Seekr Chain
 
+[![PyPI](https://img.shields.io/pypi/v/seekr-chain)](https://pypi.org/project/seekr-chain/)
+[![Python](https://img.shields.io/badge/python-3.12%2B-blue)](https://pypi.org/project/seekr-chain/)
+[![License](https://img.shields.io/badge/license-Apache%202.0-blue)](LICENSE)
+[![OpenSSF Scorecard](https://api.securityscorecards.dev/projects/github.com/Seekr-Technologies/seekr-chain/badge)](https://securityscorecards.dev/viewer/?uri=github.com/Seekr-Technologies/seekr-chain)
+<!-- TODO: switch to dynamic badges once PyPI classifiers propagate and GitHub license detection stabilises:
+[![Python](https://img.shields.io/pypi/pyversions/seekr-chain)](https://pypi.org/project/seekr-chain/)
+[![License](https://img.shields.io/github/license/Seekr-Technologies/seekr-chain)](LICENSE)
+-->
+
 [![Documentation](https://img.shields.io/badge/docs-latest-blue)](https://seekr-technologies.github.io/seekr-chain)
 
 No-nonsense job launcher
