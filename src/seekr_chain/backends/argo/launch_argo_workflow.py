@@ -16,7 +16,7 @@ from botocore.client import BaseClient
 from seekr_chain import WorkflowConfig, k8s_utils, s3_utils, utils
 from seekr_chain.backends.argo import render
 from seekr_chain.backends.argo.argo_workflow import ArgoWorkflow
-from seekr_chain.backends.argo.job_info import JobInfo, get_job_info
+from seekr_chain.backends.argo.job_info import JobInfo, _resolve_datastore_root, get_job_info
 from seekr_chain.backends.argo.jobset import create_jobset_manifest
 from seekr_chain.backends.argo.parse_logs import DATA_SCHEMA_VERSION
 from seekr_chain.config import StepConfig
@@ -138,15 +138,13 @@ def _create_workflow_secrets(config: WorkflowConfig, workflow_name: str, s3_cred
 
 
 def _create_workflow_manifest(
-    config: WorkflowConfig, s3_creds, job_info: JobInfo, interactive: bool, assets_path: Path
+    config: WorkflowConfig, s3_creds, job_info: JobInfo, interactive: bool, assets_path: Path, datastore_root: str
 ) -> tuple[dict, str]:
     """
     Create the overall workflow manifest from the WorkflowConfig.
     """
 
     workflow_name = f"{job_info['id']}"
-    datastore_root = config.datastore_root or os.environ.get("SEEKRCHAIN_DATASTORE_ROOT")
-
     workflow_secrets = _create_workflow_secrets(config, workflow_name, s3_creds)
 
     if interactive:
@@ -308,13 +306,16 @@ def launch_argo_workflow(
 
     s3_client, s3_creds = _get_s3_client_and_creds()
 
-    job_info = _generate_job_info(s3_client, datastore_root=config.datastore_root)
+    datastore_root = _resolve_datastore_root()
+    job_info = _generate_job_info(s3_client, datastore_root=datastore_root)
 
     with tempfile.TemporaryDirectory() as staging_dir:
         staging_dir = Path(staging_dir)
         assets_path = staging_dir / "assets"
 
-        manifest, workflow_name = _create_workflow_manifest(config, s3_creds, job_info, interactive, assets_path)
+        manifest, workflow_name = _create_workflow_manifest(
+            config, s3_creds, job_info, interactive, assets_path, datastore_root=datastore_root
+        )
 
         _package_assets(config, args, s3_client, job_info, staging_dir)
 

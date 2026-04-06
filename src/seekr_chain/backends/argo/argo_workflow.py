@@ -2,6 +2,7 @@
 
 import datetime
 import logging
+import os
 import re
 import shutil
 import subprocess
@@ -12,6 +13,7 @@ from typing import Optional
 
 import boto3
 import kubernetes as k8s
+from kubernetes.client.rest import ApiException
 from rich.console import Console
 from rich.text import Text
 
@@ -344,18 +346,23 @@ class ArgoWorkflow(Workflow):
         self._k8s_custom = k8s_utils.get_custom_objects_api()
 
         if namespace is None:
-            _, active_ctx = k8s.config.list_kube_config_contexts()
+            _, active_ctx = k8s.config.list_kube_config_contexts(config_file=os.environ.get("KUBECONFIG"))
             namespace = active_ctx["context"].get("namespace", "default")
         self._namespace = namespace
 
-        workflow_obj = self._k8s_custom.get_namespaced_custom_object(
-            group="argoproj.io",
-            version="v1alpha1",
-            plural="workflows",
-            namespace=self._namespace,
-            name=self._id,
-        )
-        datastore_root = workflow_obj["metadata"]["annotations"]["seekr-chain/datastore-root"]
+        datastore_root = None
+        try:
+            workflow_obj = self._k8s_custom.get_namespaced_custom_object(
+                group="argoproj.io",
+                version="v1alpha1",
+                plural="workflows",
+                namespace=self._namespace,
+                name=self._id,
+            )
+            datastore_root = workflow_obj["metadata"]["annotations"].get("seekr-chain/datastore-root")
+        except ApiException as e:
+            if e.status != 404:
+                raise
         self._job_info: JobInfo = get_job_info(self._id, datastore_root=datastore_root)
 
     @property
