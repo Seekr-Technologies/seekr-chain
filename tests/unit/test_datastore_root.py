@@ -6,49 +6,21 @@ import pytest
 from kubernetes.client.rest import ApiException
 
 from seekr_chain.backends.argo.argo_workflow import ArgoWorkflow
-from seekr_chain.backends.argo.job_info import _resolve_datastore_root, get_job_info
-
-
-class TestResolveDatastoreRoot:
-    def test_env_var(self, monkeypatch):
-        monkeypatch.setenv("SEEKRCHAIN_DATASTORE_ROOT", "s3://bucket/prefix/")
-        assert _resolve_datastore_root() == "s3://bucket/prefix/"
-
-    def test_dotenv_file(self, monkeypatch, tmp_path):
-        monkeypatch.delenv("SEEKRCHAIN_DATASTORE_ROOT", raising=False)
-        dotenv_file = tmp_path / ".env"
-        dotenv_file.write_text("SEEKRCHAIN_DATASTORE_ROOT=s3://from-dotenv/\n")
-        # find_dotenv walks from CWD; patch it to return our tmp file
-        with patch("dotenv.find_dotenv", return_value=str(dotenv_file)):
-            result = _resolve_datastore_root()
-        assert result == "s3://from-dotenv/"
-
-    def test_env_var_takes_precedence_over_dotenv(self, monkeypatch, tmp_path):
-        monkeypatch.setenv("SEEKRCHAIN_DATASTORE_ROOT", "s3://from-env/")
-        dotenv_file = tmp_path / ".env"
-        dotenv_file.write_text("SEEKRCHAIN_DATASTORE_ROOT=s3://from-dotenv/\n")
-        with patch("dotenv.find_dotenv", return_value=str(dotenv_file)):
-            result = _resolve_datastore_root()
-        assert result == "s3://from-env/"
-
-    def test_returns_none_when_nothing_set(self, monkeypatch):
-        monkeypatch.delenv("SEEKRCHAIN_DATASTORE_ROOT", raising=False)
-        with patch("dotenv.find_dotenv", return_value=""):
-            result = _resolve_datastore_root()
-        assert result is None
+from seekr_chain.backends.argo.job_info import get_job_info
+from tests.unit.conftest import no_dotenv, no_toml_files
 
 
 class TestGetJobInfoError:
     def test_error_message_mentions_env_var(self, monkeypatch):
         monkeypatch.delenv("SEEKRCHAIN_DATASTORE_ROOT", raising=False)
-        with patch("dotenv.find_dotenv", return_value=""):
+        with no_dotenv(), no_toml_files():
             with pytest.raises(ValueError, match="SEEKRCHAIN_DATASTORE_ROOT"):
                 get_job_info("some-id")
 
-    def test_error_message_mentions_dotenv(self, monkeypatch):
+    def test_error_message_mentions_seekrchain_toml(self, monkeypatch):
         monkeypatch.delenv("SEEKRCHAIN_DATASTORE_ROOT", raising=False)
-        with patch("dotenv.find_dotenv", return_value=""):
-            with pytest.raises(ValueError, match=r"\.env"):
+        with no_dotenv(), no_toml_files():
+            with pytest.raises(ValueError, match=r"\.seekrchain\.toml"):
                 get_job_info("some-id")
 
 
@@ -81,33 +53,33 @@ class TestArgoWorkflowReconnect:
 
     def test_k8s_404_falls_back_to_env_var(self, monkeypatch):
         monkeypatch.setenv("SEEKRCHAIN_DATASTORE_ROOT", "s3://bucket/seekr-chain/")
-        with patch("dotenv.find_dotenv", return_value=""):
+        with no_dotenv(), no_toml_files():
             workflow = self._make_workflow(k8s_status=404)
         assert workflow._job_info is not None
         assert "s3://bucket/seekr-chain/" in workflow._job_info["s3_path"]
 
     def test_k8s_404_no_env_var_raises(self, monkeypatch):
         monkeypatch.delenv("SEEKRCHAIN_DATASTORE_ROOT", raising=False)
-        with patch("dotenv.find_dotenv", return_value=""):
+        with no_dotenv(), no_toml_files():
             with pytest.raises(ValueError, match="SEEKRCHAIN_DATASTORE_ROOT"):
                 self._make_workflow(k8s_status=404)
 
     def test_annotation_missing_on_live_workflow_falls_back_to_env_var(self, monkeypatch):
         """Pre-annotation workflow: annotation key absent, env var present."""
         monkeypatch.setenv("SEEKRCHAIN_DATASTORE_ROOT", "s3://bucket/seekr-chain/")
-        with patch("dotenv.find_dotenv", return_value=""):
+        with no_dotenv(), no_toml_files():
             # k8s_status=200 but no datastore_root annotation
             workflow = self._make_workflow(k8s_status=200, datastore_root=None)
         assert workflow._job_info is not None
 
     def test_annotation_present_uses_annotation(self, monkeypatch):
         monkeypatch.delenv("SEEKRCHAIN_DATASTORE_ROOT", raising=False)
-        with patch("dotenv.find_dotenv", return_value=""):
+        with no_dotenv(), no_toml_files():
             workflow = self._make_workflow(k8s_status=200, datastore_root="s3://anno-bucket/")
         assert "s3://anno-bucket/" in workflow._job_info["s3_path"]
 
     def test_non_404_k8s_error_propagates(self, monkeypatch):
         monkeypatch.setenv("SEEKRCHAIN_DATASTORE_ROOT", "s3://bucket/")
-        with patch("dotenv.find_dotenv", return_value=""):
+        with no_dotenv(), no_toml_files():
             with pytest.raises(ApiException):
                 self._make_workflow(k8s_status=500)
