@@ -2,8 +2,6 @@
 
 from unittest.mock import patch
 
-import pytest
-
 from seekr_chain.user_config import _load_config
 from tests.unit.conftest import no_dotenv, no_toml_files
 

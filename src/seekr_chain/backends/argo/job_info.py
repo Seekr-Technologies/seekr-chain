@@ -46,7 +46,7 @@ def get_job_info(id: str, datastore_root: str | None = None) -> JobInfo:
             "  2. Add to .env file (local overrides, gitignored)\n"
             "  3. Add to .seekrchain.toml in your project root (committed team default)\n"
             "  4. Add to ~/.seekrchain.toml (personal global default)\n"
-            "Example: datastore_root = \"s3://my-bucket/seekr-chain/\"\n"
+            'Example: datastore_root = "s3://my-bucket/seekr-chain/"\n'
             "When reconnecting to an existing job, use the same value that was set at submit time."
         )
 
