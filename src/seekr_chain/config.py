@@ -1,52 +1,83 @@
 #!/usr/bin/env python3
 
 import datetime
+import warnings
 from enum import Enum
-from typing import Literal, Optional, Self, Union
+from typing import Annotated, Literal, Optional, Self, Union
 
 import pydantic
-from pydantic import Field
+from pydantic import Field, field_validator, model_validator
 
 
 class BaseModel(pydantic.BaseModel):
     model_config = pydantic.ConfigDict(extra="forbid")
 
 
-class AffinityConfig(BaseModel):
-    """Node affinity rules for scheduling.
+class NodeAffinityRule(BaseModel):
+    """Schedule based on node properties (hostname or labels).
 
     Parameters
     ----------
-    nodes : Filter by node hostname
-    labels : Filter by node labels
+    type : Discriminator — always ``"NODE"``.
+    direction : ``"ATTRACT"`` schedules on matching nodes; ``"REPEL"`` avoids them.
+    hostnames : Match against ``kubernetes.io/hostname``.
+    labels : Match against arbitrary node labels (key → allowed values).
+    required : ``True`` (default) = hard constraint; ``False`` = soft preference.
     """
 
-    class Nodes(BaseModel):
-        """Filter by node hostname.
+    type: Literal["NODE"]
+    direction: Literal["ATTRACT", "REPEL"] = "ATTRACT"
+    hostnames: Optional[list[str]] = None
+    labels: Optional[dict[str, list[str]]] = None
+    required: bool = True
 
-        Parameters
-        ----------
-        include_hostnames : Only schedule on these nodes
-        exclude_hostnames : Never schedule on these nodes
-        """
+    @model_validator(mode="after")
+    def _check_has_criteria(self) -> Self:
+        if not self.hostnames and not self.labels:
+            raise ValueError("node rule must specify at least one of: hostnames, labels")
+        return self
 
-        include_hostnames: Optional[list[str]] = None
-        exclude_hostnames: Optional[list[str]] = None
 
-    class Labels(BaseModel):
-        """Filter by node labels.
+class PodAffinityRule(BaseModel):
+    """Schedule based on where other pods in a named group are running.
 
-        Parameters
-        ----------
-        include : Node labels to require (key -> allowed values)
-        exclude : Node labels to avoid (key -> excluded values)
-        """
+    Parameters
+    ----------
+    type : Discriminator — always ``"POD"``.
+    direction : ``"ATTRACT"`` co-locates with the group; ``"REPEL"`` avoids nodes
+                where the group is running.
+    group : Shared identifier. All jobs submitted with the same group value carry
+            the label ``seekr-chain/pg.<group>: "true"`` on their pods.
+    required : ``False`` (default) = soft preference; ``True`` = hard constraint.
 
-        include: Optional[dict[str, list[str]]] = None
-        exclude: Optional[dict[str, list[str]]] = None
+    .. warning::
+       ``direction="ATTRACT"`` with ``required=True`` will deadlock on a fresh
+       submission — no nodes satisfy the constraint until at least one pod from
+       the group is already running.  Use ``required=False`` (the default) unless
+       you are adding jobs to an already-running group.
+    """
 
-    nodes: Optional[Nodes] = None
-    labels: Optional[Labels] = None
+    type: Literal["POD"]
+    direction: Literal["ATTRACT", "REPEL"] = "ATTRACT"
+    group: str
+    required: bool = False
+
+    @model_validator(mode="after")
+    def _warn_attract_required(self) -> Self:
+        if self.direction == "ATTRACT" and self.required:
+            warnings.warn(
+                "pod affinity with direction='attract' and required=True will deadlock "
+                "if no pods with this group are already running. Consider required=False.",
+                UserWarning,
+                stacklevel=2,
+            )
+        return self
+
+
+AffinityRule = Annotated[
+    Union[NodeAffinityRule, PodAffinityRule],
+    Field(discriminator="type"),
+]
 
 
 class GPUType(str, Enum):
@@ -271,7 +302,7 @@ class WorkflowConfig(BaseModel):
     steps : List of workflow steps
     secrets : Secrets injected as environment variables in each step
     env : Global environment variables for all steps
-    affinity : Node affinity rules for scheduling
+    affinity : Scheduling rules — list of node and pod affinity/anti-affinity rules
     logging : Log collection settings
     """
 
@@ -282,8 +313,40 @@ class WorkflowConfig(BaseModel):
     steps: list[StepConfig]
     secrets: Optional[dict[str, str]] = None
     env: Optional[dict[str, str]] = None
-    affinity: Optional[AffinityConfig] = None
+    affinity: Optional[list[AffinityRule]] = None
     logging: LoggingConfig = LoggingConfig()
+
+    @field_validator("affinity", mode="before")
+    @classmethod
+    def _coerce_legacy_affinity(cls, v):
+        """Accept the old dict-shaped AffinityConfig and convert to a rule list."""
+        if v is None or isinstance(v, list):
+            return v
+        if not isinstance(v, dict):
+            return v  # let pydantic raise the type error
+
+        rules = []
+        nodes = v.get("nodes") or {}
+        if inc := nodes.get("include_hostnames"):
+            rules.append({"type": "NODE", "direction": "ATTRACT", "hostnames": inc})
+        if exc := nodes.get("exclude_hostnames"):
+            rules.append({"type": "NODE", "direction": "REPEL", "hostnames": exc})
+
+        labels = v.get("labels") or {}
+        if inc := labels.get("include"):
+            rules.append({"type": "NODE", "direction": "ATTRACT", "labels": inc})
+        if exc := labels.get("exclude"):
+            rules.append({"type": "NODE", "direction": "REPEL", "labels": exc})
+
+        if pack := v.get("pack"):
+            rules.append({
+                "type": "POD",
+                "direction": "ATTRACT",
+                "group": pack["group"],
+                "required": pack.get("required", False),
+            })
+
+        return rules or None
 
     @pydantic.model_validator(mode="after")
     def check_depends_on(self) -> Self:

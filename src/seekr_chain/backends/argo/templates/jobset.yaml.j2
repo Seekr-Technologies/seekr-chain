@@ -37,6 +37,9 @@ spec:
               seekr-chain/role: {{ role.name }}
               seekr-chain/job-id: {{ job_id }}
               seekr-chain/step: {{ step_name }}
+              {% for group in pack_groups %}
+              seekr-chain/pg.{{ group }}: "true"
+              {% endfor %}
           spec:
             restartPolicy: Never
             hostNetwork: true
@@ -243,19 +246,93 @@ spec:
             {% endfor %}
             {% if affinity %}
             affinity:
+              {% if 'nodeAffinity' in affinity %}
               nodeAffinity:
+                {% if 'requiredDuringSchedulingIgnoredDuringExecution' in affinity['nodeAffinity'] %}
                 requiredDuringSchedulingIgnoredDuringExecution:
                   nodeSelectorTerms:
-                  {% for term in affinity.nodeAffinity.requiredDuringSchedulingIgnoredDuringExecution.nodeSelectorTerms %}
+                  {% for term in affinity['nodeAffinity']['requiredDuringSchedulingIgnoredDuringExecution']['nodeSelectorTerms'] %}
                   - matchExpressions:
-                    {% for expr in term.matchExpressions %}
-                    - key: {{ expr.key }}
-                      operator: {{ expr.operator }}
+                    {% for expr in term['matchExpressions'] %}
+                    - key: {{ expr['key'] }}
+                      operator: {{ expr['operator'] }}
                       values:
                       {% for v in expr['values'] %}
-                      - {{ v }}
+                      - {{ v | tojson }}
                       {% endfor %}
                     {% endfor %}
                   {% endfor %}
+                {% endif %}
+                {% if 'preferredDuringSchedulingIgnoredDuringExecution' in affinity['nodeAffinity'] %}
+                preferredDuringSchedulingIgnoredDuringExecution:
+                {% for item in affinity['nodeAffinity']['preferredDuringSchedulingIgnoredDuringExecution'] %}
+                - weight: {{ item['weight'] }}
+                  preference:
+                    matchExpressions:
+                    {% for expr in item['preference']['matchExpressions'] %}
+                    - key: {{ expr['key'] }}
+                      operator: {{ expr['operator'] }}
+                      values:
+                      {% for v in expr['values'] %}
+                      - {{ v | tojson }}
+                      {% endfor %}
+                    {% endfor %}
+                {% endfor %}
+                {% endif %}
+              {% endif %}
+              {% if 'podAffinity' in affinity %}
+              podAffinity:
+                {% if 'preferredDuringSchedulingIgnoredDuringExecution' in affinity['podAffinity'] %}
+                preferredDuringSchedulingIgnoredDuringExecution:
+                {% for item in affinity['podAffinity']['preferredDuringSchedulingIgnoredDuringExecution'] %}
+                - weight: {{ item['weight'] }}
+                  podAffinityTerm:
+                    labelSelector:
+                      matchLabels:
+                        {% for k, v in item['podAffinityTerm']['labelSelector']['matchLabels'].items() %}
+                        {{ k }}: {{ v | tojson }}
+                        {% endfor %}
+                    topologyKey: {{ item['podAffinityTerm']['topologyKey'] }}
+                {% endfor %}
+                {% endif %}
+                {% if 'requiredDuringSchedulingIgnoredDuringExecution' in affinity['podAffinity'] %}
+                requiredDuringSchedulingIgnoredDuringExecution:
+                {% for term in affinity['podAffinity']['requiredDuringSchedulingIgnoredDuringExecution'] %}
+                - labelSelector:
+                    matchLabels:
+                      {% for k, v in term['labelSelector']['matchLabels'].items() %}
+                      {{ k }}: {{ v | tojson }}
+                      {% endfor %}
+                  topologyKey: {{ term['topologyKey'] }}
+                {% endfor %}
+                {% endif %}
+              {% endif %}
+              {% if 'podAntiAffinity' in affinity %}
+              podAntiAffinity:
+                {% if 'preferredDuringSchedulingIgnoredDuringExecution' in affinity['podAntiAffinity'] %}
+                preferredDuringSchedulingIgnoredDuringExecution:
+                {% for item in affinity['podAntiAffinity']['preferredDuringSchedulingIgnoredDuringExecution'] %}
+                - weight: {{ item['weight'] }}
+                  podAffinityTerm:
+                    labelSelector:
+                      matchLabels:
+                        {% for k, v in item['podAffinityTerm']['labelSelector']['matchLabels'].items() %}
+                        {{ k }}: {{ v | tojson }}
+                        {% endfor %}
+                    topologyKey: {{ item['podAffinityTerm']['topologyKey'] }}
+                {% endfor %}
+                {% endif %}
+                {% if 'requiredDuringSchedulingIgnoredDuringExecution' in affinity['podAntiAffinity'] %}
+                requiredDuringSchedulingIgnoredDuringExecution:
+                {% for term in affinity['podAntiAffinity']['requiredDuringSchedulingIgnoredDuringExecution'] %}
+                - labelSelector:
+                    matchLabels:
+                      {% for k, v in term['labelSelector']['matchLabels'].items() %}
+                      {{ k }}: {{ v | tojson }}
+                      {% endfor %}
+                  topologyKey: {{ term['topologyKey'] }}
+                {% endfor %}
+                {% endif %}
+              {% endif %}
             {% endif %}
   {% endfor %}
