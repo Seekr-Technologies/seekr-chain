@@ -464,6 +464,34 @@ class TestAffinityRendering:
             }
         }
 
+    def test_node_attract_labels_multiple_values(self, tmp_path):
+        manifest = self._render(
+            [{"type": "NODE", "direction": "ATTRACT", "labels": {"gpu-type": ["a100", "h100"]}}], tmp_path
+        )
+        assert self._affinity(manifest) == {
+            "nodeAffinity": {
+                "requiredDuringSchedulingIgnoredDuringExecution": {
+                    "nodeSelectorTerms": [
+                        {"matchExpressions": [{"key": "gpu-type", "operator": "In", "values": ["a100", "h100"]}]}
+                    ]
+                }
+            }
+        }
+
+    def test_node_repel_labels_multiple_values(self, tmp_path):
+        manifest = self._render(
+            [{"type": "NODE", "direction": "REPEL", "labels": {"gpu-type": ["a100", "h100"]}}], tmp_path
+        )
+        assert self._affinity(manifest) == {
+            "nodeAffinity": {
+                "requiredDuringSchedulingIgnoredDuringExecution": {
+                    "nodeSelectorTerms": [
+                        {"matchExpressions": [{"key": "gpu-type", "operator": "NotIn", "values": ["a100", "h100"]}]}
+                    ]
+                }
+            }
+        }
+
     def test_node_repel_labels_renders_not_in(self, tmp_path):
         manifest = self._render(
             [{"type": "NODE", "direction": "REPEL", "labels": {"reserved": ["true"]}}], tmp_path
