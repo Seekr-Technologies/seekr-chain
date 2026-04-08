@@ -182,6 +182,27 @@ resources:
 
     If you set `[mem|cpu]_per_node=null`, `chain` will automatically infer and request mem/cpu scaled by amount of mem/cpu available per GPU on your clusters compute nodes.
 
+### Host Networking
+
+`host_network` controls whether pods share the host's network namespace. The default is `AUTO`:
+
+| Value | Behaviour |
+|-------|-----------|
+| `AUTO` (default) | `true` for multi-node steps, `false` for single-node steps |
+| `true` | Always use host networking |
+| `false` | Always use pod networking |
+
+Multi-node jobs need host networking so NCCL can reach InfiniBand or RoCE devices directly. Single-node jobs default to pod networking to avoid port conflicts when sharing a node with other jobs.
+
+Override when you have a specific reason — for example, a single-node job that explicitly needs InfiniBand:
+
+```yaml
+resources:
+  gpus: 4
+  num_nodes: 1
+  host_network: true
+```
+
 ## Best Practices
 
 ### Network Configuration
