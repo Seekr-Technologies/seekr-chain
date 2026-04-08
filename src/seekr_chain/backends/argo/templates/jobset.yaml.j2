@@ -42,8 +42,8 @@ spec:
               {% endfor %}
           spec:
             restartPolicy: Never
-            hostNetwork: true
-            dnsPolicy: ClusterFirstWithHostNet
+            hostNetwork: {{ role.host_network | to_yaml_bool }}
+            dnsPolicy: {{ 'ClusterFirstWithHostNet' if role.host_network else 'ClusterFirst' }}
             terminationGracePeriodSeconds: 30
             initContainers:
             - name: download-assets
