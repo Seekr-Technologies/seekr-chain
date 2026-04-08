@@ -224,10 +224,6 @@ def _build_role_context(
         step_name=step_name,
     )
 
-    host_network = role_config.resources.host_network
-    if host_network == "AUTO":
-        host_network = role_config.resources.num_nodes > 1
-
     return {
         "name": js_pod_name,
         "replicas": role_config.resources.num_nodes,
@@ -237,7 +233,7 @@ def _build_role_context(
         "env": _normalize_env(raw_env),
         "pvcs": pvcs,
         "pvc_mounts": pvc_mounts,
-        "host_network": host_network,
+        "host_network": role_config.resources.host_network,
         "shm_size": role_config.resources.shm_size,
         "shm_unlimited": shm_unlimited,
         "step_args": step_args,

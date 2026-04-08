@@ -73,9 +73,8 @@ class ResourceConfig(BaseModel):
     persistent_volume_claims : PVCs to mount in this step
     shm_size : Shared memory size (e.g. ``"64M"``, ``"8G"``, or ``"UNLIMITED"``)
     security : Security context
-    host_network : Use host networking. ``"AUTO"`` (default) enables host networking for
-        multi-node steps (needed for InfiniBand/RDMA) and disables it for single-node steps
-        (avoids port conflicts when sharing a node).
+    host_network : Use host networking (default: ``false``). Enable for multi-node jobs that
+        need InfiniBand/RDMA and do not have an SR-IOV or RDMA device plugin configured.
     """
 
     class PersistentVolumeClaim(BaseModel):
@@ -109,7 +108,7 @@ class ResourceConfig(BaseModel):
     persistent_volume_claims: Optional[list[PersistentVolumeClaim]] = None
     shm_size: str = "8G"
     security: SecurityContext = SecurityContext()
-    host_network: bool | Literal["AUTO"] = "AUTO"
+    host_network: bool = False
 
 
 class FailurePolicy(BaseModel):

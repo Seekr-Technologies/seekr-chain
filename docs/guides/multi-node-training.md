@@ -184,17 +184,9 @@ resources:
 
 ### Host Networking
 
-`host_network` controls whether pods share the host's network namespace. The default is `AUTO`:
+`host_network` controls whether pods share the host's network namespace. It defaults to `false`.
 
-| Value | Behaviour |
-|-------|-----------|
-| `AUTO` (default) | `true` for multi-node steps, `false` for single-node steps |
-| `true` | Always use host networking |
-| `false` | Always use pod networking |
-
-Multi-node jobs need host networking so NCCL can reach InfiniBand or RoCE devices directly. Single-node jobs default to pod networking to avoid port conflicts when sharing a node with other jobs.
-
-Override when you have a specific reason — for example, a single-node job that explicitly needs InfiniBand:
+Enable it when your job needs direct access to InfiniBand or RoCE devices for high-bandwidth cross-node communication (e.g. NCCL collective ops during distributed training) and your cluster does not have an SR-IOV or RDMA device plugin configured:
 
 ```yaml
 resources:
