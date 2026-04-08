@@ -276,18 +276,22 @@ def _build_affinity(workflow_config) -> tuple[dict | None, list[str]]:
             expressions = []
             if rule.hostnames:
                 if rule.direction == "ATTRACT":
-                    expressions.append({
-                        "key": "kubernetes.io/hostname",
-                        "operator": "In",
-                        "values": list(rule.hostnames),
-                    })
+                    expressions.append(
+                        {
+                            "key": "kubernetes.io/hostname",
+                            "operator": "In",
+                            "values": list(rule.hostnames),
+                        }
+                    )
                 else:
                     for hostname in rule.hostnames:
-                        expressions.append({
-                            "key": "kubernetes.io/hostname",
-                            "operator": "NotIn",
-                            "values": [hostname],
-                        })
+                        expressions.append(
+                            {
+                                "key": "kubernetes.io/hostname",
+                                "operator": "NotIn",
+                                "values": [hostname],
+                            }
+                        )
             if rule.labels:
                 op = "In" if rule.direction == "ATTRACT" else "NotIn"
                 for key, values in rule.labels.items():
@@ -323,9 +327,7 @@ def _build_affinity(workflow_config) -> tuple[dict | None, list[str]]:
     if node_required_terms or node_preferred_terms:
         node_affinity = {}
         if node_required_terms:
-            node_affinity["requiredDuringSchedulingIgnoredDuringExecution"] = {
-                "nodeSelectorTerms": node_required_terms
-            }
+            node_affinity["requiredDuringSchedulingIgnoredDuringExecution"] = {"nodeSelectorTerms": node_required_terms}
         if node_preferred_terms:
             node_affinity["preferredDuringSchedulingIgnoredDuringExecution"] = node_preferred_terms
         affinity["nodeAffinity"] = node_affinity

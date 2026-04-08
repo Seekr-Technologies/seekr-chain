@@ -339,12 +339,14 @@ class WorkflowConfig(BaseModel):
             rules.append({"type": "NODE", "direction": "REPEL", "labels": exc})
 
         if pack := v.get("pack"):
-            rules.append({
-                "type": "POD",
-                "direction": "ATTRACT",
-                "group": pack["group"],
-                "required": pack.get("required", False),
-            })
+            rules.append(
+                {
+                    "type": "POD",
+                    "direction": "ATTRACT",
+                    "group": pack["group"],
+                    "required": pack.get("required", False),
+                }
+            )
 
         return rules or None
 
