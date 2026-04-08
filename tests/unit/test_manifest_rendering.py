@@ -250,6 +250,100 @@ class TestJobsetTemplateRendering:
         main_container = next(c for c in pod_spec["containers"] if c["name"] == "main")
         assert "sleep" in main_container["args"][0]
 
+    def test_single_node_host_network_defaults_false(self, tmp_path):
+        """Single-node jobs (AUTO) should not use host networking."""
+        config = _minimal_config()
+        job_info = _fake_job_info()
+
+        _, context = build_jobset_context(
+            workflow_config=config,
+            step_index=0,
+            job_info=job_info,
+            workflow_name="ab1234",
+            workflow_secrets=[],
+            interactive=False,
+            assets_path=tmp_path / "assets",
+        )
+
+        rendered = render.render("jobset.yaml.j2", context)
+        manifest = yaml.safe_load(rendered)
+
+        pod_spec = manifest["spec"]["replicatedJobs"][0]["template"]["spec"]["template"]["spec"]
+        assert pod_spec["hostNetwork"] is False
+        assert pod_spec["dnsPolicy"] == "ClusterFirst"
+
+    def test_multi_node_host_network_defaults_true(self, tmp_path):
+        """Multi-node jobs (AUTO) should use host networking for InfiniBand."""
+        config = _minimal_config(
+            steps=[
+                {
+                    "name": "train",
+                    "image": "pytorch:2.0",
+                    "script": "echo hello",
+                    "resources": {
+                        "num_nodes": 2,
+                        "cpus_per_node": "4",
+                        "mem_per_node": "8Gi",
+                        "ephemeral_storage_per_node": "10Gi",
+                    },
+                }
+            ]
+        )
+        job_info = _fake_job_info()
+
+        _, context = build_jobset_context(
+            workflow_config=config,
+            step_index=0,
+            job_info=job_info,
+            workflow_name="ab1234",
+            workflow_secrets=[],
+            interactive=False,
+            assets_path=tmp_path / "assets",
+        )
+
+        rendered = render.render("jobset.yaml.j2", context)
+        manifest = yaml.safe_load(rendered)
+
+        pod_spec = manifest["spec"]["replicatedJobs"][0]["template"]["spec"]["template"]["spec"]
+        assert pod_spec["hostNetwork"] is True
+        assert pod_spec["dnsPolicy"] == "ClusterFirstWithHostNet"
+
+    def test_explicit_host_network_override(self, tmp_path):
+        """Explicit host_network: true on a single-node step should be respected."""
+        config = _minimal_config(
+            steps=[
+                {
+                    "name": "train",
+                    "image": "pytorch:2.0",
+                    "script": "echo hello",
+                    "resources": {
+                        "cpus_per_node": "4",
+                        "mem_per_node": "8Gi",
+                        "ephemeral_storage_per_node": "10Gi",
+                        "host_network": True,
+                    },
+                }
+            ]
+        )
+        job_info = _fake_job_info()
+
+        _, context = build_jobset_context(
+            workflow_config=config,
+            step_index=0,
+            job_info=job_info,
+            workflow_name="ab1234",
+            workflow_secrets=[],
+            interactive=False,
+            assets_path=tmp_path / "assets",
+        )
+
+        rendered = render.render("jobset.yaml.j2", context)
+        manifest = yaml.safe_load(rendered)
+
+        pod_spec = manifest["spec"]["replicatedJobs"][0]["template"]["spec"]["template"]["spec"]
+        assert pod_spec["hostNetwork"] is True
+        assert pod_spec["dnsPolicy"] == "ClusterFirstWithHostNet"
+
     def test_privileged_bool_is_yaml_boolean(self, tmp_path):
         """Kubernetes rejects Python True/False — template must emit true/false."""
         config = _minimal_config()
