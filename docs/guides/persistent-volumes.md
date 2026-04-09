@@ -167,7 +167,7 @@ dist.barrier()
 # All ranks can now load
 checkpoint = torch.load('/checkpoints/model.pt')
 ```
-j
+
 ## Alternative Storage Options
 
 While PVCs are great for persistent data, consider alternatives for different use cases:

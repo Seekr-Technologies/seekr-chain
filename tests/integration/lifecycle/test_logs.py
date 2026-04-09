@@ -1,6 +1,7 @@
 import seekr_chain
 from seekr_chain import s3_utils
 from seekr_chain._testing import assert_nested_match
+from seekr_chain.backends.argo.argo_workflow import ArgoWorkflow
 
 TS_REGEX = r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}.\d{6}Z"
 
@@ -271,3 +272,40 @@ class TestLogs:
         ]
 
         assert_nested_match(contents, expected)
+
+    def test_logs_after_reconnect(self):
+        """Reconstruct ArgoWorkflow by ID after the workflow is deleted, simulating
+        a fresh session where the original object is no longer available. Log retrieval
+        must still work via the SEEKRCHAIN_DATASTORE_ROOT env var fallback."""
+        config = seekr_chain.WorkflowConfig.model_validate(
+            {
+                "name": "test",
+                "namespace": "argo-workflows",
+                "ttl": "1:00:00",
+                "steps": [
+                    {
+                        "name": "step",
+                        "image": "ubuntu:24.04",
+                        "script": "echo reconnect-test",
+                        "resources": {"num_nodes": 1},
+                    }
+                ],
+            }
+        )
+
+        job = seekr_chain.launch_argo_workflow(config)
+        job.follow()
+        status = seekr_chain.wait(job, poll_interval=1)
+        assert status.is_successful()
+
+        job_id = job.id
+        job.delete()
+
+        # Reconstruct the workflow object by ID only — simulates a new session
+        # where the original `job` object is no longer in memory. The k8s workflow
+        # object is gone, so ArgoWorkflow must fall back to SEEKRCHAIN_DATASTORE_ROOT.
+        reconnected = ArgoWorkflow(id=job_id)
+        logs = reconnected.get_logs().to_dict()
+
+        expected = {"step=step": {"index=0": {"attempt=0": ["reconnect-test", ""]}}}
+        assert_nested_match(logs, expected)

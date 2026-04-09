@@ -47,6 +47,9 @@ temp/
 *~
 .cache
 
+# Local seekr-chain overrides (use .seekrchain.toml for committed config)
+.env
+
 # Documentation
 docs/build*
 .hatchery/worktrees/

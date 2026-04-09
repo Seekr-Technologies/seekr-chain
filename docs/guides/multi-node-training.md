@@ -182,6 +182,19 @@ resources:
 
     If you set `[mem|cpu]_per_node=null`, `chain` will automatically infer and request mem/cpu scaled by amount of mem/cpu available per GPU on your clusters compute nodes.
 
+### Host Networking
+
+`host_network` controls whether pods share the host's network namespace. It defaults to `false`.
+
+Enable it when your job needs direct access to InfiniBand or RoCE devices for high-bandwidth cross-node communication (e.g. NCCL collective ops during distributed training) and your cluster does not have an SR-IOV or RDMA device plugin configured:
+
+```yaml
+resources:
+  gpus: 4
+  num_nodes: 1
+  host_network: true
+```
+
 ## Best Practices
 
 ### Network Configuration

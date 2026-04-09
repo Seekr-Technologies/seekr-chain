@@ -309,7 +309,6 @@ def patch_configs_for_testing(job_name, datastore_root, monkeypatch, hermetic_fl
         *args,
         _job_name=job_name,
         _orig=original,
-        _datastore_root=datastore_root,
         _hermetic=hermetic_flag,
         _minio=minio_service,
         **kwargs,
@@ -319,8 +318,6 @@ def patch_configs_for_testing(job_name, datastore_root, monkeypatch, hermetic_fl
         config.ttl = datetime.timedelta(hours=1)
         if _hermetic:
             config.logging.upload_timeout = datetime.timedelta(seconds=30)
-        if _datastore_root is not None:
-            config.datastore_root = _datastore_root
         if config.code:
             config.code.exclude = config.code.exclude + [".cache", "docs"]
         if _hermetic and _minio is not None:

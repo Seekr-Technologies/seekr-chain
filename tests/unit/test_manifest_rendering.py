@@ -13,7 +13,6 @@ DATASTORE_ROOT = "s3://test-bucket/seekr-chain/"
 def _minimal_config(**kwargs) -> WorkflowConfig:
     defaults = {
         "name": "test-job",
-        "datastore_root": DATASTORE_ROOT,
         "steps": [
             {
                 "name": "train",
@@ -251,6 +250,64 @@ class TestJobsetTemplateRendering:
         main_container = next(c for c in pod_spec["containers"] if c["name"] == "main")
         assert "sleep" in main_container["args"][0]
 
+    def test_host_network_defaults_false(self, tmp_path):
+        """host_network defaults to false — no port conflicts on shared nodes."""
+        config = _minimal_config()
+        job_info = _fake_job_info()
+
+        _, context = build_jobset_context(
+            workflow_config=config,
+            step_index=0,
+            job_info=job_info,
+            workflow_name="ab1234",
+            workflow_secrets=[],
+            interactive=False,
+            assets_path=tmp_path / "assets",
+        )
+
+        rendered = render.render("jobset.yaml.j2", context)
+        manifest = yaml.safe_load(rendered)
+
+        pod_spec = manifest["spec"]["replicatedJobs"][0]["template"]["spec"]["template"]["spec"]
+        assert pod_spec["hostNetwork"] is False
+        assert pod_spec["dnsPolicy"] == "ClusterFirst"
+
+    def test_host_network_true_sets_dns_policy(self, tmp_path):
+        """host_network: true must also switch dnsPolicy to ClusterFirstWithHostNet."""
+        config = _minimal_config(
+            steps=[
+                {
+                    "name": "train",
+                    "image": "pytorch:2.0",
+                    "script": "echo hello",
+                    "resources": {
+                        "cpus_per_node": "4",
+                        "mem_per_node": "8Gi",
+                        "ephemeral_storage_per_node": "10Gi",
+                        "host_network": True,
+                    },
+                }
+            ]
+        )
+        job_info = _fake_job_info()
+
+        _, context = build_jobset_context(
+            workflow_config=config,
+            step_index=0,
+            job_info=job_info,
+            workflow_name="ab1234",
+            workflow_secrets=[],
+            interactive=False,
+            assets_path=tmp_path / "assets",
+        )
+
+        rendered = render.render("jobset.yaml.j2", context)
+        manifest = yaml.safe_load(rendered)
+
+        pod_spec = manifest["spec"]["replicatedJobs"][0]["template"]["spec"]["template"]["spec"]
+        assert pod_spec["hostNetwork"] is True
+        assert pod_spec["dnsPolicy"] == "ClusterFirstWithHostNet"
+
     def test_privileged_bool_is_yaml_boolean(self, tmp_path):
         """Kubernetes rejects Python True/False — template must emit true/false."""
         config = _minimal_config()
@@ -394,3 +451,383 @@ class TestWorkflowTemplateRendering:
         assert labels["seekr-chain/job-id"] == "ab1234"
         assert labels["seekr-chain/job-name"] == "test-job"
         assert labels["seekr-chain/user"] == "testuser"
+
+
+class TestAffinityRendering:
+    def _render(self, affinity_rules: list, tmp_path):
+        config = _minimal_config(affinity=affinity_rules)
+        job_info = _fake_job_info()
+        _, context = build_jobset_context(
+            workflow_config=config,
+            step_index=0,
+            job_info=job_info,
+            workflow_name="ab1234",
+            workflow_secrets=[],
+            interactive=False,
+            assets_path=tmp_path / "assets",
+        )
+        rendered = render.render("jobset.yaml.j2", context)
+        return yaml.safe_load(rendered)
+
+    def _pod_template(self, manifest):
+        return manifest["spec"]["replicatedJobs"][0]["template"]["spec"]["template"]
+
+    def _affinity(self, manifest):
+        return self._pod_template(manifest)["spec"]["affinity"]
+
+    # ── Node affinity ──────────────────────────────────────────────────────────
+
+    def test_node_attract_renders_in_operator(self, tmp_path):
+        manifest = self._render([{"type": "NODE", "direction": "ATTRACT", "hostnames": ["gpu-node-01"]}], tmp_path)
+        assert self._affinity(manifest) == {
+            "nodeAffinity": {
+                "requiredDuringSchedulingIgnoredDuringExecution": {
+                    "nodeSelectorTerms": [
+                        {
+                            "matchExpressions": [
+                                {"key": "kubernetes.io/hostname", "operator": "In", "values": ["gpu-node-01"]}
+                            ]
+                        }
+                    ]
+                }
+            }
+        }
+
+    def test_node_repel_hostnames_renders_not_in(self, tmp_path):
+        manifest = self._render(
+            [{"type": "NODE", "direction": "REPEL", "hostnames": ["bad-node", "flaky-node"]}], tmp_path
+        )
+        assert self._affinity(manifest) == {
+            "nodeAffinity": {
+                "requiredDuringSchedulingIgnoredDuringExecution": {
+                    "nodeSelectorTerms": [
+                        {
+                            "matchExpressions": [
+                                {"key": "kubernetes.io/hostname", "operator": "NotIn", "values": ["bad-node"]},
+                                {"key": "kubernetes.io/hostname", "operator": "NotIn", "values": ["flaky-node"]},
+                            ]
+                        }
+                    ]
+                }
+            }
+        }
+
+    def test_node_attract_labels_renders_in(self, tmp_path):
+        manifest = self._render([{"type": "NODE", "direction": "ATTRACT", "labels": {"gpu-type": ["a100"]}}], tmp_path)
+        assert self._affinity(manifest) == {
+            "nodeAffinity": {
+                "requiredDuringSchedulingIgnoredDuringExecution": {
+                    "nodeSelectorTerms": [
+                        {"matchExpressions": [{"key": "gpu-type", "operator": "In", "values": ["a100"]}]}
+                    ]
+                }
+            }
+        }
+
+    def test_node_attract_labels_multiple_values(self, tmp_path):
+        manifest = self._render(
+            [{"type": "NODE", "direction": "ATTRACT", "labels": {"gpu-type": ["a100", "h100"]}}], tmp_path
+        )
+        assert self._affinity(manifest) == {
+            "nodeAffinity": {
+                "requiredDuringSchedulingIgnoredDuringExecution": {
+                    "nodeSelectorTerms": [
+                        {"matchExpressions": [{"key": "gpu-type", "operator": "In", "values": ["a100", "h100"]}]}
+                    ]
+                }
+            }
+        }
+
+    def test_node_repel_labels_multiple_values(self, tmp_path):
+        manifest = self._render(
+            [{"type": "NODE", "direction": "REPEL", "labels": {"gpu-type": ["a100", "h100"]}}], tmp_path
+        )
+        assert self._affinity(manifest) == {
+            "nodeAffinity": {
+                "requiredDuringSchedulingIgnoredDuringExecution": {
+                    "nodeSelectorTerms": [
+                        {"matchExpressions": [{"key": "gpu-type", "operator": "NotIn", "values": ["a100", "h100"]}]}
+                    ]
+                }
+            }
+        }
+
+    def test_node_repel_labels_renders_not_in(self, tmp_path):
+        manifest = self._render([{"type": "NODE", "direction": "REPEL", "labels": {"reserved": ["true"]}}], tmp_path)
+        assert self._affinity(manifest) == {
+            "nodeAffinity": {
+                "requiredDuringSchedulingIgnoredDuringExecution": {
+                    "nodeSelectorTerms": [
+                        {"matchExpressions": [{"key": "reserved", "operator": "NotIn", "values": ["true"]}]}
+                    ]
+                }
+            }
+        }
+
+    def test_node_required_uses_required_block(self, tmp_path):
+        manifest = self._render(
+            [{"type": "NODE", "direction": "ATTRACT", "hostnames": ["n1"], "required": True}], tmp_path
+        )
+        assert self._affinity(manifest) == {
+            "nodeAffinity": {
+                "requiredDuringSchedulingIgnoredDuringExecution": {
+                    "nodeSelectorTerms": [
+                        {"matchExpressions": [{"key": "kubernetes.io/hostname", "operator": "In", "values": ["n1"]}]}
+                    ]
+                }
+            }
+        }
+
+    def test_node_soft_uses_preferred_block(self, tmp_path):
+        manifest = self._render(
+            [{"type": "NODE", "direction": "ATTRACT", "hostnames": ["n1"], "required": False}], tmp_path
+        )
+        assert self._affinity(manifest) == {
+            "nodeAffinity": {
+                "preferredDuringSchedulingIgnoredDuringExecution": [
+                    {
+                        "weight": 1,
+                        "preference": {
+                            "matchExpressions": [{"key": "kubernetes.io/hostname", "operator": "In", "values": ["n1"]}]
+                        },
+                    }
+                ]
+            }
+        }
+
+    def test_node_hostnames_and_labels_combined(self, tmp_path):
+        manifest = self._render(
+            [{"type": "NODE", "direction": "ATTRACT", "hostnames": ["n1"], "labels": {"zone": ["us-east-1a"]}}],
+            tmp_path,
+        )
+        assert self._affinity(manifest) == {
+            "nodeAffinity": {
+                "requiredDuringSchedulingIgnoredDuringExecution": {
+                    "nodeSelectorTerms": [
+                        {
+                            "matchExpressions": [
+                                {"key": "kubernetes.io/hostname", "operator": "In", "values": ["n1"]},
+                                {"key": "zone", "operator": "In", "values": ["us-east-1a"]},
+                            ]
+                        }
+                    ]
+                }
+            }
+        }
+
+    # ── Pod affinity ───────────────────────────────────────────────────────────
+
+    def test_pod_attract_soft_preferred(self, tmp_path):
+        manifest = self._render([{"type": "POD", "direction": "ATTRACT", "group": "exp", "required": False}], tmp_path)
+        assert self._affinity(manifest) == {
+            "podAffinity": {
+                "preferredDuringSchedulingIgnoredDuringExecution": [
+                    {
+                        "weight": 100,
+                        "podAffinityTerm": {
+                            "labelSelector": {"matchLabels": {"seekr-chain/pg.exp": "true"}},
+                            "topologyKey": "kubernetes.io/hostname",
+                        },
+                    }
+                ]
+            }
+        }
+
+    def test_pod_attract_hard_required(self, tmp_path):
+        import warnings
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", UserWarning)
+            manifest = self._render(
+                [{"type": "POD", "direction": "ATTRACT", "group": "exp", "required": True}], tmp_path
+            )
+        assert self._affinity(manifest) == {
+            "podAffinity": {
+                "requiredDuringSchedulingIgnoredDuringExecution": [
+                    {
+                        "labelSelector": {"matchLabels": {"seekr-chain/pg.exp": "true"}},
+                        "topologyKey": "kubernetes.io/hostname",
+                    }
+                ]
+            }
+        }
+
+    def test_pod_repel_soft_preferred(self, tmp_path):
+        manifest = self._render([{"type": "POD", "direction": "REPEL", "group": "exp", "required": False}], tmp_path)
+        assert self._affinity(manifest) == {
+            "podAntiAffinity": {
+                "preferredDuringSchedulingIgnoredDuringExecution": [
+                    {
+                        "weight": 100,
+                        "podAffinityTerm": {
+                            "labelSelector": {"matchLabels": {"seekr-chain/pg.exp": "true"}},
+                            "topologyKey": "kubernetes.io/hostname",
+                        },
+                    }
+                ]
+            }
+        }
+
+    def test_pod_repel_hard_required(self, tmp_path):
+        manifest = self._render([{"type": "POD", "direction": "REPEL", "group": "exp", "required": True}], tmp_path)
+        assert self._affinity(manifest) == {
+            "podAntiAffinity": {
+                "requiredDuringSchedulingIgnoredDuringExecution": [
+                    {
+                        "labelSelector": {"matchLabels": {"seekr-chain/pg.exp": "true"}},
+                        "topologyKey": "kubernetes.io/hostname",
+                    }
+                ]
+            }
+        }
+
+    def test_pod_attract_emits_pg_label(self, tmp_path):
+        manifest = self._render([{"type": "POD", "direction": "ATTRACT", "group": "my-exp"}], tmp_path)
+        labels = self._pod_template(manifest)["metadata"]["labels"]
+        assert labels["seekr-chain/pg.my-exp"] == "true"
+
+    def test_pod_repel_emits_no_label(self, tmp_path):
+        manifest = self._render([{"type": "POD", "direction": "REPEL", "group": "other"}], tmp_path)
+        labels = self._pod_template(manifest)["metadata"]["labels"]
+        assert not any(k.startswith("seekr-chain/pg.") for k in labels)
+
+    def test_multiple_attract_groups_emit_multiple_labels(self, tmp_path):
+        manifest = self._render(
+            [
+                {"type": "POD", "direction": "ATTRACT", "group": "group-a"},
+                {"type": "POD", "direction": "ATTRACT", "group": "group-b"},
+            ],
+            tmp_path,
+        )
+        labels = self._pod_template(manifest)["metadata"]["labels"]
+        assert labels["seekr-chain/pg.group-a"] == "true"
+        assert labels["seekr-chain/pg.group-b"] == "true"
+
+    def test_pod_affinity_selector_uses_pg_label_key(self, tmp_path):
+        manifest = self._render([{"type": "POD", "direction": "ATTRACT", "group": "my-exp"}], tmp_path)
+        assert self._affinity(manifest) == {
+            "podAffinity": {
+                "preferredDuringSchedulingIgnoredDuringExecution": [
+                    {
+                        "weight": 100,
+                        "podAffinityTerm": {
+                            "labelSelector": {"matchLabels": {"seekr-chain/pg.my-exp": "true"}},
+                            "topologyKey": "kubernetes.io/hostname",
+                        },
+                    }
+                ]
+            }
+        }
+
+    def test_attract_required_warns(self, tmp_path):
+        import warnings
+
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            self._render([{"type": "POD", "direction": "ATTRACT", "group": "exp", "required": True}], tmp_path)
+        assert any(issubclass(w.category, UserWarning) for w in caught)
+
+    # ── Mixed / structural ─────────────────────────────────────────────────────
+
+    def test_node_and_pod_rules_coexist(self, tmp_path):
+        manifest = self._render(
+            [
+                {"type": "NODE", "direction": "ATTRACT", "hostnames": ["gpu-node-01"]},
+                {"type": "POD", "direction": "ATTRACT", "group": "exp"},
+            ],
+            tmp_path,
+        )
+        assert self._affinity(manifest) == {
+            "nodeAffinity": {
+                "requiredDuringSchedulingIgnoredDuringExecution": {
+                    "nodeSelectorTerms": [
+                        {
+                            "matchExpressions": [
+                                {"key": "kubernetes.io/hostname", "operator": "In", "values": ["gpu-node-01"]}
+                            ]
+                        }
+                    ]
+                }
+            },
+            "podAffinity": {
+                "preferredDuringSchedulingIgnoredDuringExecution": [
+                    {
+                        "weight": 100,
+                        "podAffinityTerm": {
+                            "labelSelector": {"matchLabels": {"seekr-chain/pg.exp": "true"}},
+                            "topologyKey": "kubernetes.io/hostname",
+                        },
+                    }
+                ]
+            },
+        }
+
+    def test_no_affinity_no_block(self, tmp_path):
+        manifest = self._render([], tmp_path)
+        pod_spec = self._pod_template(manifest)["spec"]
+        assert "affinity" not in pod_spec
+
+    def test_backward_compat_old_dict_coercion(self, tmp_path):
+        # Old dict format should produce the same rendered YAML as the new list format
+        old_format = self._render(
+            {"nodes": {"include_hostnames": ["gpu-node-01"]}},  # type: ignore[arg-type]
+            tmp_path,
+        )
+        new_format = self._render([{"type": "NODE", "direction": "ATTRACT", "hostnames": ["gpu-node-01"]}], tmp_path)
+        old_aff = old_format["spec"]["replicatedJobs"][0]["template"]["spec"]["template"]["spec"]["affinity"]
+        new_aff = new_format["spec"]["replicatedJobs"][0]["template"]["spec"]["template"]["spec"]["affinity"]
+        assert old_aff == new_aff
+
+    def test_all_rules_together_valid_yaml(self, tmp_path):
+        import warnings
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", UserWarning)
+            manifest = self._render(
+                [
+                    {"type": "NODE", "direction": "ATTRACT", "labels": {"gpu-type": ["a100"]}, "required": True},
+                    {"type": "NODE", "direction": "REPEL", "hostnames": ["flaky-node"], "required": False},
+                    {"type": "POD", "direction": "ATTRACT", "group": "exp-42", "required": False},
+                    {"type": "POD", "direction": "REPEL", "group": "inference-prod", "required": True},
+                ],
+                tmp_path,
+            )
+        assert manifest["apiVersion"] == "jobset.x-k8s.io/v1alpha2"
+        assert self._affinity(manifest) == {
+            "nodeAffinity": {
+                "requiredDuringSchedulingIgnoredDuringExecution": {
+                    "nodeSelectorTerms": [
+                        {"matchExpressions": [{"key": "gpu-type", "operator": "In", "values": ["a100"]}]}
+                    ]
+                },
+                "preferredDuringSchedulingIgnoredDuringExecution": [
+                    {
+                        "weight": 1,
+                        "preference": {
+                            "matchExpressions": [
+                                {"key": "kubernetes.io/hostname", "operator": "NotIn", "values": ["flaky-node"]}
+                            ]
+                        },
+                    }
+                ],
+            },
+            "podAffinity": {
+                "preferredDuringSchedulingIgnoredDuringExecution": [
+                    {
+                        "weight": 100,
+                        "podAffinityTerm": {
+                            "labelSelector": {"matchLabels": {"seekr-chain/pg.exp-42": "true"}},
+                            "topologyKey": "kubernetes.io/hostname",
+                        },
+                    }
+                ]
+            },
+            "podAntiAffinity": {
+                "requiredDuringSchedulingIgnoredDuringExecution": [
+                    {
+                        "labelSelector": {"matchLabels": {"seekr-chain/pg.inference-prod": "true"}},
+                        "topologyKey": "kubernetes.io/hostname",
+                    }
+                ]
+            },
+        }

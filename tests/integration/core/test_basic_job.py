@@ -577,9 +577,9 @@ class TestAffinity:
                 "name": "test-affinity-include",
                 "namespace": "argo-workflows",
                 "ttl": "1:00:00",
-                "affinity": {
-                    "nodes": {"include_hostnames": [target]},
-                },
+                "affinity": [
+                    {"type": "NODE", "direction": "ATTRACT", "hostnames": [target]},
+                ],
                 "steps": [
                     {
                         "name": "step",
@@ -613,9 +613,9 @@ class TestAffinity:
                 "name": "test-affinity-exclude",
                 "namespace": "argo-workflows",
                 "ttl": "1:00:00",
-                "affinity": {
-                    "nodes": {"exclude_hostnames": excluded},
-                },
+                "affinity": [
+                    {"type": "NODE", "direction": "REPEL", "hostnames": excluded},
+                ],
                 "steps": [
                     {
                         "name": "step",

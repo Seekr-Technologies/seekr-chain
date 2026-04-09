@@ -1,7 +1,19 @@
-import os
 from typing import TypedDict
 
 from seekr_chain import s3_utils
+from seekr_chain.user_config import _load_config
+
+
+def _resolve_datastore_root() -> str | None:
+    """Resolve the datastore root from layered configuration.
+
+    Resolution order:
+    1. ``SEEKRCHAIN_DATASTORE_ROOT`` environment variable
+    2. ``SEEKRCHAIN_DATASTORE_ROOT`` in a ``.env`` file (walk up from CWD)
+    3. ``datastore_root`` in ``.seekrchain.toml`` (walk up from CWD)
+    4. ``datastore_root`` in ``~/.seekrchain.toml``
+    """
+    return _load_config().datastore_root
 
 
 class JobInfo(TypedDict):
@@ -25,13 +37,17 @@ def get_job_info(id: str, datastore_root: str | None = None) -> JobInfo:
                        Falls back to SEEKRCHAIN_DATASTORE_ROOT env var. Required.
     """
     if datastore_root is None:
-        datastore_root = os.environ.get("SEEKRCHAIN_DATASTORE_ROOT")
+        datastore_root = _resolve_datastore_root()
 
     if datastore_root is None:
         raise ValueError(
-            "datastore_root must be specified via WorkflowConfig.datastore_root "
-            "or SEEKRCHAIN_DATASTORE_ROOT environment variable. "
-            "Example: s3://my-bucket/seekr-chain/"
+            "datastore_root could not be determined. Options (in priority order):\n"
+            "  1. Set SEEKRCHAIN_DATASTORE_ROOT environment variable\n"
+            "  2. Add to .env file (local overrides, gitignored)\n"
+            "  3. Add to .seekrchain.toml in your project root (committed team default)\n"
+            "  4. Add to ~/.seekrchain.toml (personal global default)\n"
+            'Example: datastore_root = "s3://my-bucket/seekr-chain/"\n'
+            "When reconnecting to an existing job, use the same value that was set at submit time."
         )
 
     s3_path = s3_utils.join(datastore_root, "jobs", id[:2], id[2:])
