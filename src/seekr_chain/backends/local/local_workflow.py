@@ -55,6 +55,9 @@ class LocalWorkflow(Workflow):
     def delete(self):
         pass  # Nothing to clean up for local execution.
 
+    def cancel(self):
+        pass  # Nothing to cancel for local execution.
+
     def get_logs(self, **kwargs):
         pass  # Logs were streamed to stdout during execution.
 

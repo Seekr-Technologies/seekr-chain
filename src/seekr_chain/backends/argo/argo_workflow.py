@@ -526,6 +526,17 @@ class ArgoWorkflow(Workflow):
             name=self._id,
         )
 
+    def cancel(self):
+        """Stop the Argo workflow without deleting it."""
+        self._k8s_custom.patch_namespaced_custom_object(
+            group="argoproj.io",
+            version="v1alpha1",
+            plural="workflows",
+            namespace=self._namespace,
+            name=self._id,
+            body={"spec": {"shutdown": "Terminate"}},
+        )
+
     @staticmethod
     def format_state(workflow_state: WorkflowState) -> str:
         lines = []
