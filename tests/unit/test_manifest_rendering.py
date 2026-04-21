@@ -411,6 +411,7 @@ class TestWorkflowTemplateRendering:
                     "name": "train",
                     "jobset_name": "ab1234-train-js",
                     "jobset_yaml": jobset_yaml,
+                    "labels": {},
                 }
             ],
         }

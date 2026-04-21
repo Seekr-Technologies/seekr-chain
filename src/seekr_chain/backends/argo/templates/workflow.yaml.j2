@@ -42,11 +42,9 @@ spec:
         seekr-chain/job-id: {{ job_id }}
         seekr-chain/job-name: {{ job_name }}
         seekr-chain/is-step-pod: "true"
-        {% if step.labels %}
-        {% for k, v in step.labels.items() %}
+        {% for k, v in (step.labels | default({})).items() %}
         {{ k }}: {{ v }}
         {% endfor %}
-        {% endif %}
     resource:
       action: create
       # Ensure the argo pod waits for the jobset to complete or fail
