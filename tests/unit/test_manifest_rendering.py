@@ -308,6 +308,69 @@ class TestJobsetTemplateRendering:
         assert pod_spec["hostNetwork"] is True
         assert pod_spec["dnsPolicy"] == "ClusterFirstWithHostNet"
 
+    def test_no_scheduling_labels_by_default(self, tmp_path):
+        config = _minimal_config()
+        job_info = _fake_job_info()
+
+        _, context = build_jobset_context(
+            workflow_config=config,
+            step_index=0,
+            job_info=job_info,
+            workflow_name="ab1234",
+            workflow_secrets=[],
+            interactive=False,
+            assets_path=tmp_path / "assets",
+        )
+
+        rendered = render.render("jobset.yaml.j2", context)
+        manifest = yaml.safe_load(rendered)
+
+        labels = manifest["metadata"]["labels"]
+        assert "kueue.x-k8s.io/queue-name" not in labels
+        assert "kueue.x-k8s.io/priority-class" not in labels
+
+    def test_scheduling_queue_label(self, tmp_path):
+        config = _minimal_config(scheduling={"queue": "gpu-queue"})
+        job_info = _fake_job_info()
+
+        _, context = build_jobset_context(
+            workflow_config=config,
+            step_index=0,
+            job_info=job_info,
+            workflow_name="ab1234",
+            workflow_secrets=[],
+            interactive=False,
+            assets_path=tmp_path / "assets",
+        )
+
+        rendered = render.render("jobset.yaml.j2", context)
+        manifest = yaml.safe_load(rendered)
+
+        labels = manifest["metadata"]["labels"]
+        assert labels["kueue.x-k8s.io/queue-name"] == "gpu-queue"
+        assert "kueue.x-k8s.io/priority-class" not in labels
+
+    def test_scheduling_priority_label(self, tmp_path):
+        config = _minimal_config(scheduling={"queue": "gpu-queue", "priority": "high"})
+        job_info = _fake_job_info()
+
+        _, context = build_jobset_context(
+            workflow_config=config,
+            step_index=0,
+            job_info=job_info,
+            workflow_name="ab1234",
+            workflow_secrets=[],
+            interactive=False,
+            assets_path=tmp_path / "assets",
+        )
+
+        rendered = render.render("jobset.yaml.j2", context)
+        manifest = yaml.safe_load(rendered)
+
+        labels = manifest["metadata"]["labels"]
+        assert labels["kueue.x-k8s.io/queue-name"] == "gpu-queue"
+        assert labels["kueue.x-k8s.io/priority-class"] == "high"
+
     def test_privileged_bool_is_yaml_boolean(self, tmp_path):
         """Kubernetes rejects Python True/False — template must emit true/false."""
         config = _minimal_config()
