@@ -84,6 +84,7 @@ class TestBandwidth:
                             "cpus_per_node": None,
                             "mem_per_node": None,
                             "security": {"privileged": True},
+                            "host_network": True,
                         },
                     }
                 ],
