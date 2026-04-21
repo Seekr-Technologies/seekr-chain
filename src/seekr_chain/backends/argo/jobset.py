@@ -254,75 +254,102 @@ def _build_role_context(
     }
 
 
-def _build_affinity(workflow_config):
-    if workflow_config.affinity is None:
-        return None
-    affinity = {}
+def _build_affinity(workflow_config) -> tuple[dict | None, list[str]]:
+    """Return (affinity_dict, pack_groups).
 
-    node_selector_terms = []
-    if (node_config := workflow_config.affinity.nodes) is not None:
-        if node_config.include_hostnames is not None:
-            node_selector_terms += [
-                {
-                    "matchExpressions": [
+    affinity_dict is the Kubernetes affinity object for the pod spec, or None.
+    pack_groups is the list of group names from ATTRACT pod rules — these become
+    seekr-chain/pg.<group> labels on every pod.
+    """
+    if not workflow_config.affinity:
+        return None, []
+
+    node_required_terms = []
+    node_preferred_terms = []
+    pod_affinity_required = []
+    pod_affinity_preferred = []
+    pod_anti_required = []
+    pod_anti_preferred = []
+    pack_groups = []
+
+    for rule in workflow_config.affinity:
+        if rule.type == "NODE":
+            expressions = []
+            if rule.hostnames:
+                if rule.direction == "ATTRACT":
+                    expressions.append(
                         {
                             "key": "kubernetes.io/hostname",
                             "operator": "In",
-                            "values": [node for node in node_config.include_hostnames],
+                            "values": list(rule.hostnames),
                         }
-                    ],
-                }
-            ]
-        if node_config.exclude_hostnames is not None:
-            node_selector_terms += [
-                {
-                    "matchExpressions": [
-                        {
-                            "key": "kubernetes.io/hostname",
-                            "operator": "NotIn",
-                            "values": [
-                                node,
-                            ],
-                        }
-                        for node in node_config.exclude_hostnames
-                    ],
-                }
-            ]
-
-    if (label_config := workflow_config.affinity.labels) is not None:
-        if label_config.include is not None:
-            for key, value in label_config.include.items():
-                node_selector_terms += [
-                    {
-                        "matchExpressions": [
+                    )
+                else:
+                    for hostname in rule.hostnames:
+                        expressions.append(
                             {
-                                "key": key,
-                                "operator": "In",
-                                "values": value,
-                            }
-                        ],
-                    }
-                ]
-        if label_config.exclude is not None:
-            for key, value in label_config.exclude.items():
-                node_selector_terms += [
-                    {
-                        "matchExpressions": [
-                            {
-                                "key": key,
+                                "key": "kubernetes.io/hostname",
                                 "operator": "NotIn",
-                                "values": value,
+                                "values": [hostname],
                             }
-                        ],
-                    }
-                ]
+                        )
+            if rule.labels:
+                op = "In" if rule.direction == "ATTRACT" else "NotIn"
+                for key, values in rule.labels.items():
+                    expressions.append({"key": key, "operator": op, "values": values})
 
-    if node_selector_terms:
-        affinity["nodeAffinity"] = {
-            "requiredDuringSchedulingIgnoredDuringExecution": {"nodeSelectorTerms": node_selector_terms}
-        }
+            if expressions:
+                term = {"matchExpressions": expressions}
+                if rule.required:
+                    node_required_terms.append(term)
+                else:
+                    node_preferred_terms.append({"weight": 1, "preference": term})
 
-    return affinity
+        elif rule.type == "POD":
+            label_key = f"seekr-chain/pg.{rule.group}"
+            pod_term = {
+                "labelSelector": {"matchLabels": {label_key: "true"}},
+                "topologyKey": "kubernetes.io/hostname",
+            }
+            if rule.direction == "ATTRACT":
+                pack_groups.append(rule.group)
+                if rule.required:
+                    pod_affinity_required.append(pod_term)
+                else:
+                    pod_affinity_preferred.append({"weight": 100, "podAffinityTerm": pod_term})
+            else:
+                if rule.required:
+                    pod_anti_required.append(pod_term)
+                else:
+                    pod_anti_preferred.append({"weight": 100, "podAffinityTerm": pod_term})
+
+    affinity = {}
+
+    if node_required_terms or node_preferred_terms:
+        node_affinity = {}
+        if node_required_terms:
+            node_affinity["requiredDuringSchedulingIgnoredDuringExecution"] = {"nodeSelectorTerms": node_required_terms}
+        if node_preferred_terms:
+            node_affinity["preferredDuringSchedulingIgnoredDuringExecution"] = node_preferred_terms
+        affinity["nodeAffinity"] = node_affinity
+
+    if pod_affinity_required or pod_affinity_preferred:
+        pod_affinity = {}
+        if pod_affinity_required:
+            pod_affinity["requiredDuringSchedulingIgnoredDuringExecution"] = pod_affinity_required
+        if pod_affinity_preferred:
+            pod_affinity["preferredDuringSchedulingIgnoredDuringExecution"] = pod_affinity_preferred
+        affinity["podAffinity"] = pod_affinity
+
+    if pod_anti_required or pod_anti_preferred:
+        pod_anti = {}
+        if pod_anti_required:
+            pod_anti["requiredDuringSchedulingIgnoredDuringExecution"] = pod_anti_required
+        if pod_anti_preferred:
+            pod_anti["preferredDuringSchedulingIgnoredDuringExecution"] = pod_anti_preferred
+        affinity["podAntiAffinity"] = pod_anti
+
+    return affinity or None, pack_groups
 
 
 def _get_step_resources(config) -> dict:
@@ -479,6 +506,8 @@ def build_jobset_context(
         role_configs=role_configs, js_name=js_name, step_config=step_config, assets_path=assets_path
     )
 
+    affinity, pack_groups = _build_affinity(workflow_config)
+
     context = {
         "js_name": js_name,
         "job_id": job_info["id"],
@@ -487,7 +516,8 @@ def build_jobset_context(
         "remote_assets_path": job_info["remote_assets_path"],
         "success_policy": _build_success_policy(step_config),
         "failure_policy": _build_failure_policy(step_config),
-        "affinity": _build_affinity(workflow_config),
+        "affinity": affinity,
+        "pack_groups": pack_groups,
         "roles": [
             _build_role_context(
                 role_config=role_config,
