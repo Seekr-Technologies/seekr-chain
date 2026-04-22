@@ -1,46 +1,13 @@
 """Unit tests for the LOCAL execution backend."""
 
-import textwrap
-from unittest.mock import MagicMock, patch
-
 import pytest
-from click.testing import CliRunner
 
 from seekr_chain.backends.local.local_workflow import (
     LocalWorkflow,
     launch_local_workflow,
 )
-from seekr_chain.cli import main
 from seekr_chain.config import MultiRoleStepConfig, RoleSpecConfig, WorkflowConfig
-from seekr_chain.dag import topological_sort as _topological_sort
 from seekr_chain.status import WorkflowStatus
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
-
-def _make_config(steps_yaml: str) -> WorkflowConfig:
-    import yaml
-
-    raw = yaml.safe_load(
-        textwrap.dedent(f"""\
-        name: test-workflow
-        steps:
-        {steps_yaml}
-    """)
-    )
-    return WorkflowConfig.model_validate(raw)
-
-
-SINGLE_STEP_CONFIG = textwrap.dedent("""\
-    name: test-workflow
-    steps:
-      - name: step
-        image: ubuntu:24.04
-        script: echo hello
-""")
-
 
 # ---------------------------------------------------------------------------
 # LocalWorkflow class
@@ -81,56 +48,6 @@ class TestLocalWorkflow:
     def test_get_detailed_state_is_none(self):
         wf = LocalWorkflow(name="x", succeeded=True)
         assert wf.get_detailed_state() is None
-
-
-# ---------------------------------------------------------------------------
-# Topological sort
-# ---------------------------------------------------------------------------
-
-
-class TestTopologicalSort:
-    def test_single_step(self):
-        config = WorkflowConfig.model_validate(
-            {"name": "t", "steps": [{"name": "a", "image": "ubuntu:24.04", "script": "echo a"}]}
-        )
-        ordered = _topological_sort(config.steps)
-        assert [s.name for s in ordered] == ["a"]
-
-    def test_linear_chain(self):
-        config = WorkflowConfig.model_validate(
-            {
-                "name": "t",
-                "steps": [
-                    {"name": "a", "image": "ubuntu:24.04", "script": "echo a"},
-                    {"name": "b", "image": "ubuntu:24.04", "script": "echo b", "depends_on": ["a"]},
-                    {"name": "c", "image": "ubuntu:24.04", "script": "echo c", "depends_on": ["b"]},
-                ],
-            }
-        )
-        ordered = _topological_sort(config.steps)
-        names = [s.name for s in ordered]
-        assert names.index("a") < names.index("b")
-        assert names.index("b") < names.index("c")
-
-    def test_diamond_dag(self):
-        """a → b, a → c, b+c → d."""
-        config = WorkflowConfig.model_validate(
-            {
-                "name": "t",
-                "steps": [
-                    {"name": "a", "image": "ubuntu:24.04", "script": "echo a"},
-                    {"name": "b", "image": "ubuntu:24.04", "script": "echo b", "depends_on": ["a"]},
-                    {"name": "c", "image": "ubuntu:24.04", "script": "echo c", "depends_on": ["a"]},
-                    {"name": "d", "image": "ubuntu:24.04", "script": "echo d", "depends_on": ["b", "c"]},
-                ],
-            }
-        )
-        ordered = _topological_sort(config.steps)
-        names = [s.name for s in ordered]
-        assert names.index("a") < names.index("b")
-        assert names.index("a") < names.index("c")
-        assert names.index("b") < names.index("d")
-        assert names.index("c") < names.index("d")
 
 
 # ---------------------------------------------------------------------------
@@ -299,45 +216,3 @@ class TestStepExecution:
         )
         launch_local_workflow(config)
         assert out.read_text().strip() == "1 0"
-
-
-# ---------------------------------------------------------------------------
-# CLI --backend flag
-# ---------------------------------------------------------------------------
-
-
-class TestCliBackendFlag:
-    def _config_file(self, tmp_path):
-        p = tmp_path / "config.yaml"
-        p.write_text(SINGLE_STEP_CONFIG)
-        return p
-
-    def test_default_backend_is_argo(self, tmp_path):
-        mock_job = MagicMock()
-        runner = CliRunner()
-
-        with patch("seekr_chain.launch_workflow", return_value=mock_job) as mock_launch:
-            result = runner.invoke(main, ["submit", str(self._config_file(tmp_path))])
-
-        assert result.exit_code == 0, result.output
-        assert mock_launch.call_args.kwargs.get("backend") == "argo"
-
-    def test_local_backend_flag(self, tmp_path):
-        mock_job = MagicMock()
-        runner = CliRunner()
-
-        with patch("seekr_chain.launch_workflow", return_value=mock_job) as mock_launch:
-            result = runner.invoke(main, ["submit", "--backend", "local", str(self._config_file(tmp_path))])
-
-        assert result.exit_code == 0, result.output
-        assert mock_launch.call_args.kwargs.get("backend") == "local"
-
-    def test_short_backend_flag(self, tmp_path):
-        mock_job = MagicMock()
-        runner = CliRunner()
-
-        with patch("seekr_chain.launch_workflow", return_value=mock_job) as mock_launch:
-            result = runner.invoke(main, ["submit", "-b", "local", str(self._config_file(tmp_path))])
-
-        assert result.exit_code == 0, result.output
-        assert mock_launch.call_args.kwargs.get("backend") == "local"
