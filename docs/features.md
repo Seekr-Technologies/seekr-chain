@@ -11,6 +11,10 @@ All features below are configured via the [Configuration Reference](reference/co
 - **Code Upload**: Easily upload code from any directory for your job, with full control over inclusion/exclusion rules
 - **Persistent Volume Claims**: Attach to or create PVCs for your jobs
 - **Secrets**: Securely pass secrets into jobs
+- **Job queue admission (Kueue)**: Assign workflows to a Kueue `LocalQueue` via the `scheduling.queue` field.
+  Optionally set a priority class with `scheduling.priority`. The config is backend-agnostic — a future
+  SLURM backend will map the same fields to `--partition` / `--qos`.
+
 - **Interactive jobs**: Simply specify `--interactive` to the CLI, or `interactive=True` in python.
 
    Chain will launch your job, and automatically drop you in a shell in your job when it starts.

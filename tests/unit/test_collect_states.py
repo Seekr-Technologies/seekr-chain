@@ -1,17 +1,18 @@
 """
-Unit tests for _collect_container_states() and _collect_pod_state().
+Unit tests for _collect_container_states(), _collect_pod_state(), and _is_jobset_suspended().
 
-Uses types.SimpleNamespace to build minimal fake K8s objects —
-no kubernetes SDK import required.
+Uses types.SimpleNamespace to build minimal fake K8s objects.
 """
 
 from types import SimpleNamespace
 
 import pytest
+from kubernetes.client.rest import ApiException
 
 from seekr_chain.backends.argo.argo_workflow import (
     _collect_container_states,
     _collect_pod_state,
+    _is_jobset_suspended,
     _trim_pull_message,
 )
 from seekr_chain.status import ContainerStatus, PodStatus
@@ -389,3 +390,41 @@ class TestTrimPullMessage:
         """If the expected marker isn't there, return the original rather than losing info."""
         raw = "Back-off pulling image: unexpected format"
         assert _trim_pull_message(raw) == raw
+
+
+# ---------------------------------------------------------------------------
+# _is_jobset_suspended
+# ---------------------------------------------------------------------------
+
+
+class _FakeCustomApi:
+    def __init__(self, response=None, exc=None):
+        self._response = response
+        self._exc = exc
+
+    def get_namespaced_custom_object(self, **kwargs):
+        if self._exc:
+            raise self._exc
+        return self._response
+
+
+class TestIsJobsetSuspended:
+    def test_suspended_true(self):
+        api = _FakeCustomApi({"spec": {"suspend": True}})
+        assert _is_jobset_suspended(api, "my-jobset", "argo-workflows") is True
+
+    def test_suspended_false(self):
+        api = _FakeCustomApi({"spec": {"suspend": False}})
+        assert _is_jobset_suspended(api, "my-jobset", "argo-workflows") is False
+
+    def test_suspend_field_absent(self):
+        api = _FakeCustomApi({"spec": {}})
+        assert _is_jobset_suspended(api, "my-jobset", "argo-workflows") is False
+
+    def test_api_exception_returns_false(self):
+        api = _FakeCustomApi(exc=ApiException(status=404))
+        assert _is_jobset_suspended(api, "missing-jobset", "argo-workflows") is False
+
+    def test_unexpected_exception_returns_false(self):
+        api = _FakeCustomApi(exc=RuntimeError("unexpected"))
+        assert _is_jobset_suspended(api, "my-jobset", "argo-workflows") is False

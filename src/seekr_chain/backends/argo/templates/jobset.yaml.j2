@@ -5,6 +5,11 @@ metadata:
   labels:
     seekr-chain/job-id: {{ job_id }}
     seekr-chain/step-name: {{ step_name }}
+    {% if labels %}
+    {% for k, v in labels.items() %}
+    {{ k }}: {{ v }}
+    {% endfor %}
+    {% endif %}
 spec:
   network:
     enableDNSHostnames: true

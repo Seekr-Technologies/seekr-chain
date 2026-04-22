@@ -254,6 +254,15 @@ def _build_role_context(
     }
 
 
+def _build_jobset_labels(workflow_config) -> dict | None:
+    labels = {}
+    if workflow_config.scheduling is not None:
+        labels["kueue.x-k8s.io/queue-name"] = workflow_config.scheduling.queue
+        if workflow_config.scheduling.priority is not None:
+            labels["kueue.x-k8s.io/priority-class"] = workflow_config.scheduling.priority
+    return labels or None
+
+
 def _build_affinity(workflow_config) -> tuple[dict | None, list[str]]:
     """Return (affinity_dict, pack_groups).
 
@@ -518,6 +527,7 @@ def build_jobset_context(
         "failure_policy": _build_failure_policy(step_config),
         "affinity": affinity,
         "pack_groups": pack_groups,
+        "labels": _build_jobset_labels(workflow_config),
         "roles": [
             _build_role_context(
                 role_config=role_config,

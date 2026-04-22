@@ -17,7 +17,7 @@ from seekr_chain import WorkflowConfig, k8s_utils, s3_utils, utils
 from seekr_chain.backends.argo import render
 from seekr_chain.backends.argo.argo_workflow import ArgoWorkflow
 from seekr_chain.backends.argo.job_info import JobInfo, _resolve_datastore_root, get_job_info
-from seekr_chain.backends.argo.jobset import create_jobset_manifest
+from seekr_chain.backends.argo.jobset import _build_jobset_labels, create_jobset_manifest
 from seekr_chain.backends.argo.parse_logs import DATA_SCHEMA_VERSION
 from seekr_chain.config import StepConfig
 from seekr_chain.symlink import symlink
@@ -101,6 +101,7 @@ def _create_step_manifest(
         "name": step_config.name,
         "jobset_name": js_name,
         "jobset_yaml": js_yaml,
+        "labels": _build_jobset_labels(workflow_config) or {},
     }
 
 

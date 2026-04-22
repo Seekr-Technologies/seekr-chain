@@ -80,6 +80,22 @@ AffinityRule = Annotated[
 ]
 
 
+class SchedulingConfig(BaseModel):
+    """Scheduling configuration for job queue admission.
+
+    Maps to backend-specific queue primitives (e.g. Kueue LocalQueue on
+    Kubernetes, partition on SLURM).
+
+    Parameters
+    ----------
+    queue : Queue or partition name to submit this workflow's jobs to
+    priority : Optional priority class / QOS name
+    """
+
+    queue: str
+    priority: Optional[str] = None
+
+
 class GPUType(str, Enum):
     """
     GPU type
@@ -306,6 +322,7 @@ class WorkflowConfig(BaseModel):
     secrets : Secrets injected as environment variables in each step
     env : Global environment variables for all steps
     affinity : Scheduling rules — list of node and pod affinity/anti-affinity rules
+    scheduling : Queue and priority for job admission (e.g. Kueue LocalQueue)
     logging : Log collection settings
     """
 
@@ -317,6 +334,7 @@ class WorkflowConfig(BaseModel):
     secrets: Optional[dict[str, str]] = None
     env: Optional[dict[str, str]] = None
     affinity: Optional[list[AffinityRule]] = None
+    scheduling: Optional[SchedulingConfig] = None
     logging: LoggingConfig = LoggingConfig()
 
     @field_validator("affinity", mode="before")

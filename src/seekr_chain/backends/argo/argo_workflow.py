@@ -323,6 +323,21 @@ def _first_running_or_finished_pod(workflow_state: WorkflowState) -> PodState | 
     return None
 
 
+def _is_jobset_suspended(k8s_custom: k8s.client.CustomObjectsApi, jobset_name: str, namespace: str) -> bool:
+    """Return True if the JobSet exists and spec.suspend is True (i.e. queued, not yet admitted)."""
+    try:
+        jobset = k8s_custom.get_namespaced_custom_object(
+            group="jobset.x-k8s.io",
+            version="v1alpha2",
+            plural="jobsets",
+            namespace=namespace,
+            name=jobset_name,
+        )
+    except Exception:
+        return False
+    return jobset.get("spec", {}).get("suspend", False)
+
+
 def _get_workflow_status(workflow_name: str, namespace: str, k8s_custom: k8s.client.CustomObjectsApi) -> WorkflowStatus:
     workflow = k8s_custom.get_namespaced_custom_object(
         group="argoproj.io",
@@ -490,11 +505,16 @@ class ArgoWorkflow(Workflow):
                     pod_hierarchy[step_name]["roles"][role] = []
                 pod_hierarchy[step_name]["roles"][role].append(pod)
 
-        return WorkflowState(
-            dt_start=None,
-            dt_end=None,
-            steps=[_collect_step_state(k, v["roles"], v["pod"]) for k, v in pod_hierarchy.items()],
-        )
+        steps = []
+        for step_name, step_data in pod_hierarchy.items():
+            step_state = _collect_step_state(step_name, step_data["roles"], step_data["pod"])
+            if not step_state.roles:
+                jobset_name = step_data["pod"].metadata.labels.get("seekr-chain/jobset-name")
+                if jobset_name and _is_jobset_suspended(self._k8s_custom, jobset_name, self._namespace):
+                    step_state.pod.status = PodStatus.PENDING
+            steps.append(step_state)
+
+        return WorkflowState(dt_start=None, dt_end=None, steps=steps)
 
     def delete(self):
         """Delete the Argo workflow from the cluster."""
