@@ -31,7 +31,7 @@ Expand beyond Kubernetes/Argo to support additional execution backends.
 
 Run workflows locally for development and testing without requiring a Kubernetes cluster.
 
-**Status**: Under consideration
+**Status**: Implemented — use `chain submit --backend local` or `seekr_chain.launch_workflow(config, backend="local")`
 
 **Use cases:**
 

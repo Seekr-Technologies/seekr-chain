@@ -425,6 +425,46 @@ class TestList:
         assert "Running" in result.output
 
 
+class TestSubmitBackend:
+    def test_default_backend_is_argo(self, config_file):
+        mock_job = MagicMock()
+        runner = CliRunner()
+
+        with patch("seekr_chain.launch_workflow", return_value=mock_job) as mock_launch:
+            result = runner.invoke(main, ["submit", str(config_file)])
+
+        assert result.exit_code == 0, result.output
+        assert mock_launch.call_args.kwargs.get("backend") == "argo"
+
+    def test_local_backend_flag(self, config_file):
+        mock_job = MagicMock()
+        runner = CliRunner()
+
+        with patch("seekr_chain.launch_workflow", return_value=mock_job) as mock_launch:
+            result = runner.invoke(main, ["submit", "--backend", "local", str(config_file)])
+
+        assert result.exit_code == 0, result.output
+        assert mock_launch.call_args.kwargs.get("backend") == "local"
+
+    def test_short_backend_flag(self, config_file):
+        mock_job = MagicMock()
+        runner = CliRunner()
+
+        with patch("seekr_chain.launch_workflow", return_value=mock_job) as mock_launch:
+            result = runner.invoke(main, ["submit", "-b", "local", str(config_file)])
+
+        assert result.exit_code == 0, result.output
+        assert mock_launch.call_args.kwargs.get("backend") == "local"
+
+    def test_invalid_backend_rejected(self, config_file):
+        runner = CliRunner()
+
+        with patch("seekr_chain.launch_workflow", return_value=MagicMock()):
+            result = runner.invoke(main, ["submit", "--backend", "bogus", str(config_file)])
+
+        assert result.exit_code != 0
+
+
 class TestDelete:
     def test_delete(self):
         """chain delete my-job → ArgoWorkflow(id='my-job') constructed and .delete() called."""

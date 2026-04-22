@@ -40,6 +40,12 @@ chain submit <path_to_config>
 
 You can also use the `-f/--follow` flag to follow the workflow.
 
+To run locally without a cluster (useful for debugging):
+
+```
+chain submit <path_to_config> --backend local
+```
+
 Supported CLI config formats:
 	
 - `yaml`

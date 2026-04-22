@@ -14,6 +14,13 @@ All features below are configured via the [Configuration Reference](reference/co
 - **Job queue admission (Kueue)**: Assign workflows to a Kueue `LocalQueue` via the `scheduling.queue` field.
   Optionally set a priority class with `scheduling.priority`. The config is backend-agnostic — a future
   SLURM backend will map the same fields to `--partition` / `--qos`.
+- **Local execution**: Run workflows directly in your local environment for debugging — no cluster, no S3, no Docker required.
+
+    ```
+    chain submit config.yaml --backend local
+    ```
+
+    Steps execute in DAG order using your local shell. Multi-node and multi-role steps are not supported in local mode.
 
 - **Interactive jobs**: Simply specify `--interactive` to the CLI, or `interactive=True` in python.
 
