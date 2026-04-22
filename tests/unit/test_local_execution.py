@@ -1,5 +1,8 @@
 """Unit tests for the LOCAL execution backend."""
 
+import json
+import socket
+
 import pytest
 
 from seekr_chain.backends.local.local_workflow import (
@@ -216,3 +219,128 @@ class TestStepExecution:
         )
         launch_local_workflow(config)
         assert out.read_text().strip() == "1 0"
+
+    def test_all_injected_env_vars(self, tmp_path):
+        """Every env var set by local mode is present with the expected value."""
+        out = tmp_path / "vars.txt"
+        script = f"""
+{{
+printf 'NNODES=%s\\n' "$NNODES"
+printf 'NODE_RANK=%s\\n' "$NODE_RANK"
+printf 'MASTER_ADDR=%s\\n' "$MASTER_ADDR"
+printf 'MASTER_PORT=%s\\n' "$MASTER_PORT"
+printf 'RESTART_ATTEMPT=%s\\n' "$RESTART_ATTEMPT"
+printf 'NODE_NAME=%s\\n' "$NODE_NAME"
+printf 'GPUS_PER_NODE=%s\\n' "$GPUS_PER_NODE"
+printf 'SEEKR_CHAIN_WORKFLOW_ID=%s\\n' "$SEEKR_CHAIN_WORKFLOW_ID"
+printf 'SEEKR_CHAIN_JOBSET_ID=%s\\n' "$SEEKR_CHAIN_JOBSET_ID"
+printf 'SEEKR_CHAIN_POD_ID=%s\\n' "$SEEKR_CHAIN_POD_ID"
+printf 'SEEKR_CHAIN_POD_INSTANCE_ID=%s\\n' "$SEEKR_CHAIN_POD_INSTANCE_ID"
+printf 'SEEKR_CHAIN_ARGS=%s\\n' "$SEEKR_CHAIN_ARGS"
+}} > {out}
+"""
+        config = WorkflowConfig.model_validate(
+            {
+                "name": "my-workflow",
+                "steps": [{"name": "my-step", "image": "ubuntu:24.04", "script": script}],
+            }
+        )
+        launch_local_workflow(config)
+
+        env = dict(line.split("=", 1) for line in out.read_text().splitlines())
+
+        assert env["NNODES"] == "1"
+        assert env["NODE_RANK"] == "0"
+        assert env["MASTER_ADDR"] == "localhost"
+        assert env["MASTER_PORT"] == "29500"
+        assert env["RESTART_ATTEMPT"] == "0"
+        assert env["NODE_NAME"] == socket.gethostname()
+        assert env["GPUS_PER_NODE"] == "0"
+        assert env["SEEKR_CHAIN_WORKFLOW_ID"] == "my-workflow"
+        assert env["SEEKR_CHAIN_JOBSET_ID"] == "my-step"
+        assert env["SEEKR_CHAIN_POD_ID"] == "my-workflow-my-step-0"
+        assert env["SEEKR_CHAIN_POD_INSTANCE_ID"] == "my-workflow-my-step-0-0"
+        assert env["SEEKR_CHAIN_ARGS"] != ""
+
+    def test_args_written_to_seekr_chain_args(self, tmp_path):
+        """SEEKR_CHAIN_ARGS points to a valid JSON file containing the passed args."""
+        out = tmp_path / "args.json"
+        config = WorkflowConfig.model_validate(
+            {
+                "name": "test",
+                "steps": [
+                    {
+                        "name": "s",
+                        "image": "ubuntu:24.04",
+                        "script": f"cp $SEEKR_CHAIN_ARGS {out}",
+                    }
+                ],
+            }
+        )
+        launch_local_workflow(config, args={"lr": 0.01, "epochs": 5})
+        data = json.loads(out.read_text())
+        assert data == {"lr": 0.01, "epochs": 5}
+
+    def test_before_script_failure_skips_script(self, tmp_path):
+        """If before_script fails, the main script must not run and the step fails."""
+        marker = tmp_path / "ran.txt"
+        config = WorkflowConfig.model_validate(
+            {
+                "name": "test",
+                "steps": [
+                    {
+                        "name": "s",
+                        "image": "ubuntu:24.04",
+                        "before_script": "exit 1",
+                        "script": f"touch {marker}",
+                    }
+                ],
+            }
+        )
+        wf = launch_local_workflow(config)
+        assert wf.get_status() == WorkflowStatus.FAILED
+        assert not marker.exists(), "script should not have run after before_script failed"
+
+    def test_independent_steps_both_run_when_one_fails(self, tmp_path):
+        """Two independent steps: if A fails, B (no dependency on A) still runs."""
+        marker = tmp_path / "b_ran.txt"
+        config = WorkflowConfig.model_validate(
+            {
+                "name": "test",
+                "steps": [
+                    {"name": "a", "image": "ubuntu:24.04", "script": "exit 1"},
+                    {"name": "b", "image": "ubuntu:24.04", "script": f"touch {marker}"},
+                ],
+            }
+        )
+        wf = launch_local_workflow(config)
+        assert wf.get_status() == WorkflowStatus.FAILED
+        assert marker.exists(), "independent step B should have run despite A failing"
+
+    def test_config_as_dict(self):
+        """launch_local_workflow accepts a raw dict and validates it internally."""
+        config_dict = {
+            "name": "test",
+            "steps": [{"name": "s", "image": "ubuntu:24.04", "script": "exit 0"}],
+        }
+        wf = launch_local_workflow(config_dict)
+        assert wf.get_status() == WorkflowStatus.SUCCEEDED
+
+    def test_code_path_sets_workdir(self, tmp_path):
+        """config.code.path is used as the working directory for script execution."""
+        out = tmp_path / "cwd.txt"
+        config = WorkflowConfig.model_validate(
+            {
+                "name": "test",
+                "code": {"path": str(tmp_path)},
+                "steps": [
+                    {
+                        "name": "s",
+                        "image": "ubuntu:24.04",
+                        "script": f"pwd > {out}",
+                    }
+                ],
+            }
+        )
+        launch_local_workflow(config)
+        assert out.read_text().strip() == str(tmp_path)
