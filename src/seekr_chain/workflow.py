@@ -6,6 +6,7 @@ from enum import Enum
 
 class Backend(str, Enum):
     ARGO = "ARGO"
+    LOCAL = "LOCAL"
 
 
 class Workflow(ABC):

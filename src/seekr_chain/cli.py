@@ -2,6 +2,8 @@
 
 import click
 
+from seekr_chain.workflow import Backend
+
 
 def _load_config(path):
     if path.suffix == ".yaml":
@@ -34,7 +36,14 @@ def main():
 @click.option("-f", "--follow", is_flag=True, help="Follow job")
 @click.option("-i", "--interactive", is_flag=True, help="Run interactively")
 @click.option("-n", "--namespace", default=None, help="Override the namespace from the config")
-def submit(config, follow, interactive, namespace):
+@click.option(
+    "-b",
+    "--backend",
+    default="argo",
+    type=click.Choice([b.value.lower() for b in Backend], case_sensitive=False),
+    help="Execution backend (default: argo)",
+)
+def submit(config, follow, interactive, namespace, backend):
     """
     Submit a job
     """
@@ -52,7 +61,7 @@ def submit(config, follow, interactive, namespace):
     if namespace:
         config.namespace = namespace
 
-    job = seekr_chain.launch_workflow(config, interactive=interactive)
+    job = seekr_chain.launch_workflow(config, interactive=interactive, backend=backend)
 
     if follow and not interactive:
         job.follow()
