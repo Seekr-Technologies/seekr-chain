@@ -167,6 +167,40 @@ class TestJobsetTemplateRendering:
         assert "MASTER_ADDR" in env_names
         assert "MY_SECRET" in env_names
 
+    def test_cluster_secret_ref_points_at_cluster_secret(self, tmp_path):
+        """SecretRefSource entries must reference the original secret, not the workflow secret."""
+        config = _minimal_config()
+        job_info = _fake_job_info()
+
+        # Simulate what _create_workflow_secrets produces for a SecretRefSource entry
+        cluster_secret_ref = {
+            "name": "API_TOKEN",
+            "valueFrom": {"secretKeyRef": {"name": "my-cluster-secret", "key": "token"}},
+        }
+
+        _, context = build_jobset_context(
+            workflow_config=config,
+            step_index=0,
+            job_info=job_info,
+            workflow_name="ab1234",
+            workflow_secrets=[cluster_secret_ref],
+            interactive=False,
+            assets_path=tmp_path / "assets",
+        )
+
+        rendered = render.render("jobset.yaml.j2", context)
+        manifest = yaml.safe_load(rendered)
+
+        pod_spec = manifest["spec"]["replicatedJobs"][0]["template"]["spec"]["template"]["spec"]
+        main_container = next(c for c in pod_spec["containers"] if c["name"] == "main")
+
+        api_token_env = next(e for e in main_container["env"] if e["name"] == "API_TOKEN")
+        secret_ref = api_token_env["valueFrom"]["secretKeyRef"]
+
+        # Must point at the cluster secret, not the per-workflow secret
+        assert secret_ref["name"] == "my-cluster-secret"
+        assert secret_ref["key"] == "token"
+
     def test_no_success_policy_by_default(self, tmp_path):
         config = _minimal_config()
         job_info = _fake_job_info()

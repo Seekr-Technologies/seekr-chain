@@ -13,23 +13,64 @@ import kubernetes
 import yaml
 from botocore.client import BaseClient
 
+import dotenv
+
 from seekr_chain import WorkflowConfig, k8s_utils, s3_utils, utils
+from seekr_chain.config import EnvSource, SecretRefSource, StepConfig
 from seekr_chain.backends.argo import render
 from seekr_chain.backends.argo.argo_workflow import ArgoWorkflow
 from seekr_chain.backends.argo.job_info import JobInfo, _resolve_datastore_root, get_job_info
 from seekr_chain.backends.argo.jobset import _build_jobset_labels, create_jobset_manifest
 from seekr_chain.backends.argo.parse_logs import DATA_SCHEMA_VERSION
-from seekr_chain.config import StepConfig
 from seekr_chain.symlink import symlink
 from seekr_chain.tar_directory import tar_directory
 
 logger = logging.getLogger(__name__)
 
 
+def _resolve_env_secrets(config: WorkflowConfig) -> dict[str, str]:
+    """Resolve EnvSource secret values against the local environment and any .env file.
+
+    Priority: environment variables > .env file values.
+    Raises RuntimeError with an actionable message if a required variable is missing.
+    """
+    env_entries = {k: v for k, v in (config.secrets or {}).items() if isinstance(v, EnvSource)}
+    if not env_entries:
+        return {}
+
+    # Build a merged lookup: .env file values overlaid by actual env vars
+    dotenv_path = dotenv.find_dotenv(usecwd=True)
+    dotenv_values = dotenv.dotenv_values(dotenv_path) if dotenv_path else {}
+    merged = {**dotenv_values, **os.environ}
+
+    resolved: dict[str, str] = {}
+    missing: list[str] = []
+    for key, source in env_entries.items():
+        var_name = source.env if isinstance(source.env, str) else key
+        value = merged.get(var_name)
+        if value is None:
+            missing.append(var_name)
+        else:
+            resolved[key] = value
+
+    if missing:
+        raise RuntimeError(
+            f"The following environment variable(s) required by secrets are not set: "
+            f"{', '.join(missing)}\n\n"
+            "Set them in your shell or add them to a .env file in your project directory."
+        )
+
+    return resolved
+
+
 def _create_secrets(workflow_name: str, s3_creds: dict, config: WorkflowConfig):
-    secrets = {}
-    if config.secrets:
-        secrets = config.secrets
+    secrets: dict[str, str] = {}
+    for key, value in (config.secrets or {}).items():
+        if isinstance(value, str):
+            secrets[key] = value
+        # SecretRefSource entries are referenced directly; values are never copied here
+
+    secrets.update(_resolve_env_secrets(config))
 
     if s3_creds:
         secrets = {**secrets, **{key.upper(): value for key, value in s3_creds.items()}}
@@ -115,21 +156,44 @@ def _create_dag_task(step_config: StepConfig) -> dict:
 def _create_workflow_secrets(config: WorkflowConfig, workflow_name: str, s3_creds: dict) -> list[dict]:
     out = []
 
-    secrets = {}
-    if config.secrets:
-        secrets = config.secrets
+    for key, value in (config.secrets or {}).items():
+        if isinstance(value, SecretRefSource):
+            # Reference the existing secret store entry directly — value is never copied.
+            ref_key = value.secretRef.key or key
+            out.append(
+                {
+                    "name": key,
+                    "valueFrom": {
+                        "secretKeyRef": {
+                            "name": value.secretRef.name,
+                            "key": ref_key,
+                        }
+                    },
+                }
+            )
+        else:
+            # Inline strings and EnvSource values are stored in the per-workflow K8s Secret.
+            out.append(
+                {
+                    "name": key,
+                    "valueFrom": {
+                        "secretKeyRef": {
+                            "name": workflow_name,
+                            "key": key,
+                        }
+                    },
+                }
+            )
 
-    if s3_creds:
-        secrets = {**secrets, **{key.upper(): value for key, value in s3_creds.items()}}
-
-    for secret_key in secrets.keys():
+    # S3 credentials are also stored in the per-workflow K8s Secret.
+    for cred_key in (s3_creds or {}).keys():
         out.append(
             {
-                "name": secret_key,
+                "name": cred_key.upper(),
                 "valueFrom": {
                     "secretKeyRef": {
                         "name": workflow_name,
-                        "key": secret_key,
+                        "key": cred_key.upper(),
                     }
                 },
             }

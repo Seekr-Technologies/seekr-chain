@@ -80,6 +80,53 @@ AffinityRule = Annotated[
 ]
 
 
+class SecretRef(BaseModel):
+    """Pointer to a key within a backend secret store (e.g. a Kubernetes Secret).
+
+    Parameters
+    ----------
+    name : Name of the secret store object (e.g. the Kubernetes Secret name).
+    key : Key within the secret store object. Defaults to the ``secrets`` dict key
+          (i.e. the injected environment variable name) when omitted.
+    """
+
+    name: str
+    key: Optional[str] = None
+
+
+class EnvSource(BaseModel):
+    """Read the secret value from the local environment at submit time.
+
+    The resolved value is stored transiently in the per-job secret store entry and
+    injected as an environment variable in each container.
+
+    Parameters
+    ----------
+    env : Name of the local environment variable to read, or ``True`` to use the
+          same name as the ``secrets`` dict key.
+    """
+
+    env: Union[str, bool]
+
+
+class SecretRefSource(BaseModel):
+    """Reference a secret that already exists in the backend secret store.
+
+    The value is never read, copied, or logged by seekr-chain — the container
+    runtime resolves it directly from the named secret store entry.
+
+    Parameters
+    ----------
+    secretRef : Pointer to the secret store object and key.
+    """
+
+    secretRef: SecretRef
+
+
+# A secret value is either a plain string (inline literal) or one of the typed sources.
+SecretValue = Union[str, EnvSource, SecretRefSource]
+
+
 class SchedulingConfig(BaseModel):
     """Scheduling configuration for job queue admission.
 
@@ -331,7 +378,7 @@ class WorkflowConfig(BaseModel):
     code: Optional[CodeConfig] = None
     ttl: datetime.timedelta = datetime.timedelta(days=7)
     steps: list[StepConfig]
-    secrets: Optional[dict[str, str]] = None
+    secrets: Optional[dict[str, SecretValue]] = None
     env: Optional[dict[str, str]] = None
     affinity: Optional[list[AffinityRule]] = None
     scheduling: Optional[SchedulingConfig] = None
