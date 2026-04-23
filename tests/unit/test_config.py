@@ -3,7 +3,7 @@
 import pytest
 from pydantic import ValidationError
 
-from seekr_chain.config import EnvSource, SecretRef, SecretRefSource, WorkflowConfig
+from seekr_chain.config import EnvSource, SecretRefSource, WorkflowConfig
 
 
 def _minimal_step(name, depends_on=None):
@@ -55,9 +55,7 @@ class TestDependsOnValidation:
 
 class TestSecretConfig:
     def _minimal_config(self, secrets):
-        return WorkflowConfig.model_validate(
-            {"name": "test", "steps": [_minimal_step("a")], "secrets": secrets}
-        )
+        return WorkflowConfig.model_validate({"name": "test", "steps": [_minimal_step("a")], "secrets": secrets})
 
     def test_inline_secret(self):
         config = self._minimal_config({"MY_KEY": "my-value"})
@@ -80,9 +78,7 @@ class TestSecretConfig:
         assert config.secrets["MY_KEY"].secretRef.key is None
 
     def test_secret_ref_explicit_key(self):
-        config = self._minimal_config(
-            {"MY_KEY": {"secretRef": {"name": "my-k8s-secret", "key": "token"}}}
-        )
+        config = self._minimal_config({"MY_KEY": {"secretRef": {"name": "my-k8s-secret", "key": "token"}}})
         assert isinstance(config.secrets["MY_KEY"], SecretRefSource)
         assert config.secrets["MY_KEY"].secretRef.key == "token"
 

@@ -349,9 +349,7 @@ class TestBasic:
                     "secrets": {
                         "INLINE_SECRET": "inline-value",
                         "ENV_SECRET": {"env": "MY_ENV_VAR"},
-                        "CLUSTER_SECRET": {
-                            "secretRef": {"name": "test-pre-existing-secret", "key": "token"}
-                        },
+                        "CLUSTER_SECRET": {"secretRef": {"name": "test-pre-existing-secret", "key": "token"}},
                     },
                     "steps": [
                         {
@@ -374,9 +372,7 @@ class TestBasic:
             logs = job.get_logs().to_dict()
 
         finally:
-            v1_api.delete_namespaced_secret(
-                name="test-pre-existing-secret", namespace="argo-workflows"
-            )
+            v1_api.delete_namespaced_secret(name="test-pre-existing-secret", namespace="argo-workflows")
 
         expected = {
             "step=step": {
