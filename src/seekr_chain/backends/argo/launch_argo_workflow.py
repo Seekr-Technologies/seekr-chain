@@ -9,19 +9,18 @@ import tempfile
 from pathlib import Path
 
 import boto3
+import dotenv
 import kubernetes
 import yaml
 from botocore.client import BaseClient
 
-import dotenv
-
 from seekr_chain import WorkflowConfig, k8s_utils, s3_utils, utils
-from seekr_chain.config import EnvSource, SecretRefSource, StepConfig
 from seekr_chain.backends.argo import render
 from seekr_chain.backends.argo.argo_workflow import ArgoWorkflow
 from seekr_chain.backends.argo.job_info import JobInfo, _resolve_datastore_root, get_job_info
 from seekr_chain.backends.argo.jobset import _build_jobset_labels, create_jobset_manifest
 from seekr_chain.backends.argo.parse_logs import DATA_SCHEMA_VERSION
+from seekr_chain.config import EnvSource, SecretRefSource, StepConfig
 from seekr_chain.symlink import symlink
 from seekr_chain.tar_directory import tar_directory
 
@@ -95,8 +94,7 @@ def _create_secrets(workflow_name: str, s3_creds: dict, config: WorkflowConfig):
         # Create the secret in the cluster
         v1.create_namespaced_secret(namespace=config.namespace, body=secret)
 
-        secret_names = "\n".join([f"  {key}" for key in sorted(secrets.keys())])
-        logger.info(f"Uploaded workflow secrets:\n{secret_names}")
+        logger.info("Uploaded workflow secrets (count=%d)", len(secrets))
 
     # Cleanup old secrets
     max_age_days = 7
