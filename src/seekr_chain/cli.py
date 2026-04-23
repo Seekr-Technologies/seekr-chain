@@ -164,13 +164,27 @@ def list_cmd(namespace, limit, user):
 
 
 @main.command()
-@click.argument("JOB_ID")
-def delete(job_id):
-    """Delete a workflow."""
+@click.argument("JOB_IDS", nargs=-1, required=True)
+def delete(job_ids):
+    """Delete one or more workflows."""
     import seekr_chain
 
-    workflow = seekr_chain.ArgoWorkflow(id=job_id)
-    workflow.delete()
+    for job_id in job_ids:
+        workflow = seekr_chain.ArgoWorkflow(id=job_id)
+        workflow.delete()
+        click.echo(f"Deleted: {job_id}")
+
+
+@main.command()
+@click.argument("JOB_IDS", nargs=-1, required=True)
+def cancel(job_ids):
+    """Cancel one or more workflows without deleting them."""
+    import seekr_chain
+
+    for job_id in job_ids:
+        workflow = seekr_chain.ArgoWorkflow(id=job_id)
+        workflow.cancel()
+        click.echo(f"Cancelled: {job_id}")
 
 
 if __name__ == "__main__":
