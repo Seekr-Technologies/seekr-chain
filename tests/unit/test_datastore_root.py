@@ -1,12 +1,12 @@
-"""Tests for datastore root resolution and ArgoWorkflow reconnect behaviour."""
+"""Tests for datastore root resolution and K8sWorkflow reconnect behaviour."""
 
 from unittest.mock import MagicMock, patch
 
 import pytest
 from kubernetes.client.rest import ApiException
 
-from seekr_chain.backends.argo.argo_workflow import ArgoWorkflow
-from seekr_chain.backends.argo.job_info import get_job_info
+from seekr_chain.backends.k8s.k8s_workflow import K8sWorkflow
+from seekr_chain.backends.k8s.job_info import get_job_info
 from tests.unit.conftest import no_dotenv, no_toml_files
 
 
@@ -24,12 +24,12 @@ class TestGetJobInfoError:
                 get_job_info("some-id")
 
 
-class TestArgoWorkflowReconnect:
+class TestK8sWorkflowReconnect:
     def _make_workflow(self, id="test-id-abc123", datastore_root=None, k8s_status=200):
-        """Create an ArgoWorkflow with mocked k8s clients."""
+        """Create a K8sWorkflow with mocked k8s clients."""
         with (
-            patch("seekr_chain.backends.argo.argo_workflow.k8s_utils") as mock_k8s_utils,
-            patch("seekr_chain.backends.argo.argo_workflow.boto3") as mock_boto3,
+            patch("seekr_chain.backends.k8s.k8s_workflow.k8s_utils") as mock_k8s_utils,
+            patch("seekr_chain.backends.k8s.k8s_workflow.boto3") as mock_boto3,
             patch("kubernetes.config.list_kube_config_contexts") as mock_ctx,
         ):
             mock_ctx.return_value = (None, {"context": {"namespace": "argo"}})
@@ -49,7 +49,7 @@ class TestArgoWorkflowReconnect:
                     }
                 }
 
-            return ArgoWorkflow(id=id)
+            return K8sWorkflow(id=id)
 
     def test_k8s_404_falls_back_to_env_var(self, monkeypatch):
         monkeypatch.setenv("SEEKRCHAIN_DATASTORE_ROOT", "s3://bucket/seekr-chain/")

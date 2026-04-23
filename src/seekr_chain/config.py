@@ -336,6 +336,13 @@ class WorkflowConfig(BaseModel):
     affinity: Optional[list[AffinityRule]] = None
     scheduling: Optional[SchedulingConfig] = None
     logging: LoggingConfig = LoggingConfig()
+    controller_image: Optional[str] = None
+    """Docker image for the controller pod (k8s backend only).
+
+    When not set (the default), ``python:3.12-slim`` is used and ``kubernetes``
+    + ``pyyaml`` are installed at pod startup via ``pip install``.  Provide a
+    pre-baked image to skip the install step and reduce cold-start time."""
+
 
     @field_validator("affinity", mode="before")
     @classmethod

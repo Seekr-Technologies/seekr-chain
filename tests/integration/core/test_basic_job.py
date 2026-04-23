@@ -48,7 +48,7 @@ class TestScript:
             }
         )
 
-        job = seekr_chain.launch_argo_workflow(config)
+        job = seekr_chain.launch_k8s_workflow(config)
         job.follow()
 
         seekr_chain.wait(job, poll_interval=1)
@@ -89,7 +89,7 @@ class TestScript:
             }
         )
 
-        job = seekr_chain.launch_argo_workflow(config)
+        job = seekr_chain.launch_k8s_workflow(config)
         job.follow()
 
         seekr_chain.wait(job, poll_interval=1)
@@ -131,7 +131,7 @@ class TestScript:
             }
         )
 
-        job = seekr_chain.launch_argo_workflow(config)
+        job = seekr_chain.launch_k8s_workflow(config)
         job.follow()
 
         seekr_chain.wait(job, poll_interval=1)
@@ -175,7 +175,7 @@ class TestScript:
             }
         )
 
-        job = seekr_chain.launch_argo_workflow(config)
+        job = seekr_chain.launch_k8s_workflow(config)
         job.follow()
 
         seekr_chain.wait(job, poll_interval=1)
@@ -223,7 +223,7 @@ class TestScript:
             }
         )
 
-        job = seekr_chain.launch_argo_workflow(config)
+        job = seekr_chain.launch_k8s_workflow(config)
         job.follow()
 
         seekr_chain.wait(job, poll_interval=1)
@@ -264,7 +264,7 @@ class TestScript:
             }
         )
 
-        job = seekr_chain.launch_argo_workflow(config)
+        job = seekr_chain.launch_k8s_workflow(config)
         job.follow()
 
         seekr_chain.wait(job, poll_interval=1)
@@ -305,7 +305,7 @@ class TestBasic:
             }
         )
 
-        job = seekr_chain.launch_argo_workflow(config)
+        job = seekr_chain.launch_k8s_workflow(config)
         job.follow()
 
         seekr_chain.wait(job, poll_interval=1)
@@ -345,7 +345,7 @@ class TestBasic:
             }
         )
 
-        job = seekr_chain.launch_argo_workflow(config)
+        job = seekr_chain.launch_k8s_workflow(config)
         job.follow()
 
         seekr_chain.wait(job, poll_interval=1)
@@ -381,7 +381,7 @@ class TestBasic:
             }
         )
 
-        job = seekr_chain.launch_argo_workflow(config)
+        job = seekr_chain.launch_k8s_workflow(config)
         job.follow()
 
         status = seekr_chain.wait(job, poll_interval=1)
@@ -440,7 +440,7 @@ class TestBasic:
             }
         )
 
-        job = seekr_chain.launch_argo_workflow(config)
+        job = seekr_chain.launch_k8s_workflow(config)
         job.follow()
 
         seekr_chain.wait(job, poll_interval=1)
@@ -473,7 +473,7 @@ class TestBasic:
             },
         )
 
-        job = seekr_chain.launch_argo_workflow(config)
+        job = seekr_chain.launch_k8s_workflow(config)
         job.follow()
 
         logs = job.get_logs(follow=True, color=False)
@@ -502,7 +502,7 @@ class TestBasic:
             },
         )
 
-        job = seekr_chain.launch_argo_workflow(config)
+        job = seekr_chain.launch_k8s_workflow(config)
         job.follow()
 
         job.follow()
@@ -542,7 +542,7 @@ class TestBasic:
             }
         )
 
-        job = seekr_chain.launch_argo_workflow(config)
+        job = seekr_chain.launch_k8s_workflow(config)
         job.follow()
 
         seekr_chain.wait(job, poll_interval=1)
@@ -591,7 +591,7 @@ class TestAffinity:
             }
         )
 
-        job = seekr_chain.launch_argo_workflow(config)
+        job = seekr_chain.launch_k8s_workflow(config)
         job.follow()
 
         seekr_chain.wait(job, poll_interval=1)
@@ -627,7 +627,7 @@ class TestAffinity:
             }
         )
 
-        job = seekr_chain.launch_argo_workflow(config)
+        job = seekr_chain.launch_k8s_workflow(config)
         job.follow()
 
         seekr_chain.wait(job, poll_interval=1)
@@ -670,7 +670,7 @@ class TestCodeUpload:
             },
         )
 
-        job = seekr_chain.launch_argo_workflow(config)
+        job = seekr_chain.launch_k8s_workflow(config)
         job.follow()
         seekr_chain.wait(job, poll_interval=1)
         logs = job.get_logs().to_dict()
@@ -732,7 +732,7 @@ class TestCodeUpload:
                 ],
             },
         )
-        job0 = seekr_chain.launch_argo_workflow(config)
+        job0 = seekr_chain.launch_k8s_workflow(config)
 
         # Do exclusion, and test again
         config = seekr_chain.WorkflowConfig.model_validate(
@@ -750,7 +750,7 @@ class TestCodeUpload:
                 ],
             },
         )
-        job1 = seekr_chain.launch_argo_workflow(config)
+        job1 = seekr_chain.launch_k8s_workflow(config)
 
         job0.follow()
         job1.follow()
@@ -817,7 +817,7 @@ class TestCodeUpload:
                 ],
             },
         )
-        job0 = seekr_chain.launch_argo_workflow(config)
+        job0 = seekr_chain.launch_k8s_workflow(config)
 
         # Do exclusion, and test again
         config = seekr_chain.WorkflowConfig.model_validate(
@@ -839,7 +839,7 @@ class TestCodeUpload:
                 ],
             },
         )
-        job1 = seekr_chain.launch_argo_workflow(config)
+        job1 = seekr_chain.launch_k8s_workflow(config)
 
         job0.follow()
         job1.follow()
@@ -905,7 +905,7 @@ class TestCodeUpload:
                 ],
             },
         )
-        job = seekr_chain.launch_argo_workflow(config)
+        job = seekr_chain.launch_k8s_workflow(config)
         job.follow()
         seekr_chain.wait(job, poll_interval=1)
         logs = job.get_logs().to_dict()
@@ -968,7 +968,7 @@ class TestArgs:
             "bool": False,
         }
 
-        job = seekr_chain.launch_argo_workflow(config, args=args)
+        job = seekr_chain.launch_k8s_workflow(config, args=args)
 
         job.follow()
         seekr_chain.wait(job, poll_interval=1)
@@ -1024,7 +1024,7 @@ class TestDAGJob:
             }
         )
 
-        job = seekr_chain.launch_argo_workflow(config)
+        job = seekr_chain.launch_k8s_workflow(config)
         job.follow()
 
         seekr_chain.wait(job, poll_interval=1)
@@ -1111,7 +1111,7 @@ class TestVolumes:
             }
         )
 
-        job = seekr_chain.launch_argo_workflow(config)
+        job = seekr_chain.launch_k8s_workflow(config)
         job.follow()
 
         seekr_chain.wait(job, poll_interval=1)
@@ -1151,7 +1151,7 @@ class TestFollowJob:
             }
         )
 
-        job = seekr_chain.launch_argo_workflow(config)
+        job = seekr_chain.launch_k8s_workflow(config)
         job.follow()
 
         return

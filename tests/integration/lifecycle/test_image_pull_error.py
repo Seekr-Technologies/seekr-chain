@@ -32,7 +32,7 @@ class TestImagePullError:
             }
         )
 
-        job = seekr_chain.launch_argo_workflow(config)
+        job = seekr_chain.launch_k8s_workflow(config)
 
         pull_error_seen = False
         deadline = time.time() + 120  # 2 minutes is plenty for ImagePullBackOff to appear

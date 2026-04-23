@@ -9,7 +9,7 @@ from types import SimpleNamespace
 import pytest
 from kubernetes.client.rest import ApiException
 
-from seekr_chain.backends.argo.argo_workflow import (
+from seekr_chain.backends.k8s.k8s_workflow import (
     _collect_container_states,
     _collect_pod_state,
     _is_jobset_suspended,

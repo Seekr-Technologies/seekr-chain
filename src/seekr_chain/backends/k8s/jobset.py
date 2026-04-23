@@ -158,7 +158,7 @@ def _build_role_context(
     job_info,
     interactive: bool,
     step_name: str,
-    assets_path: Path,
+    assets_path: Path | None = None,
 ) -> dict:
     """Build the Jinja2 template context dict for a single replicated job (role)."""
     js_pod_name = role_config.name
@@ -215,14 +215,15 @@ def _build_role_context(
         jobset_name=js_name,
     )
 
-    _construct_hostfile(
-        js_name,
-        js_pod_name,
-        subdomain,
-        role_config=role_config,
-        assets_path=assets_path,
-        step_name=step_name,
-    )
+    if assets_path is not None:
+        _construct_hostfile(
+            js_name,
+            js_pod_name,
+            subdomain,
+            role_config=role_config,
+            assets_path=assets_path,
+            step_name=step_name,
+        )
 
     return {
         "name": js_pod_name,
@@ -486,7 +487,7 @@ def _write_peermaps_and_scripts(role_configs, js_name, step_config, assets_path)
 
 
 def build_jobset_context(
-    workflow_config, step_index, job_info, workflow_name, workflow_secrets, interactive: bool, assets_path: Path
+    workflow_config, step_index, job_info, workflow_name, workflow_secrets, interactive: bool, assets_path: Path | None = None
 ) -> tuple[str, dict]:
     """Build the Jinja2 template context for a JobSet manifest.
 
@@ -511,9 +512,10 @@ def build_jobset_context(
             logger.warning(f"Generated jobset name is too long! Shortening to {js_name}")
             break
 
-    _write_peermaps_and_scripts(
-        role_configs=role_configs, js_name=js_name, step_config=step_config, assets_path=assets_path
-    )
+    if assets_path is not None:
+        _write_peermaps_and_scripts(
+            role_configs=role_configs, js_name=js_name, step_config=step_config, assets_path=assets_path
+        )
 
     affinity, pack_groups = _build_affinity(workflow_config)
 
@@ -548,13 +550,13 @@ def build_jobset_context(
 
 
 def create_jobset_manifest(
-    workflow_config, step_index, job_info, workflow_name, workflow_secrets, interactive: bool, assets_path: Path
+    workflow_config, step_index, job_info, workflow_name, workflow_secrets, interactive: bool, assets_path: Path | None = None
 ) -> tuple[str, str]:
     """Build and render the JobSet manifest.
 
     Returns (js_name, rendered_yaml_string).
     """
-    from seekr_chain.backends.argo import render
+    from seekr_chain.backends.k8s import render
 
     js_name, context = build_jobset_context(
         workflow_config=workflow_config,

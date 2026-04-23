@@ -287,7 +287,7 @@ def job_name(request):
 @pytest.fixture(autouse=True)
 def patch_configs_for_testing(job_name, datastore_root, monkeypatch, hermetic_flag, minio_service, k3d_cluster):
     # Get the real original function (in case it's already been wrapped)
-    original = inspect.unwrap(seekr_chain.launch_argo_workflow)
+    original = inspect.unwrap(seekr_chain.launch_k8s_workflow)
 
     # Ensure subprocesses (e.g. `chain submit` in test_examples.py) also see the
     # datastore root without needing it explicitly in their config files.
@@ -348,4 +348,4 @@ def patch_configs_for_testing(job_name, datastore_root, monkeypatch, hermetic_fl
 
         return _orig(*args, **kwargs)
 
-    monkeypatch.setattr(seekr_chain, "launch_argo_workflow", wrapper)
+    monkeypatch.setattr(seekr_chain, "launch_k8s_workflow", wrapper)

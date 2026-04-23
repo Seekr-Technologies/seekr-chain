@@ -3,7 +3,7 @@ import datetime
 from rich.console import Console
 from rich.text import Text
 
-from seekr_chain import ArgoWorkflow
+from seekr_chain import K8sWorkflow
 
 
 def _parse_pod_index_str(x: str) -> list[int]:
@@ -57,7 +57,7 @@ def _print_wrapped(console, prefix, message) -> None:
 def print_logs(job_id, step, role, pod_index, attempt, timestamps):
     pod_indexes = _parse_pod_index_str(pod_index)
 
-    workflow = ArgoWorkflow(id=job_id)
+    workflow = K8sWorkflow(id=job_id)
     logs = workflow.get_logs(timestamps=True)
 
     # Narrow down to step

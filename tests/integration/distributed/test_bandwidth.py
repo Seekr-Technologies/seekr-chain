@@ -37,7 +37,7 @@ class TestBandwidth:
             },
         )
 
-        job = seekr_chain.launch_argo_workflow(config)
+        job = seekr_chain.launch_k8s_workflow(config)
         job.follow()
 
         status = seekr_chain.wait(job, poll_interval=1)
@@ -91,7 +91,7 @@ class TestBandwidth:
             },
         )
 
-        job = seekr_chain.launch_argo_workflow(config)
+        job = seekr_chain.launch_k8s_workflow(config)
         job.follow()
 
         status = seekr_chain.wait(job, poll_interval=1)

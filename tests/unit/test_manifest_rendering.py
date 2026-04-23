@@ -2,9 +2,9 @@
 
 import yaml
 
-from seekr_chain.backends.argo import render
-from seekr_chain.backends.argo.job_info import get_job_info
-from seekr_chain.backends.argo.jobset import build_jobset_context
+from seekr_chain.backends.k8s import render
+from seekr_chain.backends.k8s.job_info import get_job_info
+from seekr_chain.backends.k8s.jobset import build_jobset_context
 from seekr_chain.config import WorkflowConfig
 
 DATASTORE_ROOT = "s3://test-bucket/seekr-chain/"

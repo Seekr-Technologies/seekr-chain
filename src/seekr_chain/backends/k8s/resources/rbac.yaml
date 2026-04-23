@@ -1,0 +1,50 @@
+# seekr-chain controller RBAC
+#
+# One-time setup: apply to each namespace where seekr-chain jobs will run.
+#
+#   chain install | kubectl apply -n <namespace> -f -
+#
+# Or save and apply manually:
+#
+#   chain install > seekr-chain-rbac.yaml
+#   kubectl apply -n <namespace> -f seekr-chain-rbac.yaml
+#
+# For GitOps (ArgoCD / Flux): add this file to your app's resource directory.
+#
+# Once applied, seekr-chain auto-detects the seekr-chain-controller SA at
+# submit time — no config changes needed.
+# If Argo Workflows is installed in the same namespace, seekr-chain will fall
+# back to the `argo` SA automatically if seekr-chain-controller is not present.
+#
+# Required permissions:
+#   jobset.x-k8s.io / jobsets  : create, get, list, watch, delete
+#   core / pods                : list, get  (for status monitoring)
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: seekr-chain-controller
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: seekr-chain-controller
+rules:
+  - apiGroups: ["jobset.x-k8s.io"]
+    resources: ["jobsets"]
+    verbs: ["create", "get", "list", "watch", "delete"]
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["list", "get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: seekr-chain-controller
+subjects:
+  - kind: ServiceAccount
+    name: seekr-chain-controller
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: seekr-chain-controller
