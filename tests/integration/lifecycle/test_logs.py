@@ -1,7 +1,7 @@
 import seekr_chain
 from seekr_chain import s3_utils
 from seekr_chain._testing import assert_nested_match
-from seekr_chain.backends.argo.argo_workflow import ArgoWorkflow
+from seekr_chain.backends.k8s.k8s_workflow import K8sWorkflow
 
 TS_REGEX = r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}.\d{6}Z"
 
@@ -26,7 +26,7 @@ class TestLogs:
             }
         )
 
-        job = seekr_chain.launch_argo_workflow(config)
+        job = seekr_chain.launch_k8s_workflow(config)
         job.follow()
 
         status = seekr_chain.wait(job, poll_interval=1)
@@ -84,7 +84,7 @@ class TestLogs:
             }
         )
 
-        job = seekr_chain.launch_argo_workflow(config)
+        job = seekr_chain.launch_k8s_workflow(config)
         job.follow()
 
         status = seekr_chain.wait(job, poll_interval=1)
@@ -161,7 +161,7 @@ class TestLogs:
             }
         )
 
-        job = seekr_chain.launch_argo_workflow(config)
+        job = seekr_chain.launch_k8s_workflow(config)
         job.follow()
 
         status = seekr_chain.wait(job, poll_interval=1)
@@ -225,7 +225,7 @@ class TestLogs:
             }
         )
 
-        job = seekr_chain.launch_argo_workflow(config)
+        job = seekr_chain.launch_k8s_workflow(config)
         job.follow()
 
         status = seekr_chain.wait(job, poll_interval=1)
@@ -274,7 +274,7 @@ class TestLogs:
         assert_nested_match(contents, expected)
 
     def test_logs_after_reconnect(self):
-        """Reconstruct ArgoWorkflow by ID after the workflow is deleted, simulating
+        """Reconstruct K8sWorkflow by ID after the workflow is deleted, simulating
         a fresh session where the original object is no longer available. Log retrieval
         must still work via the SEEKRCHAIN_DATASTORE_ROOT env var fallback."""
         config = seekr_chain.WorkflowConfig.model_validate(
@@ -293,7 +293,7 @@ class TestLogs:
             }
         )
 
-        job = seekr_chain.launch_argo_workflow(config)
+        job = seekr_chain.launch_k8s_workflow(config)
         job.follow()
         status = seekr_chain.wait(job, poll_interval=1)
         assert status.is_successful()
@@ -303,8 +303,8 @@ class TestLogs:
 
         # Reconstruct the workflow object by ID only — simulates a new session
         # where the original `job` object is no longer in memory. The k8s workflow
-        # object is gone, so ArgoWorkflow must fall back to SEEKRCHAIN_DATASTORE_ROOT.
-        reconnected = ArgoWorkflow(id=job_id)
+        # object is gone, so K8sWorkflow must fall back to SEEKRCHAIN_DATASTORE_ROOT.
+        reconnected = K8sWorkflow(id=job_id)
         logs = reconnected.get_logs().to_dict()
 
         expected = {"step=step": {"index=0": {"attempt=0": ["reconnect-test", ""]}}}
