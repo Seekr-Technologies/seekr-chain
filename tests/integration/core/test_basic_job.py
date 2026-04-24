@@ -326,37 +326,61 @@ class TestBasic:
 
         assert_nested_match(logs, expected)
 
-    def test_secrets(self):
-        config = seekr_chain.WorkflowConfig.model_validate(
-            {
-                "name": "test-secrets",
-                "namespace": "argo-workflows",
-                "ttl": "1:00:00",
-                "secrets": {
-                    "MY_SECRET": "42",
-                },
-                "steps": [
-                    {
-                        "name": "step",
-                        "image": "ubuntu:24.04",
-                        "script": "echo MY_SECRET=$MY_SECRET",
-                    }
-                ],
-            }
+    def test_secrets(self, v1_api, monkeypatch):
+        """All three secret source types are injected correctly as env vars in the container."""
+        import kubernetes
+
+        # Create a pre-existing cluster secret for the secretRef test
+        cluster_secret = kubernetes.client.V1Secret(
+            metadata=kubernetes.client.V1ObjectMeta(name="test-pre-existing-secret"),
+            type="Opaque",
+            string_data={"token": "from-cluster"},
         )
+        v1_api.create_namespaced_secret(namespace="argo-workflows", body=cluster_secret)
 
-        job = seekr_chain.launch_argo_workflow(config)
-        job.follow()
+        try:
+            monkeypatch.setenv("MY_ENV_VAR", "from-env")
 
-        seekr_chain.wait(job, poll_interval=1)
+            config = seekr_chain.WorkflowConfig.model_validate(
+                {
+                    "name": "test-secrets",
+                    "namespace": "argo-workflows",
+                    "ttl": "1:00:00",
+                    "secrets": {
+                        "INLINE_SECRET": "inline-value",
+                        "ENV_SECRET": {"env": "MY_ENV_VAR"},
+                        "CLUSTER_SECRET": {"secretRef": {"name": "test-pre-existing-secret", "key": "token"}},
+                    },
+                    "steps": [
+                        {
+                            "name": "step",
+                            "image": "ubuntu:24.04",
+                            "script": (
+                                "echo INLINE_SECRET=$INLINE_SECRET\n"
+                                "echo ENV_SECRET=$ENV_SECRET\n"
+                                "echo CLUSTER_SECRET=$CLUSTER_SECRET"
+                            ),
+                        }
+                    ],
+                }
+            )
 
-        logs = job.get_logs().to_dict()
+            job = seekr_chain.launch_argo_workflow(config)
+            job.follow()
+            seekr_chain.wait(job, poll_interval=1)
+
+            logs = job.get_logs().to_dict()
+
+        finally:
+            v1_api.delete_namespaced_secret(name="test-pre-existing-secret", namespace="argo-workflows")
 
         expected = {
             "step=step": {
                 "index=0": {
                     "attempt=0": [
-                        "MY_SECRET=42",
+                        "INLINE_SECRET=inline-value",
+                        "ENV_SECRET=from-env",
+                        "CLUSTER_SECRET=from-cluster",
                         "",
                     ]
                 },
