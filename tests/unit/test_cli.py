@@ -477,3 +477,51 @@ class TestDelete:
         assert result.exit_code == 0, result.output
         mock_cls.assert_called_once_with(id="my-job")
         mock_workflow.delete.assert_called_once()
+        assert "Deleted: my-job" in result.output
+
+    def test_delete_multiple(self):
+        """chain delete job-1 job-2 → .delete() called for each, confirmation printed for each."""
+        runner = CliRunner()
+        mock_workflow = MagicMock()
+
+        with patch("seekr_chain.ArgoWorkflow", return_value=mock_workflow) as mock_cls:
+            result = runner.invoke(main, ["delete", "job-1", "job-2"])
+
+        assert result.exit_code == 0, result.output
+        assert mock_cls.call_count == 2
+        mock_cls.assert_any_call(id="job-1")
+        mock_cls.assert_any_call(id="job-2")
+        assert mock_workflow.delete.call_count == 2
+        assert "Deleted: job-1" in result.output
+        assert "Deleted: job-2" in result.output
+
+
+class TestCancel:
+    def test_cancel(self):
+        """chain cancel my-job → ArgoWorkflow(id='my-job') constructed and .cancel() called."""
+        runner = CliRunner()
+        mock_workflow = MagicMock()
+
+        with patch("seekr_chain.ArgoWorkflow", return_value=mock_workflow) as mock_cls:
+            result = runner.invoke(main, ["cancel", "my-job"])
+
+        assert result.exit_code == 0, result.output
+        mock_cls.assert_called_once_with(id="my-job")
+        mock_workflow.cancel.assert_called_once()
+        assert "Cancelled: my-job" in result.output
+
+    def test_cancel_multiple(self):
+        """chain cancel job-1 job-2 → .cancel() called for each, confirmation printed for each."""
+        runner = CliRunner()
+        mock_workflow = MagicMock()
+
+        with patch("seekr_chain.ArgoWorkflow", return_value=mock_workflow) as mock_cls:
+            result = runner.invoke(main, ["cancel", "job-1", "job-2"])
+
+        assert result.exit_code == 0, result.output
+        assert mock_cls.call_count == 2
+        mock_cls.assert_any_call(id="job-1")
+        mock_cls.assert_any_call(id="job-2")
+        assert mock_workflow.cancel.call_count == 2
+        assert "Cancelled: job-1" in result.output
+        assert "Cancelled: job-2" in result.output
