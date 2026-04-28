@@ -28,148 +28,88 @@ def cpu_nodes(v1_api):
     return sorted(node.metadata.labels["kubernetes.io/hostname"] for node in nodes if _is_worker_node(node))
 
 
-def test_full_workflow(test_code_dir):
-    """Single workflow exercising: before/after scripts, code upload, and workflow args.
-
-    Replaces: TestBasic.test_basic, TestScript.test_before_after_script,
-    TestCodeUpload.test_basic, TestArgs.test_basic.
-    """
-    config = seekr_chain.WorkflowConfig.model_validate(
-        {
-            "name": "test-full",
-            "namespace": "argo-workflows",
-            "ttl": "1:00:00",
-            "code": {"path": str(test_code_dir / "0_basic")},
-            "steps": [
-                {
-                    "name": "step",
-                    "image": "python:3.12-alpine",
-                    "before_script": "echo before",
-                    "script": """
-                        pwd
-                        python job.py
-                        echo $SEEKR_CHAIN_ARGS && cat $SEEKR_CHAIN_ARGS && echo
-                        ls /seekr-chain/assets/step=step/ | LC_ALL=C sort
-                    """,
-                    "after_script": "echo after",
-                }
-            ],
-        }
-    )
-
-    args = {"key": "value", "num": 42}
-    job = seekr_chain.launch_argo_workflow(config, args=args)
-    job.follow()
-    seekr_chain.wait(job, poll_interval=1)
-    logs = job.get_logs().to_dict()
-
-    expected = {
-        "step=step": {
-            "index=0": {
-                "attempt=0": [
-                    "before",
-                    "/seekr-chain/workspace",
-                    "Hello world",
-                    "/seekr-chain/assets/workflow_args.json",
-                    '{"key": "value", "num": 42}',
-                    # Asset files deployed to the container by the init container
-                    "after_script.sh",
-                    "before_script.sh",
-                    "hostfile",
-                    "peermap.json",
-                    "script.sh",
-                    "after",
-                    "",
-                ]
-            }
-        }
-    }
-    assert_nested_match(logs, expected)
-
-
-def test_failure_modes():
-    """Two failure workflows run in parallel: missing shell, and script fail with after_script.
-
-    Replaces: TestScript.test_shell_missing, test_after_script_always_script_fail,
-    test_after_script_always_before_fail.
-    """
-    config_shell = seekr_chain.WorkflowConfig.model_validate(
-        {
-            "name": "test-shell-missing",
-            "namespace": "argo-workflows",
-            "ttl": "1:00:00",
-            "steps": [
-                {
-                    "shell": "/awef",
-                    "name": "step",
-                    "image": "ubuntu:24.04",
-                    "script": "echo hello",
-                }
-            ],
-        }
-    )
-
-    config_fail = seekr_chain.WorkflowConfig.model_validate(
-        {
-            "name": "test-after-always",
-            "namespace": "argo-workflows",
-            "ttl": "1:00:00",
-            "steps": [
-                {
-                    "name": "step",
-                    "image": "ubuntu:24.04",
-                    "script": """
-                        echo hello world
-                        exit 1
-                    """,
-                    "after_script": "echo after",
-                }
-            ],
-        }
-    )
-
-    job_shell = seekr_chain.launch_argo_workflow(config_shell)
-    job_fail = seekr_chain.launch_argo_workflow(config_fail)
-
-    job_shell.follow()
-    job_fail.follow()
-    seekr_chain.wait([job_shell, job_fail], poll_interval=1)
-
-    # Shell missing: workflow fails with descriptive error
-    assert job_shell.get_status().is_failed()
-    assert_nested_match(
-        job_shell.get_logs().to_dict(),
-        {
-            "step=step": {
-                "index=0": {
-                    "attempt=0": [
-                        "ERROR: shell not found or not executable: /awef",
-                        "",
-                    ]
-                }
-            }
-        },
-    )
-
-    # Script fail: after_script still runs, workflow exits with failure
-    assert job_fail.get_status().is_failed()
-    assert_nested_match(
-        job_fail.get_logs().to_dict(),
-        {
-            "step=step": {
-                "index=0": {
-                    "attempt=0": [
-                        "hello world",
-                        "after",
-                        "",
-                    ]
-                }
-            }
-        },
-    )
-
-
 class TestScript:
+    def test_failure_modes(self):
+        """Two failure workflows run in parallel: missing shell, and script fail with after_script.
+
+        Replaces: TestScript.test_shell_missing, test_after_script_always_script_fail,
+        test_after_script_always_before_fail.
+        """
+        config_shell = seekr_chain.WorkflowConfig.model_validate(
+            {
+                "name": "test-shell-missing",
+                "namespace": "argo-workflows",
+                "ttl": "1:00:00",
+                "steps": [
+                    {
+                        "shell": "/awef",
+                        "name": "step",
+                        "image": "ubuntu:24.04",
+                        "script": "echo hello",
+                    }
+                ],
+            }
+        )
+
+        config_fail = seekr_chain.WorkflowConfig.model_validate(
+            {
+                "name": "test-after-always",
+                "namespace": "argo-workflows",
+                "ttl": "1:00:00",
+                "steps": [
+                    {
+                        "name": "step",
+                        "image": "ubuntu:24.04",
+                        "script": """
+                            echo hello world
+                            exit 1
+                        """,
+                        "after_script": "echo after",
+                    }
+                ],
+            }
+        )
+
+        job_shell = seekr_chain.launch_argo_workflow(config_shell)
+        job_fail = seekr_chain.launch_argo_workflow(config_fail)
+
+        job_shell.follow()
+        job_fail.follow()
+        seekr_chain.wait([job_shell, job_fail], poll_interval=1)
+
+        # Shell missing: workflow fails with descriptive error
+        assert job_shell.get_status().is_failed()
+        assert_nested_match(
+            job_shell.get_logs().to_dict(),
+            {
+                "step=step": {
+                    "index=0": {
+                        "attempt=0": [
+                            "ERROR: shell not found or not executable: /awef",
+                            "",
+                        ]
+                    }
+                }
+            },
+        )
+
+        # Script fail: after_script still runs, workflow exits with failure
+        assert job_fail.get_status().is_failed()
+        assert_nested_match(
+            job_fail.get_logs().to_dict(),
+            {
+                "step=step": {
+                    "index=0": {
+                        "attempt=0": [
+                            "hello world",
+                            "after",
+                            "",
+                        ]
+                    }
+                }
+            },
+        )
+
     def test_distroless_image(self):
         """Distroless image with shell="" — needs runtime verification that busybox injection works."""
         config = seekr_chain.WorkflowConfig.model_validate(
@@ -212,6 +152,64 @@ class TestScript:
 
 
 class TestBasic:
+    def test_full_workflow(self, test_code_dir):
+        """Single workflow exercising: before/after scripts, code upload, and workflow args.
+
+        Replaces: TestBasic.test_basic, TestScript.test_before_after_script,
+        TestCodeUpload.test_basic, TestArgs.test_basic.
+        """
+        config = seekr_chain.WorkflowConfig.model_validate(
+            {
+                "name": "test-full",
+                "namespace": "argo-workflows",
+                "ttl": "1:00:00",
+                "code": {"path": str(test_code_dir / "0_basic")},
+                "steps": [
+                    {
+                        "name": "step",
+                        "image": "python:3.12-alpine",
+                        "before_script": "echo before",
+                        "script": """
+                            pwd
+                            python job.py
+                            echo $SEEKR_CHAIN_ARGS && cat $SEEKR_CHAIN_ARGS && echo
+                            ls /seekr-chain/assets/step=step/ | LC_ALL=C sort
+                        """,
+                        "after_script": "echo after",
+                    }
+                ],
+            }
+        )
+
+        args = {"key": "value", "num": 42}
+        job = seekr_chain.launch_argo_workflow(config, args=args)
+        job.follow()
+        seekr_chain.wait(job, poll_interval=1)
+        logs = job.get_logs().to_dict()
+
+        expected = {
+            "step=step": {
+                "index=0": {
+                    "attempt=0": [
+                        "before",
+                        "/seekr-chain/workspace",
+                        "Hello world",
+                        "/seekr-chain/assets/workflow_args.json",
+                        '{"key": "value", "num": 42}',
+                        # Asset files deployed to the container by the init container
+                        "after_script.sh",
+                        "before_script.sh",
+                        "hostfile",
+                        "peermap.json",
+                        "script.sh",
+                        "after",
+                        "",
+                    ]
+                }
+            }
+        }
+        assert_nested_match(logs, expected)
+
     def test_secrets(self, v1_api, monkeypatch):
         """All three secret source types are injected correctly as env vars in the container."""
         import kubernetes
