@@ -9,7 +9,7 @@ permissions: read-all
 
 jobs:
   lint:
-    name: Lint
+    name: lint
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -17,10 +17,24 @@ jobs:
       - run: uv sync
       - run: uv run inv format --check
 
-  hermetic-tests:
-    name: Hermetic Tests
+  test-unit:
+    name: test-unit
     needs: lint
     if: github.actor != 'dependabot[bot]'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+      - name: Install dependencies
+        run: uv sync
+      - name: Run unit tests
+        run: uv run pytest tests/unit -v --durations=10
+
+  test-integration:
+    name: test-integration
+    needs: test-unit
     runs-on: ubuntu-latest
     timeout-minutes: 60
 
@@ -28,11 +42,15 @@ jobs:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
       - name: Install k3d
-        run: curl -s https://raw.githubusercontent.com/k3d-io/k3d/main/install.sh | TAG=v5.8.3 bash
+        run: |
+          curl -fsSL -o k3d-linux-amd64 https://github.com/k3d-io/k3d/releases/download/v5.8.3/k3d-linux-amd64
+          echo "dbaa79a76ace7f4ca230a1ff41dc7d8a5036a8ad0309e9c54f9bf3836dbe853e  k3d-linux-amd64" | sha256sum -c
+          chmod +x k3d-linux-amd64 && sudo mv k3d-linux-amd64 /usr/local/bin/k3d
 
       - name: Install kubectl
         run: |
-          curl -LO "https://dl.k8s.io/release/$(curl -Ls https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
+          curl -fsSLO https://dl.k8s.io/release/v1.32.3/bin/linux/amd64/kubectl
+          echo "ab209d0c5134b61486a0486585604a616a5bb2fc07df46d304b3c95817b2d79f  kubectl" | sha256sum -c
           chmod +x kubectl && sudo mv kubectl /usr/local/bin/
 
       - name: Install argo CLI
@@ -46,11 +64,11 @@ jobs:
       - name: Docker Hub login
         run: echo "${{ secrets.DOCKERHUB_TOKEN }}" | docker login -u "${{ secrets.DOCKERHUB_USERNAME }}" --password-stdin
 
-      - name: Run hermetic tests
+      - name: Run integration tests
         env:
           DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
           DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
         run: |
-          export RUN_TESTS="uv run pytest tests -v -n 4 --durations=10 -s"
+          export RUN_TESTS="uv run pytest tests/integration -v -n 4 --durations=10 -s"
           $RUN_TESTS || true
           $RUN_TESTS --last-failed --last-failed-no-failures=none || [ $? -eq 5 ]

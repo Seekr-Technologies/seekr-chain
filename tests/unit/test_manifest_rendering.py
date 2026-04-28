@@ -551,6 +551,85 @@ class TestWorkflowTemplateRendering:
         assert labels["seekr-chain/user"] == "testuser"
 
 
+class TestJobsetEnvAndConfig:
+    def test_env_var_step_overrides_workflow(self, tmp_path):
+        """Step-level env vars must override workflow-level vars with the same key."""
+        config = _minimal_config(
+            env={"MY_VAR": "workflow", "WORKFLOW_ONLY": "yes"},
+            steps=[
+                {
+                    "name": "train",
+                    "image": "pytorch:2.0",
+                    "script": "echo hello",
+                    "resources": {
+                        "cpus_per_node": "4",
+                        "mem_per_node": "8Gi",
+                        "ephemeral_storage_per_node": "10Gi",
+                    },
+                    "env": {"MY_VAR": "step"},
+                }
+            ],
+        )
+        job_info = _fake_job_info()
+
+        _, context = build_jobset_context(
+            workflow_config=config,
+            step_index=0,
+            job_info=job_info,
+            workflow_name="ab1234",
+            workflow_secrets=[],
+            interactive=False,
+            assets_path=tmp_path / "assets",
+        )
+
+        rendered = render.render("jobset.yaml.j2", context)
+        manifest = yaml.safe_load(rendered)
+
+        pod_spec = manifest["spec"]["replicatedJobs"][0]["template"]["spec"]["template"]["spec"]
+        main_container = next(c for c in pod_spec["containers"] if c["name"] == "main")
+        env = {e["name"]: e for e in main_container["env"]}
+
+        # Step value wins for MY_VAR
+        assert env["MY_VAR"]["value"] == "step"
+        # Workflow-only var still present
+        assert "WORKFLOW_ONLY" in env
+
+    def test_name_truncation_when_step_name_too_long(self, tmp_path):
+        """When the generated js_name would exceed 63 chars, it falls back to a short form."""
+        long_step = "some-super-super-super-super-long-step-name"
+        config = _minimal_config(
+            name="some-long-workflow-name",
+            steps=[
+                {
+                    "name": long_step,
+                    "image": "pytorch:2.0",
+                    "script": "echo hello",
+                    "resources": {
+                        "cpus_per_node": "4",
+                        "mem_per_node": "8Gi",
+                        "ephemeral_storage_per_node": "10Gi",
+                    },
+                }
+            ],
+        )
+        job_info = _fake_job_info()
+
+        js_name, _ = build_jobset_context(
+            workflow_config=config,
+            step_index=0,
+            job_info=job_info,
+            workflow_name="some-long-workflow-name",
+            workflow_secrets=[],
+            interactive=False,
+            assets_path=tmp_path / "assets",
+        )
+
+        # Must be within Kubernetes 63-char limit for the full pod name
+        assert len(js_name) <= 63
+        # Should not be the naive concatenation (which would be too long)
+        assert js_name != f"some-long-workflow-name-{long_step}-js"
+
+
 class TestAffinityRendering:
     def _render(self, affinity_rules: list, tmp_path):
         config = _minimal_config(affinity=affinity_rules)
