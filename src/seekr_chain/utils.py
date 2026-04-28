@@ -88,6 +88,20 @@ def get_size(p: Path) -> int:
     return 0
 
 
+def format_timestamp(ts: str) -> str:
+    """Convert a UTC ISO 8601 timestamp to a local-time human-readable string."""
+    from datetime import datetime, timezone
+
+    if not ts:
+        return ""
+    try:
+        dt_utc = datetime.strptime(ts, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+        dt_local = dt_utc.astimezone()
+        return dt_local.strftime("%b %d %H:%M")
+    except ValueError:
+        return ts
+
+
 def summarize_dir(path, sort_by_size: bool = True, detail: bool = False) -> str:
     """
     Print summary statistics for a directory. Includes symlinks as if they were normal files

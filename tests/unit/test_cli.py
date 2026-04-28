@@ -1,5 +1,6 @@
 """Unit tests for the CLI commands using Click's CliRunner."""
 
+import os
 import textwrap
 from unittest.mock import MagicMock, patch
 
@@ -370,24 +371,150 @@ class TestListWorkflows:
 
 class TestList:
     def test_default(self):
-        """chain list → list_workflows called with default args."""
+        """chain list → list_workflows called with current $USER, no server limit."""
         runner = CliRunner()
 
-        with patch("seekr_chain.list_workflows", return_value=[]) as mock_list:
+        with (
+            patch("seekr_chain.list_workflows", return_value=[]) as mock_list,
+            patch.dict(os.environ, {"USER": "testuser"}),
+        ):
             result = runner.invoke(main, ["list"])
 
         assert result.exit_code == 0, result.output
-        mock_list.assert_called_once_with(namespace=None, limit=None, user=None)
+        mock_list.assert_called_once_with(namespace=None, user="testuser")
 
-    def test_with_options(self):
-        """chain list --namespace ns --limit 5 --user alice → args forwarded."""
+    def test_all_users(self):
+        """chain list --all-users → list_workflows called with user=None."""
         runner = CliRunner()
 
         with patch("seekr_chain.list_workflows", return_value=[]) as mock_list:
-            result = runner.invoke(main, ["list", "--namespace", "my-ns", "--limit", "5", "--user", "alice"])
+            result = runner.invoke(main, ["list", "--all-users"])
 
         assert result.exit_code == 0, result.output
-        mock_list.assert_called_once_with(namespace="my-ns", limit=5, user="alice")
+        mock_list.assert_called_once_with(namespace=None, user=None)
+
+    def test_with_options(self):
+        """chain list --namespace ns --user alice → namespace forwarded; limit applied client-side."""
+        runner = CliRunner()
+
+        with patch("seekr_chain.list_workflows", return_value=[]) as mock_list:
+            result = runner.invoke(main, ["list", "--namespace", "my-ns", "--user", "alice"])
+
+        assert result.exit_code == 0, result.output
+        mock_list.assert_called_once_with(namespace="my-ns", user="alice")
+
+    def test_default_limit_applied(self):
+        """Default limit=20 keeps only the 20 most recent finished workflows."""
+        runner = CliRunner()
+        workflows = [
+            {
+                "name": f"wf-{i:03d}",
+                "job_name": "j",
+                "user": "u",
+                "status": "Succeeded",
+                "created": f"2026-01-{i:02d}T00:00:00Z",
+                "duration": "1s",
+            }
+            for i in range(1, 26)  # 25 finished workflows
+        ]
+
+        with patch("seekr_chain.list_workflows", return_value=workflows):
+            result = runner.invoke(main, ["list", "--all-users"])
+
+        assert result.exit_code == 0, result.output
+        assert "wf-006" in result.output  # 6th oldest = 20th most recent
+        assert "wf-005" not in result.output  # trimmed
+
+    def test_running_jobs_always_shown(self):
+        """Running/Pending jobs are always shown regardless of limit."""
+        runner = CliRunner()
+        finished = [
+            {
+                "name": f"wf-done-{i:02d}",
+                "job_name": "j",
+                "user": "u",
+                "status": "Succeeded",
+                "created": f"2026-01-{i:02d}T00:00:00Z",
+                "duration": "1s",
+            }
+            for i in range(1, 26)  # 25 finished
+        ]
+        active = [
+            {
+                "name": "wf-running",
+                "job_name": "j",
+                "user": "u",
+                "status": "Running",
+                "created": "2026-01-01T00:00:00Z",
+                "duration": "",
+            },
+            {
+                "name": "wf-pending",
+                "job_name": "j",
+                "user": "u",
+                "status": "Pending",
+                "created": "2026-01-01T00:01:00Z",
+                "duration": "",
+            },
+        ]
+
+        with patch("seekr_chain.list_workflows", return_value=finished + active):
+            result = runner.invoke(main, ["list", "--all-users"])  # default limit=20
+
+        assert result.exit_code == 0, result.output
+        assert "wf-running" in result.output
+        assert "wf-pending" in result.output
+        assert "wf-done-05" not in result.output  # oldest finished trimmed
+
+    def test_limit_zero_shows_all(self):
+        """--limit 0 disables the limit and shows all workflows."""
+        runner = CliRunner()
+        workflows = [
+            {
+                "name": f"wf-{i:03d}",
+                "job_name": "j",
+                "user": "u",
+                "status": "Succeeded",
+                "created": f"2026-01-{i:02d}T00:00:00Z",
+                "duration": "1s",
+            }
+            for i in range(1, 26)
+        ]
+
+        with patch("seekr_chain.list_workflows", return_value=workflows):
+            result = runner.invoke(main, ["list", "--all-users", "--limit", "0"])
+
+        assert result.exit_code == 0, result.output
+        assert "wf-001" in result.output
+        assert "wf-025" in result.output
+
+    def test_sorted_by_created(self):
+        """Workflows are sorted by creationTimestamp ascending."""
+        runner = CliRunner()
+        workflows = [
+            {
+                "name": "wf-new",
+                "job_name": "b",
+                "user": "u",
+                "status": "Running",
+                "created": "2026-01-02T00:00:00Z",
+                "duration": "",
+            },
+            {
+                "name": "wf-old",
+                "job_name": "a",
+                "user": "u",
+                "status": "Succeeded",
+                "created": "2026-01-01T00:00:00Z",
+                "duration": "1m",
+            },
+        ]
+
+        with patch("seekr_chain.list_workflows", return_value=workflows):
+            result = runner.invoke(main, ["list", "--all-users"])
+
+        assert result.exit_code == 0, result.output
+        assert result.output.index("wf-old") < result.output.index("wf-new")
 
     def test_output(self):
         """Workflows are rendered as a table with job name and user columns."""
@@ -412,7 +539,7 @@ class TestList:
         ]
 
         with patch("seekr_chain.list_workflows", return_value=workflows):
-            result = runner.invoke(main, ["list"])
+            result = runner.invoke(main, ["list", "--all-users"])
 
         assert result.exit_code == 0, result.output
         assert "wf-1" in result.output
