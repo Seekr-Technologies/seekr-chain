@@ -472,6 +472,94 @@ class TestBasic:
         assert_nested_match(logs, expected)
 
 
+class TestExitStepAssets:
+    """Verify that exit steps receive the full init container pipeline and can read assets."""
+
+    def test_step_exit_assets(self, test_code_dir):
+        """Per-step on_exit handler can read its own assets from /seekr-chain/assets/."""
+        config = seekr_chain.WorkflowConfig.model_validate(
+            {
+                "name": "test-step-exit-assets",
+                "namespace": "argo-workflows",
+                "ttl": "1:00:00",
+                "code": {"path": str(test_code_dir / "0_basic")},
+                "steps": [
+                    {
+                        "name": "step",
+                        "image": "python:3.12-alpine",
+                        "script": "echo main",
+                        "on_exit": {
+                            "image": "python:3.12-alpine",
+                            "script": "echo $STEP_STATUS && ls /seekr-chain/assets/step=step-exit/ | LC_ALL=C sort",
+                        },
+                    }
+                ],
+            }
+        )
+
+        job = seekr_chain.launch_argo_workflow(config)
+        job.follow()
+        seekr_chain.wait(job, poll_interval=1)
+        logs = job.get_logs().to_dict()
+
+        expected = {
+            "step=step-exit": {
+                "index=0": {
+                    "attempt=0": [
+                        "Succeeded",
+                        "hostfile",
+                        "peermap.json",
+                        "script.sh",
+                        "",
+                    ]
+                }
+            }
+        }
+        assert_nested_match(logs, expected)
+
+    def test_workflow_exit_assets(self, test_code_dir):
+        """Workflow-level on_exit handler can read its own assets from /seekr-chain/assets/."""
+        config = seekr_chain.WorkflowConfig.model_validate(
+            {
+                "name": "test-workflow-exit-assets",
+                "namespace": "argo-workflows",
+                "ttl": "1:00:00",
+                "code": {"path": str(test_code_dir / "0_basic")},
+                "on_exit": {
+                    "image": "python:3.12-alpine",
+                    "script": "echo $WORKFLOW_STATUS && ls /seekr-chain/assets/step=seekr-chain-workflow-exit/ | LC_ALL=C sort",
+                },
+                "steps": [
+                    {
+                        "name": "step",
+                        "image": "python:3.12-alpine",
+                        "script": "echo main",
+                    }
+                ],
+            }
+        )
+
+        job = seekr_chain.launch_argo_workflow(config)
+        job.follow()
+        seekr_chain.wait(job, poll_interval=1)
+        logs = job.get_logs().to_dict()
+
+        expected = {
+            "step=seekr-chain-workflow-exit": {
+                "index=0": {
+                    "attempt=0": [
+                        "Succeeded",
+                        "hostfile",
+                        "peermap.json",
+                        "script.sh",
+                        "",
+                    ]
+                }
+            }
+        }
+        assert_nested_match(logs, expected)
+
+
 class TestAffinity:
     @pytest.fixture(autouse=True)
     def require_two_worker_nodes(self, cpu_nodes):

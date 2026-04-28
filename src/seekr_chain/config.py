@@ -259,6 +259,33 @@ class RoleSpecConfig(BaseModel):
     env: Optional[dict[str, str]] = None
 
 
+class ExitStepConfig(BaseModel):
+    """Configuration for a step that always runs when its parent step terminates.
+
+    The exit step runs regardless of whether the parent step succeeded or failed,
+    including cases where the parent was OOM-killed or preempted. The ``STEP_STATUS``
+    environment variable is injected automatically (``"Succeeded"`` or ``"Failed"``).
+
+    Parameters
+    ----------
+    image : Docker image to run
+    shell : Shell used to execute the script
+    before_script : Shell commands to run before the main script
+    script : Shell script to execute
+    after_script : Shell commands to run after the main script
+    resources : Compute resource requests
+    env : Additional environment variables
+    """
+
+    image: str
+    shell: str = "/bin/sh"
+    before_script: str | None = None
+    script: str
+    after_script: str | None = None
+    resources: ResourceConfig = ResourceConfig()
+    env: Optional[dict[str, str]] = None
+
+
 class SingleRoleStepConfig(RoleSpecConfig):
     """A step with a single role (the most common step type). Inherits all fields from RoleSpecConfig.
 
@@ -266,10 +293,12 @@ class SingleRoleStepConfig(RoleSpecConfig):
     ----------
     depends_on : Steps that must complete before this one starts
     failure_policy : Failure handling policy
+    on_exit : Optional exit handler step that always runs when this step terminates
     """
 
     depends_on: Optional[list[str]] = None
     failure_policy: FailurePolicy | None = None
+    on_exit: Optional[ExitStepConfig] = None
 
     @pydantic.model_validator(mode="after")
     def check_failure_policy(self) -> Self:
@@ -290,6 +319,7 @@ class MultiRoleStepConfig(BaseModel):
     success_policy : When to consider this step successful
     failure_policy : Failure handling policy
     roles : List of roles to run in parallel
+    on_exit : Optional exit handler step that always runs when this step terminates
     """
 
     class SuccessPolicy(BaseModel):
@@ -309,6 +339,7 @@ class MultiRoleStepConfig(BaseModel):
     success_policy: Optional[SuccessPolicy] = None
     failure_policy: FailurePolicy | None = None
     roles: list[RoleSpecConfig]
+    on_exit: Optional[ExitStepConfig] = None
 
     @pydantic.model_validator(mode="after")
     def check_failure_policy(self) -> Self:
@@ -371,6 +402,9 @@ class WorkflowConfig(BaseModel):
     affinity : Scheduling rules — list of node and pod affinity/anti-affinity rules
     scheduling : Queue and priority for job admission (e.g. Kueue LocalQueue)
     logging : Log collection settings
+    on_exit : Optional exit handler step that always runs when the entire workflow
+              terminates (success or failure). ``WORKFLOW_STATUS`` is injected
+              automatically (``"Succeeded"``, ``"Failed"``, or ``"Error"``).
     """
 
     name: str
@@ -383,6 +417,7 @@ class WorkflowConfig(BaseModel):
     affinity: Optional[list[AffinityRule]] = None
     scheduling: Optional[SchedulingConfig] = None
     logging: LoggingConfig = LoggingConfig()
+    on_exit: Optional[ExitStepConfig] = None
 
     @field_validator("affinity", mode="before")
     @classmethod

@@ -5,7 +5,11 @@ import yaml
 from seekr_chain.backends.argo import render
 from seekr_chain.backends.argo.job_info import get_job_info
 from seekr_chain.backends.argo.jobset import build_jobset_context
-from seekr_chain.config import WorkflowConfig
+from seekr_chain.backends.argo.launch_argo_workflow import (
+    _create_step_exit_handler_manifest,
+    _create_workflow_exit_handler_manifest,
+)
+from seekr_chain.config import ExitStepConfig, SingleRoleStepConfig, WorkflowConfig
 
 DATASTORE_ROOT = "s3://test-bucket/seekr-chain/"
 
@@ -41,7 +45,7 @@ class TestJobsetTemplateRendering:
 
         js_name, context = build_jobset_context(
             workflow_config=config,
-            step_index=0,
+            step_config=config.steps[0],
             job_info=job_info,
             workflow_name="ab1234",
             workflow_secrets=[],
@@ -62,7 +66,7 @@ class TestJobsetTemplateRendering:
 
         js_name, context = build_jobset_context(
             workflow_config=config,
-            step_index=0,
+            step_config=config.steps[0],
             job_info=job_info,
             workflow_name="ab1234",
             workflow_secrets=[],
@@ -81,7 +85,7 @@ class TestJobsetTemplateRendering:
 
         _, context = build_jobset_context(
             workflow_config=config,
-            step_index=0,
+            step_config=config.steps[0],
             job_info=job_info,
             workflow_name="ab1234",
             workflow_secrets=[],
@@ -102,7 +106,7 @@ class TestJobsetTemplateRendering:
 
         _, context = build_jobset_context(
             workflow_config=config,
-            step_index=0,
+            step_config=config.steps[0],
             job_info=job_info,
             workflow_name="ab1234",
             workflow_secrets=[],
@@ -123,7 +127,7 @@ class TestJobsetTemplateRendering:
 
         _, context = build_jobset_context(
             workflow_config=config,
-            step_index=0,
+            step_config=config.steps[0],
             job_info=job_info,
             workflow_name="ab1234",
             workflow_secrets=[],
@@ -145,7 +149,7 @@ class TestJobsetTemplateRendering:
 
         _, context = build_jobset_context(
             workflow_config=config,
-            step_index=0,
+            step_config=config.steps[0],
             job_info=job_info,
             workflow_name="ab1234",
             workflow_secrets=[
@@ -180,7 +184,7 @@ class TestJobsetTemplateRendering:
 
         _, context = build_jobset_context(
             workflow_config=config,
-            step_index=0,
+            step_config=config.steps[0],
             job_info=job_info,
             workflow_name="ab1234",
             workflow_secrets=[cluster_secret_ref],
@@ -207,7 +211,7 @@ class TestJobsetTemplateRendering:
 
         _, context = build_jobset_context(
             workflow_config=config,
-            step_index=0,
+            step_config=config.steps[0],
             job_info=job_info,
             workflow_name="ab1234",
             workflow_secrets=[],
@@ -226,7 +230,7 @@ class TestJobsetTemplateRendering:
 
         _, context = build_jobset_context(
             workflow_config=config,
-            step_index=0,
+            step_config=config.steps[0],
             job_info=job_info,
             workflow_name="ab1234",
             workflow_secrets=[],
@@ -247,7 +251,7 @@ class TestJobsetTemplateRendering:
 
         _, context = build_jobset_context(
             workflow_config=config,
-            step_index=0,
+            step_config=config.steps[0],
             job_info=job_info,
             workflow_name="ab1234",
             workflow_secrets=[],
@@ -269,7 +273,7 @@ class TestJobsetTemplateRendering:
 
         _, context = build_jobset_context(
             workflow_config=config,
-            step_index=0,
+            step_config=config.steps[0],
             job_info=job_info,
             workflow_name="ab1234",
             workflow_secrets=[],
@@ -291,7 +295,7 @@ class TestJobsetTemplateRendering:
 
         _, context = build_jobset_context(
             workflow_config=config,
-            step_index=0,
+            step_config=config.steps[0],
             job_info=job_info,
             workflow_name="ab1234",
             workflow_secrets=[],
@@ -327,7 +331,7 @@ class TestJobsetTemplateRendering:
 
         _, context = build_jobset_context(
             workflow_config=config,
-            step_index=0,
+            step_config=config.steps[0],
             job_info=job_info,
             workflow_name="ab1234",
             workflow_secrets=[],
@@ -348,7 +352,7 @@ class TestJobsetTemplateRendering:
 
         _, context = build_jobset_context(
             workflow_config=config,
-            step_index=0,
+            step_config=config.steps[0],
             job_info=job_info,
             workflow_name="ab1234",
             workflow_secrets=[],
@@ -369,7 +373,7 @@ class TestJobsetTemplateRendering:
 
         _, context = build_jobset_context(
             workflow_config=config,
-            step_index=0,
+            step_config=config.steps[0],
             job_info=job_info,
             workflow_name="ab1234",
             workflow_secrets=[],
@@ -390,7 +394,7 @@ class TestJobsetTemplateRendering:
 
         _, context = build_jobset_context(
             workflow_config=config,
-            step_index=0,
+            step_config=config.steps[0],
             job_info=job_info,
             workflow_name="ab1234",
             workflow_secrets=[],
@@ -412,7 +416,7 @@ class TestJobsetTemplateRendering:
 
         _, context = build_jobset_context(
             workflow_config=config,
-            step_index=0,
+            step_config=config.steps[0],
             job_info=job_info,
             workflow_name="ab1234",
             workflow_secrets=[],
@@ -448,6 +452,8 @@ class TestWorkflowTemplateRendering:
                     "labels": {},
                 }
             ],
+            "exit_handlers": [],
+            "workflow_exit_step": None,
         }
 
     def test_renders_valid_yaml(self):
@@ -550,6 +556,172 @@ class TestWorkflowTemplateRendering:
         assert labels["seekr-chain/job-name"] == "test-job"
         assert labels["seekr-chain/user"] == "testuser"
 
+    def _build_exit_workflow_context(self):
+        """Build a workflow context with an exit step attached to 'train'."""
+        js_yaml = "apiVersion: jobset.x-k8s.io/v1alpha2\nkind: JobSet\n"
+        context = self._build_workflow_context()
+        context["dag_tasks"] = [{"name": "train", "dependencies": [], "on_exit_template": "train-exit"}]
+        context["exit_handlers"] = [
+            {
+                "name": "train-exit",
+                "jobset_name": "ab1234-train-exit-js",
+                "jobset_yaml": js_yaml,
+                "labels": {},
+            }
+        ]
+        return context
+
+    def test_exit_step_template_present(self):
+        """The exit step template must appear in the rendered workflow manifest."""
+        context = self._build_exit_workflow_context()
+        rendered = render.render("workflow.yaml.j2", context)
+        manifest = yaml.safe_load(rendered)
+
+        template_names = [t["name"] for t in manifest["spec"]["templates"]]
+        assert "train-exit" in template_names
+
+    def test_dag_task_has_on_exit(self):
+        """The DAG task for a step with on_exit must have an onExit field."""
+        context = self._build_exit_workflow_context()
+        rendered = render.render("workflow.yaml.j2", context)
+        manifest = yaml.safe_load(rendered)
+
+        templates = {t["name"]: t for t in manifest["spec"]["templates"]}
+        tasks = {t["name"]: t for t in templates["seekr-chain-main"]["dag"]["tasks"]}
+        assert tasks["train"]["onExit"] == "train-exit"
+
+    def test_dag_task_without_exit_has_no_on_exit(self):
+        """A DAG task without on_exit must NOT have an onExit field."""
+        context = self._build_workflow_context()
+        # Ensure no on_exit_template in the task
+        context["dag_tasks"] = [{"name": "train", "dependencies": []}]
+        rendered = render.render("workflow.yaml.j2", context)
+        manifest = yaml.safe_load(rendered)
+
+        templates = {t["name"]: t for t in manifest["spec"]["templates"]}
+        tasks = {t["name"]: t for t in templates["seekr-chain-main"]["dag"]["tasks"]}
+        assert "onExit" not in tasks["train"]
+
+    def test_no_exit_steps_renders_no_extra_templates(self):
+        """When exit_steps is empty, no extra templates are added."""
+        context = self._build_workflow_context()
+        rendered = render.render("workflow.yaml.j2", context)
+        manifest = yaml.safe_load(rendered)
+
+        template_names = [t["name"] for t in manifest["spec"]["templates"]]
+        # Only the main DAG template and 'train' — no exit templates
+        assert set(template_names) == {"seekr-chain-main", "train"}
+
+    def _build_workflow_exit_context(self):
+        """Build a workflow context with a workflow-level exit step."""
+        js_yaml = "apiVersion: jobset.x-k8s.io/v1alpha2\nkind: JobSet\n"
+        context = self._build_workflow_context()
+        context["workflow_exit_step"] = {
+            "name": "seekr-chain-workflow-exit",
+            "jobset_name": "ab1234----workflow-exit--js",
+            "jobset_yaml": js_yaml,
+            "labels": {},
+        }
+        return context
+
+    def test_workflow_exit_spec_on_exit(self):
+        """spec.onExit must be set to 'seekr-chain-workflow-exit' when present."""
+        context = self._build_workflow_exit_context()
+        rendered = render.render("workflow.yaml.j2", context)
+        manifest = yaml.safe_load(rendered)
+        assert manifest["spec"]["onExit"] == "seekr-chain-workflow-exit"
+
+    def test_workflow_exit_template_present(self):
+        """The workflow-level exit template must appear in the rendered manifest."""
+        context = self._build_workflow_exit_context()
+        rendered = render.render("workflow.yaml.j2", context)
+        manifest = yaml.safe_load(rendered)
+        template_names = [t["name"] for t in manifest["spec"]["templates"]]
+        assert "seekr-chain-workflow-exit" in template_names
+
+    def test_no_workflow_exit_no_spec_on_exit(self):
+        """spec.onExit must NOT appear when workflow_exit_step is None."""
+        context = self._build_workflow_context()
+        rendered = render.render("workflow.yaml.j2", context)
+        manifest = yaml.safe_load(rendered)
+        assert "onExit" not in manifest["spec"]
+
+
+class TestWorkflowExitJobsetRendering:
+    """Tests that workflow-level exit handler JobSets are rendered correctly."""
+
+    def test_workflow_exit_handler_manifest(self, tmp_path):
+        """Workflow exit handler: correct name, WORKFLOW_STATUS env var, and init containers."""
+        exit_config = ExitStepConfig(image="python:3.11", script="echo $WORKFLOW_STATUS")
+        wf = WorkflowConfig(
+            name="test-job",
+            steps=[SingleRoleStepConfig(name="train", image="pytorch:2.0", script="echo run")],
+            on_exit=exit_config,
+        )
+
+        result = _create_workflow_exit_handler_manifest(
+            exit_config=exit_config,
+            workflow_config=wf,
+            job_info=_fake_job_info(),
+            workflow_name="ab1234",
+            workflow_secrets=[],
+            assets_path=tmp_path / "assets",
+        )
+
+        assert result["name"] == "seekr-chain-workflow-exit"
+
+        manifest = yaml.safe_load(result["jobset_yaml"])
+        pod_spec = manifest["spec"]["replicatedJobs"][0]["template"]["spec"]["template"]["spec"]
+        main_container = next(c for c in pod_spec["containers"] if c["name"] == "main")
+        env_map = {e["name"]: e for e in main_container["env"]}
+
+        assert "WORKFLOW_STATUS" in env_map
+        assert env_map["WORKFLOW_STATUS"]["value"] == "{{workflow.status}}"
+        assert [c["name"] for c in pod_spec["initContainers"]] == [
+            "download-assets",
+            "unpack-assets",
+            "inject-shell",
+        ]
+
+
+class TestExitStepJobsetRendering:
+    """Tests that step-level exit handler JobSets are rendered correctly."""
+
+    def test_step_exit_handler_manifest(self, tmp_path):
+        """Step exit handler: correct name derived from parent, STEP_STATUS env var, and init containers."""
+        exit_config = ExitStepConfig(
+            image="python:3.11",
+            script="echo $STEP_STATUS",
+        )
+        parent_step = SingleRoleStepConfig(name="my-step", image="pytorch:2.0", script="echo run", on_exit=exit_config)
+        wf = WorkflowConfig(name="test-job", steps=[parent_step])
+
+        result = _create_step_exit_handler_manifest(
+            parent_step_config=parent_step,
+            exit_config=exit_config,
+            workflow_config=wf,
+            job_info=_fake_job_info(),
+            workflow_name="ab1234",
+            workflow_secrets=[],
+            assets_path=tmp_path / "assets",
+        )
+
+        assert result["name"] == "my-step-exit"
+        assert "my-step-exit" in result["jobset_name"]
+
+        manifest = yaml.safe_load(result["jobset_yaml"])
+        pod_spec = manifest["spec"]["replicatedJobs"][0]["template"]["spec"]["template"]["spec"]
+        main_container = next(c for c in pod_spec["containers"] if c["name"] == "main")
+        env_map = {e["name"]: e for e in main_container["env"]}
+
+        assert "STEP_STATUS" in env_map
+        assert env_map["STEP_STATUS"]["value"] == "{{tasks.my-step.status}}"
+        assert [c["name"] for c in pod_spec["initContainers"]] == [
+            "download-assets",
+            "unpack-assets",
+            "inject-shell",
+        ]
+
 
 class TestJobsetEnvAndConfig:
     def test_env_var_step_overrides_workflow(self, tmp_path):
@@ -574,7 +746,7 @@ class TestJobsetEnvAndConfig:
 
         _, context = build_jobset_context(
             workflow_config=config,
-            step_index=0,
+            step_config=config.steps[0],
             job_info=job_info,
             workflow_name="ab1234",
             workflow_secrets=[],
@@ -616,7 +788,7 @@ class TestJobsetEnvAndConfig:
 
         js_name, _ = build_jobset_context(
             workflow_config=config,
-            step_index=0,
+            step_config=config.steps[0],
             job_info=job_info,
             workflow_name="some-long-workflow-name",
             workflow_secrets=[],
@@ -636,7 +808,7 @@ class TestAffinityRendering:
         job_info = _fake_job_info()
         _, context = build_jobset_context(
             workflow_config=config,
-            step_index=0,
+            step_config=config.steps[0],
             job_info=job_info,
             workflow_name="ab1234",
             workflow_secrets=[],

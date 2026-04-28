@@ -195,11 +195,67 @@ def launch_local_workflow(
                 **(step.env or {}),
             }
 
-            if not _run_step(step, workdir, step_env):
+            step_succeeded = _run_step(step, workdir, step_env)
+
+            if not step_succeeded:
                 logger.error(f"Step '{step.name}' failed")
                 failed_steps.add(step.name)
                 workflow_succeeded = False
+
+            exit_config = getattr(step, "on_exit", None)
+            if exit_config is not None:
+                status = "Succeeded" if step_succeeded else "Failed"
+                exit_step_name = f"{step.name}-exit"
+                exit_step = SingleRoleStepConfig(
+                    name=exit_step_name,
+                    image=exit_config.image,
+                    shell=exit_config.shell,
+                    before_script=exit_config.before_script,
+                    script=exit_config.script,
+                    after_script=exit_config.after_script,
+                    resources=exit_config.resources,
+                    env={**(exit_config.env or {}), "STEP_STATUS": status},
+                )
+                exit_env = {
+                    **base_env,
+                    "GPUS_PER_NODE": str(exit_config.resources.gpus_per_node),
+                    "SEEKR_CHAIN_JOBSET_ID": exit_step_name,
+                    "SEEKR_CHAIN_POD_ID": f"{workflow_id}-{exit_step_name}-0",
+                    "SEEKR_CHAIN_POD_INSTANCE_ID": f"{workflow_id}-{exit_step_name}-0-0",
+                    "NNODES": "1",
+                    **(exit_config.env or {}),
+                    "STEP_STATUS": status,
+                }
+                logger.info(f"--- Exit step: {exit_step_name} (STEP_STATUS={status}) ---")
+                _run_step(exit_step, workdir, exit_env)
     finally:
         os.unlink(args_path)
+
+    if config.on_exit is not None:
+        wf_exit_config = config.on_exit
+        status = "Succeeded" if workflow_succeeded else "Failed"
+        wf_exit_step_name = "__workflow-exit__"
+        wf_exit_step = SingleRoleStepConfig(
+            name=wf_exit_step_name,
+            image=wf_exit_config.image,
+            shell=wf_exit_config.shell,
+            before_script=wf_exit_config.before_script,
+            script=wf_exit_config.script,
+            after_script=wf_exit_config.after_script,
+            resources=wf_exit_config.resources,
+            env={**(wf_exit_config.env or {}), "WORKFLOW_STATUS": status},
+        )
+        wf_exit_env = {
+            **base_env,
+            "GPUS_PER_NODE": str(wf_exit_config.resources.gpus_per_node),
+            "SEEKR_CHAIN_JOBSET_ID": wf_exit_step_name,
+            "SEEKR_CHAIN_POD_ID": f"{workflow_id}-{wf_exit_step_name}-0",
+            "SEEKR_CHAIN_POD_INSTANCE_ID": f"{workflow_id}-{wf_exit_step_name}-0-0",
+            "NNODES": "1",
+            **(wf_exit_config.env or {}),
+            "WORKFLOW_STATUS": status,
+        }
+        logger.info(f"--- Workflow exit step (WORKFLOW_STATUS={status}) ---")
+        _run_step(wf_exit_step, workdir, wf_exit_env)
 
     return LocalWorkflow(name=config.name, succeeded=workflow_succeeded)

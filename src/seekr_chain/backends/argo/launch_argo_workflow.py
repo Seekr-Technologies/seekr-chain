@@ -20,7 +20,7 @@ from seekr_chain.backends.argo.argo_workflow import ArgoWorkflow
 from seekr_chain.backends.argo.job_info import JobInfo, _resolve_datastore_root, get_job_info
 from seekr_chain.backends.argo.jobset import _build_jobset_labels, create_jobset_manifest
 from seekr_chain.backends.argo.parse_logs import DATA_SCHEMA_VERSION
-from seekr_chain.config import EnvSource, SecretRefSource, StepConfig
+from seekr_chain.config import EnvSource, ExitStepConfig, SecretRefSource, SingleRoleStepConfig, StepConfig
 from seekr_chain.symlink import symlink
 from seekr_chain.tar_directory import tar_directory
 
@@ -128,7 +128,7 @@ def _create_step_manifest(
 
     js_name, js_yaml = create_jobset_manifest(
         workflow_config=workflow_config,
-        step_index=step_index,
+        step_config=step_config,
         job_info=job_info,
         workflow_name=workflow_name,
         workflow_secrets=workflow_secrets,
@@ -144,11 +144,124 @@ def _create_step_manifest(
     }
 
 
-def _create_dag_task(step_config: StepConfig) -> dict:
+def _exit_handler_name(parent_step_name: str) -> str:
+    """Return the Argo template name for a step-level exit handler."""
+    return f"{parent_step_name}-exit"
+
+
+def _create_step_exit_handler_manifest(
+    parent_step_config: StepConfig,
+    exit_config: ExitStepConfig,
+    workflow_config: WorkflowConfig,
+    job_info: JobInfo,
+    workflow_name: str,
+    workflow_secrets: list[dict],
+    assets_path: Path,
+) -> dict:
+    """Create the JobSet manifest for a step-level exit handler.
+
+    The exit handler is created as a SingleRoleStepConfig derived from the ExitStepConfig.
+    STEP_STATUS is injected as an Argo template variable so the exit handler can inspect
+    whether the parent step succeeded or failed.
+    """
+    exit_step_name = _exit_handler_name(parent_step_config.name)
+
+    # Argo renders {{tasks.<step>.status}} before creating the JobSet resource.
+    # This literal must pass through Jinja2 unchanged (Jinja2 does not
+    # re-evaluate the output of {{ variable }} expressions).
+    argo_status_var = "{{" + f"tasks.{parent_step_config.name}.status" + "}}"
+
+    env = {**(exit_config.env or {}), "STEP_STATUS": argo_status_var}
+
+    step_config = SingleRoleStepConfig(
+        name=exit_step_name,
+        image=exit_config.image,
+        shell=exit_config.shell,
+        before_script=exit_config.before_script,
+        script=exit_config.script,
+        after_script=exit_config.after_script,
+        resources=exit_config.resources,
+        env=env,
+    )
+
+    js_name, js_yaml = create_jobset_manifest(
+        workflow_config=workflow_config,
+        step_config=step_config,
+        job_info=job_info,
+        workflow_name=workflow_name,
+        workflow_secrets=workflow_secrets,
+        interactive=False,
+        assets_path=assets_path,
+    )
+
     return {
+        "name": exit_step_name,
+        "jobset_name": js_name,
+        "jobset_yaml": js_yaml,
+        "labels": _build_jobset_labels(workflow_config) or {},
+    }
+
+
+_WORKFLOW_EXIT_STEP_NAME = "__workflow-exit__"
+_WORKFLOW_EXIT_TEMPLATE_NAME = "seekr-chain-workflow-exit"
+
+
+def _create_workflow_exit_handler_manifest(
+    exit_config: ExitStepConfig,
+    workflow_config: WorkflowConfig,
+    job_info: JobInfo,
+    workflow_name: str,
+    workflow_secrets: list[dict],
+    assets_path: Path,
+) -> dict:
+    """Create the JobSet manifest for the workflow-level exit handler.
+
+    WORKFLOW_STATUS is injected as the Argo global variable {{workflow.status}},
+    which Argo renders to "Succeeded", "Failed", or "Error" before creating the
+    JobSet resource.
+    """
+    # Argo renders {{workflow.status}} before creating the JobSet resource.
+    argo_status_var = "{{" + "workflow.status" + "}}"
+
+    env = {**(exit_config.env or {}), "WORKFLOW_STATUS": argo_status_var}
+
+    step_config = SingleRoleStepConfig(
+        name=_WORKFLOW_EXIT_STEP_NAME,
+        image=exit_config.image,
+        shell=exit_config.shell,
+        before_script=exit_config.before_script,
+        script=exit_config.script,
+        after_script=exit_config.after_script,
+        resources=exit_config.resources,
+        env=env,
+    )
+
+    js_name, js_yaml = create_jobset_manifest(
+        workflow_config=workflow_config,
+        step_config=step_config,
+        job_info=job_info,
+        workflow_name=workflow_name,
+        workflow_secrets=workflow_secrets,
+        interactive=False,
+        assets_path=assets_path,
+    )
+
+    return {
+        "name": _WORKFLOW_EXIT_TEMPLATE_NAME,
+        "jobset_name": js_name,
+        "jobset_yaml": js_yaml,
+        "labels": _build_jobset_labels(workflow_config) or {},
+    }
+
+
+def _create_dag_task(step_config: StepConfig) -> dict:
+    task: dict = {
         "name": step_config.name,
         "dependencies": step_config.depends_on or [],
     }
+    if getattr(step_config, "on_exit", None) is not None:
+        task["on_exit_template"] = _exit_handler_name(step_config.name)
+    return task
 
 
 def _create_workflow_secrets(config: WorkflowConfig, workflow_name: str, s3_creds: dict) -> list[dict]:
@@ -228,6 +341,33 @@ def _create_workflow_manifest(
         for i in range(len(config.steps))
     ]
 
+    # Create exit handler manifests for any steps that have on_exit configured.
+    exit_handlers = [
+        _create_step_exit_handler_manifest(
+            parent_step_config=step_config,
+            exit_config=step_config.on_exit,
+            workflow_config=config,
+            job_info=job_info,
+            workflow_name=workflow_name,
+            workflow_secrets=workflow_secrets,
+            assets_path=assets_path,
+        )
+        for step_config in config.steps
+        if getattr(step_config, "on_exit", None) is not None
+    ]
+
+    # Create workflow-level exit handler manifest if configured.
+    workflow_exit_step = None
+    if config.on_exit is not None:
+        workflow_exit_step = _create_workflow_exit_handler_manifest(
+            exit_config=config.on_exit,
+            workflow_config=config,
+            job_info=job_info,
+            workflow_name=workflow_name,
+            workflow_secrets=workflow_secrets,
+            assets_path=assets_path,
+        )
+
     # Create dag tasks. This is basically just the step name and its dependencies
     context = {
         "workflow_name": workflow_name,
@@ -238,6 +378,8 @@ def _create_workflow_manifest(
         "ttl_seconds": int(config.ttl.total_seconds()),
         "dag_tasks": [_create_dag_task(step_config) for step_config in config.steps],
         "steps": steps,
+        "exit_handlers": exit_handlers,
+        "workflow_exit_step": workflow_exit_step,
     }
 
     rendered = render.render("workflow.yaml.j2", context)

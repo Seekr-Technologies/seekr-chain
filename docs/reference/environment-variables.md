@@ -108,6 +108,15 @@ pod_instance_id = os.environ['SEEKR_CHAIN_POD_INSTANCE_ID']
 
 The pod instance ID provides a unique DNS name that can be used for service discovery and communication between pods.
 
+## Exit handler variables
+
+These variables are injected automatically inside exit handler scripts. See [Exit Handlers](../guides/exit-handlers.md).
+
+| Variable | Available in | Value |
+|----------|-------------|-------|
+| `STEP_STATUS` | Step-level `on_exit` | `"Succeeded"` or `"Failed"` |
+| `WORKFLOW_STATUS` | Workflow-level `on_exit` | `"Succeeded"`, `"Failed"`, or `"Error"` |
+
 ## Notes
 
 - All environment variables are set automatically by chain; you don't need to configure them
