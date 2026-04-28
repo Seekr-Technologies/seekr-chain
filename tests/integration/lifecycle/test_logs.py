@@ -7,7 +7,11 @@ TS_REGEX = r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}.\d{6}Z"
 
 
 class TestLogs:
-    def test_basic(self, s3_client):
+    def test_basic_and_timestamps(self, s3_client):
+        """Run one workflow, verify plain get_logs(), timestamped get_logs(), and S3 layout.
+
+        Merges former test_basic + test_timestamps to save one ~60s workflow execution.
+        """
         config = seekr_chain.WorkflowConfig.model_validate(
             {
                 "name": "test",
@@ -32,7 +36,7 @@ class TestLogs:
         status = seekr_chain.wait(job, poll_interval=1)
         assert status.is_successful()
 
-        # Delete the workflow, and then get logs.
+        # Delete the workflow, then verify both plain and timestamped log retrieval.
         job.delete()
 
         logs = job.get_logs().to_dict()
@@ -43,65 +47,17 @@ class TestLogs:
                 "index=1": {"attempt=0": ["/seekr-chain/workspace", "hello world", "1", "some error", ""]},
             }
         }
-
         assert_nested_match(logs, expected)
 
-        # Also test structure of remote dir
-        contents = sorted(
-            [
-                item.removeprefix(job._job_info["s3_path"])
-                for item in s3_utils.glob(job._job_info["s3_path"], "**/*", s3_client)
-            ]
-        )
-        expected = [
-            "/.sentinel",
-            "/assets.tar.gz",
-            r"/data/step=step/role=/job_index=0/pod_index=0/attempt=0/logs/\d{8}-\d{6}.log.gz-object.+",
-            "/data/step=step/role=/job_index=0/pod_index=0/attempt=0/md.json",
-            r"/data/step=step/role=/job_index=1/pod_index=0/attempt=0/logs/\d{8}-\d{6}.log.gz-object.+",
-            "/data/step=step/role=/job_index=1/pod_index=0/attempt=0/md.json",
-            "/data/version",
-        ]
-
-        assert_nested_match(contents, expected)
-
-    def test_timestamps(self, s3_client):
-        config = seekr_chain.WorkflowConfig.model_validate(
-            {
-                "name": "test",
-                "namespace": "argo-workflows",
-                "ttl": "1:00:00",
-                "steps": [
-                    {
-                        "name": "step",
-                        "image": "ubuntu:24.04",
-                        "script": "pwd && echo hello world && echo $NODE_RANK",
-                        "resources": {
-                            "num_nodes": 2,
-                        },
-                    }
-                ],
-            }
-        )
-
-        job = seekr_chain.launch_argo_workflow(config)
-        job.follow()
-
-        status = seekr_chain.wait(job, poll_interval=1)
-        assert status.is_successful()
-
-        # Delete the workflow, and then get logs.
-        job.delete()
-
-        logs = job.get_logs(timestamps=True).to_dict()
-
-        expected = {
+        logs_ts = job.get_logs(timestamps=True).to_dict()
+        expected_ts = {
             "step=step": {
                 "index=0": {
                     "attempt=0": [
                         {"date": f"{TS_REGEX}", "log": "/seekr-chain/workspace"},
                         {"date": f"{TS_REGEX}", "log": "hello world"},
                         {"date": f"{TS_REGEX}", "log": "0"},
+                        {"date": f"{TS_REGEX}", "log": "some error"},
                         {"date": f"{TS_REGEX}", "log": ""},
                     ]
                 },
@@ -110,13 +66,13 @@ class TestLogs:
                         {"date": f"{TS_REGEX}", "log": "/seekr-chain/workspace"},
                         {"date": f"{TS_REGEX}", "log": "hello world"},
                         {"date": f"{TS_REGEX}", "log": "1"},
+                        {"date": f"{TS_REGEX}", "log": "some error"},
                         {"date": f"{TS_REGEX}", "log": ""},
                     ]
                 },
             }
         }
-
-        assert_nested_match(logs, expected)
+        assert_nested_match(logs_ts, expected_ts)
 
         # Also test structure of remote dir
         contents = sorted(
@@ -125,7 +81,7 @@ class TestLogs:
                 for item in s3_utils.glob(job._job_info["s3_path"], "**/*", s3_client)
             ]
         )
-        expected = [
+        expected_s3 = [
             "/.sentinel",
             "/assets.tar.gz",
             r"/data/step=step/role=/job_index=0/pod_index=0/attempt=0/logs/\d{8}-\d{6}.log.gz-object.+",
@@ -134,8 +90,7 @@ class TestLogs:
             "/data/step=step/role=/job_index=1/pod_index=0/attempt=0/md.json",
             "/data/version",
         ]
-
-        assert_nested_match(contents, expected)
+        assert_nested_match(contents, expected_s3)
 
     def test_job_fail(self, s3_client):
         config = seekr_chain.WorkflowConfig.model_validate(
