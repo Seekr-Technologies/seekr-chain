@@ -57,11 +57,9 @@ def list_argo_workflows(
             minutes, seconds = divmod(total_seconds, 60)
             hours, minutes = divmod(minutes, 60)
             if hours:
-                duration = f"{hours}h{minutes}m{seconds}s"
-            elif minutes:
-                duration = f"{minutes}m{seconds}s"
+                duration = f"{hours}:{minutes:02d}:{seconds:02d}"
             else:
-                duration = f"{seconds}s"
+                duration = f"{minutes}:{seconds:02d}"
 
         phase = wf_status.get("phase", "Unknown")
         metadata = wf.get("metadata", {})
