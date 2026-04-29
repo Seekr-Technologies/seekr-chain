@@ -2,7 +2,10 @@
 
 import pytest
 
-from seekr_chain.backends.argo.launch_argo_workflow import _resolve_env_secrets
+from seekr_chain.backends.argo.launch_argo_workflow import (
+    _create_workflow_secrets,
+    _resolve_env_secrets,
+)
 from seekr_chain.config import WorkflowConfig
 
 
@@ -97,3 +100,71 @@ class TestResolveEnvSecrets:
         assert result == {"FROM_ENV": "resolved"}
         assert "INLINE" not in result
         assert "FROM_CLUSTER" not in result
+
+
+FAKE_S3_CREDS = {
+    "aws_access_key_id": "auto-key",
+    "aws_secret_access_key": "auto-secret",
+}
+
+
+class TestCreateWorkflowSecrets:
+    """_create_workflow_secrets must never emit duplicate env var names."""
+
+    def test_normal_path_injects_s3_creds(self):
+        """When the user has no AWS keys in secrets, both s3 creds are injected."""
+        config = _config_with_secrets(None)
+        result = _create_workflow_secrets(config, "wf-abc", FAKE_S3_CREDS)
+        names = [e["name"] for e in result]
+        assert "AWS_ACCESS_KEY_ID" in names
+        assert "AWS_SECRET_ACCESS_KEY" in names
+        assert names.count("AWS_ACCESS_KEY_ID") == 1
+        assert names.count("AWS_SECRET_ACCESS_KEY") == 1
+
+    def test_user_inline_secret_wins_over_s3_creds(self):
+        """User-defined inline secret takes precedence; s3_creds entry is suppressed."""
+        config = _config_with_secrets({"AWS_ACCESS_KEY_ID": "user-key"})
+        result = _create_workflow_secrets(config, "wf-abc", FAKE_S3_CREDS)
+        names = [e["name"] for e in result]
+        # Exactly one entry for the key — no duplicate
+        assert names.count("AWS_ACCESS_KEY_ID") == 1
+        # The entry must reference the per-workflow secret (user value), not overwrite it
+        entry = next(e for e in result if e["name"] == "AWS_ACCESS_KEY_ID")
+        assert entry["valueFrom"]["secretKeyRef"]["name"] == "wf-abc"
+        # s3_creds secret for the other key is still injected
+        assert "AWS_SECRET_ACCESS_KEY" in names
+
+    def test_user_secret_ref_wins_over_s3_creds(self):
+        """SecretRefSource entry takes precedence; s3_creds entry is suppressed."""
+        config = _config_with_secrets(
+            {"AWS_ACCESS_KEY_ID": {"secretRef": {"name": "my-vault", "key": "key-id"}}}
+        )
+        result = _create_workflow_secrets(config, "wf-abc", FAKE_S3_CREDS)
+        names = [e["name"] for e in result]
+        assert names.count("AWS_ACCESS_KEY_ID") == 1
+        # Must point at the external secret, not the per-workflow one
+        entry = next(e for e in result if e["name"] == "AWS_ACCESS_KEY_ID")
+        assert entry["valueFrom"]["secretKeyRef"]["name"] == "my-vault"
+
+    def test_both_aws_keys_user_defined_no_s3_creds_injected(self):
+        """If user defines both AWS keys, neither s3_creds entry appears."""
+        config = _config_with_secrets(
+            {
+                "AWS_ACCESS_KEY_ID": "user-key",
+                "AWS_SECRET_ACCESS_KEY": "user-secret",
+            }
+        )
+        result = _create_workflow_secrets(config, "wf-abc", FAKE_S3_CREDS)
+        names = [e["name"] for e in result]
+        assert names.count("AWS_ACCESS_KEY_ID") == 1
+        assert names.count("AWS_SECRET_ACCESS_KEY") == 1
+
+    def test_warning_logged_when_skipping(self):
+        """A warning is emitted for each s3_creds key suppressed by user config."""
+        from unittest.mock import patch
+
+        config = _config_with_secrets({"AWS_ACCESS_KEY_ID": "user-key"})
+        with patch("seekr_chain.backends.argo.launch_argo_workflow.logger") as mock_logger:
+            _create_workflow_secrets(config, "wf-abc", FAKE_S3_CREDS)
+        calls = [str(c) for c in mock_logger.warning.call_args_list]
+        assert any("AWS_ACCESS_KEY_ID" in c for c in calls)

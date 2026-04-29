@@ -1,0 +1,95 @@
+# Hatchery Sandbox
+# Minimal image for running an AI coding agent in an isolated environment.
+# Uncomment the sections below to add tools your project needs.
+FROM debian:trixie-slim@sha256:1d3c811171a08a5adaa4a163fbafd96b61b87aa871bbc7aa15431ac275d3d430
+
+# ── System packages ───────────────────────────────────────────────────────────
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    git \
+    curl \
+    ca-certificates \
+    jq \
+    make \
+    unzip \
+    zip \
+    python3 \
+    && rm -rf /var/lib/apt/lists/*
+
+# ── Non-root user ─────────────────────────────────────────────────────────────
+RUN useradd -m -s /bin/bash hatchery
+USER hatchery
+ENV HOME=/home/hatchery
+ENV PATH="/home/hatchery/.npm-global/bin:/home/hatchery/.local/bin:$PATH"
+
+# ── Agent install ─────────────────────────────────────────────────────────────
+# ── Claude Code ───────────────────────────────────────────────────────────────
+RUN curl -fsSL https://claude.ai/install.sh | bash
+
+# =============================================================================
+# Optional extras — uncomment what you need
+# =============================================================================
+
+# ── Python / uv ───────────────────────────────────────────────────────────────
+COPY --from=ghcr.io/astral-sh/uv:0.10.7 /uv /uvx /bin/
+ENV UV_PROJECT_ENVIRONMENT=/home/hatchery/.venv
+
+# ── Go ────────────────────────────────────────────────────────────────────────
+# COPY --from=golang:1.24 /usr/local/go /usr/local/go
+# ENV PATH="/usr/local/go/bin:$PATH"
+
+# ── Rust / cargo ──────────────────────────────────────────────────────────────
+# COPY --from=rust:1.86-slim /usr/local/cargo /usr/local/cargo
+# COPY --from=rust:1.86-slim /usr/local/rustup /usr/local/rustup
+# ENV RUSTUP_HOME=/usr/local/rustup
+# ENV PATH="/usr/local/cargo/bin:$PATH"
+
+# ── Extra apt packages ────────────────────────────────────────────────────────
+# USER root
+# RUN apt-get update && apt-get install -y --no-install-recommends \
+#     build-essential \
+#     postgresql-client \
+#     && rm -rf /var/lib/apt/lists/*
+# USER hatchery
+
+# ── Podman-in-Podman (DinD) ──────────────────────────────────────────────────
+# Uncomment this section AND set `dind: true` in .hatchery/docker.yaml.
+USER root
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    podman podman-docker sudo fuse-overlayfs uidmap \
+    && rm -rf /var/lib/apt/lists/*
+RUN printf 'hatchery:1001:64535\n' > /etc/subuid \
+    && printf 'hatchery:1001:64535\n' > /etc/subgid
+RUN mkdir -p /root/.config/containers \
+    && printf '[storage]\ndriver = "overlay"\n\n[storage.options.overlay]\nmount_program = "/usr/bin/fuse-overlayfs"\n' \
+        > /root/.config/containers/storage.conf \
+    && printf '[containers]\nnetns = "host"\ncgroups = "disabled"\ndefault_sysctls = []\ninit = false\n[engine]\ncgroup_manager = "cgroupfs"\nevents_logger = "file"\n' \
+        > /root/.config/containers/containers.conf
+RUN echo 'hatchery ALL=(root) NOPASSWD: /usr/bin/podman' \
+        > /etc/sudoers.d/hatchery-podman \
+    && chmod 440 /etc/sudoers.d/hatchery-podman
+RUN printf '#!/bin/sh\nexec sudo -n /usr/bin/podman "$@"\n' \
+        > /usr/local/bin/podman \
+    && chmod +x /usr/local/bin/podman
+
+# ── k3d + kubectl + argo CLI (for hermetic tests) ────────────────────────────
+RUN ARCH="$(dpkg --print-architecture)" \
+    && curl -Lo /usr/local/bin/k3d \
+        "https://github.com/k3d-io/k3d/releases/download/v5.8.3/k3d-linux-${ARCH}" \
+    && chmod +x /usr/local/bin/k3d
+RUN ARCH="$(dpkg --print-architecture)" \
+    && KUBECTL_VER="$(curl -Ls https://dl.k8s.io/release/stable.txt)" \
+    && curl -Lo /usr/local/bin/kubectl \
+        "https://dl.k8s.io/release/${KUBECTL_VER}/bin/linux/${ARCH}/kubectl" \
+    && chmod +x /usr/local/bin/kubectl
+RUN ARCH="$(dpkg --print-architecture)" \
+    && curl -Lo /tmp/argo.gz \
+        "https://github.com/argoproj/argo-workflows/releases/download/v3.6.7/argo-linux-${ARCH}.gz" \
+    && gunzip /tmp/argo.gz \
+    && mv /tmp/argo /usr/local/bin/argo \
+    && chmod +x /usr/local/bin/argo
+
+USER hatchery
+
+# =============================================================================
+
+WORKDIR /repo
