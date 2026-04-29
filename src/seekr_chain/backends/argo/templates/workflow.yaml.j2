@@ -10,6 +10,9 @@ metadata:
     seekr-chain/datastore-root: {{ datastore_root }}
 spec:
   entrypoint: seekr-chain-main
+  {% if workflow_exit_step %}
+  onExit: seekr-chain-workflow-exit
+  {% endif %}
   ttlStrategy:
     secondsAfterCompletion: {{ ttl_seconds }}
   volumeClaimGC:
@@ -24,6 +27,9 @@ spec:
       {% for task in dag_tasks %}
       - name: {{ task.name }}
         template: {{ task.name }}
+        {% if task.get('on_exit_template') %}
+        onExit: {{ task.on_exit_template }}
+        {% endif %}
         {% if task.get('dependencies') %}
         dependencies:
         {% for dep in task.get('dependencies') %}
@@ -54,3 +60,47 @@ spec:
       manifest: |
         {{ step.jobset_yaml | indent(8) }}
   {% endfor %}
+  {% for step in exit_handlers %}
+  - name: {{ step.name }}
+    metadata:
+      labels:
+        seekr-chain/system-pod: "false"
+        seekr-chain/is-jobset: "true"
+        seekr-chain/step: {{ step.name }}
+        seekr-chain/jobset-name: {{ step.jobset_name }}
+        seekr-chain/job-id: {{ job_id }}
+        seekr-chain/job-name: {{ job_name }}
+        seekr-chain/is-step-pod: "true"
+        {% for k, v in (step.labels | default({})).items() %}
+        {{ k }}: {{ v }}
+        {% endfor %}
+    resource:
+      action: create
+      successCondition: "status.terminalState == Completed"
+      failureCondition: "status.terminalState == Failed"
+      setOwnerReference: true
+      manifest: |
+        {{ step.jobset_yaml | indent(8) }}
+  {% endfor %}
+  {% if workflow_exit_step %}
+  - name: seekr-chain-workflow-exit
+    metadata:
+      labels:
+        seekr-chain/system-pod: "false"
+        seekr-chain/is-jobset: "true"
+        seekr-chain/step: seekr-chain-workflow-exit
+        seekr-chain/jobset-name: {{ workflow_exit_step.jobset_name }}
+        seekr-chain/job-id: {{ job_id }}
+        seekr-chain/job-name: {{ job_name }}
+        seekr-chain/is-step-pod: "true"
+        {% for k, v in (workflow_exit_step.labels | default({})).items() %}
+        {{ k }}: {{ v }}
+        {% endfor %}
+    resource:
+      action: create
+      successCondition: "status.terminalState == Completed"
+      failureCondition: "status.terminalState == Failed"
+      setOwnerReference: true
+      manifest: |
+        {{ workflow_exit_step.jobset_yaml | indent(8) }}
+  {% endif %}

@@ -28,10 +28,10 @@ class TestExamples:
         config = WorkflowConfig.model_validate(yaml.safe_load((dir_path / "config.yaml").read_text()))
         job_info = get_job_info("test-abc1", datastore_root=_DATASTORE_ROOT)
 
-        for step_index in range(len(config.steps)):
+        for step_config in config.steps:
             js_name, js_yaml = create_jobset_manifest(
                 workflow_config=config,
-                step_index=step_index,
+                step_config=step_config,
                 job_info=job_info,
                 workflow_name="test-abc1",
                 workflow_secrets=[],

@@ -14,6 +14,8 @@ All features below are configured via the [Configuration Reference](reference/co
 - **Job queue admission (Kueue)**: Assign workflows to a Kueue `LocalQueue` via the `scheduling.queue` field.
   Optionally set a priority class with `scheduling.priority`. The config is backend-agnostic — a future
   SLURM backend will map the same fields to `--partition` / `--qos`.
+- **Exit handlers**: Run cleanup, notification, or logging steps that are guaranteed to execute after a step or workflow finishes — whether it succeeded, failed, or was killed. Add `on_exit` to any step or at the workflow level. See [Exit Handlers](guides/exit-handlers.md).
+
 - **Local execution**: Run workflows directly in your local environment for debugging — no cluster, no S3, no Docker required.
 
     ```

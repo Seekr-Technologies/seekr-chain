@@ -344,3 +344,146 @@ printf 'SEEKR_CHAIN_ARGS=%s\\n' "$SEEKR_CHAIN_ARGS"
         )
         launch_local_workflow(config)
         assert out.read_text().strip() == str(tmp_path)
+
+
+# ---------------------------------------------------------------------------
+# Exit handler
+# ---------------------------------------------------------------------------
+
+
+class TestExitHandler:
+    def test_exit_handler_runs_after_success(self, tmp_path):
+        """on_exit handler runs after success and STEP_STATUS is 'Succeeded'."""
+        out = tmp_path / "status.txt"
+        config = WorkflowConfig.model_validate(
+            {
+                "name": "test",
+                "steps": [
+                    {
+                        "name": "s",
+                        "image": "ubuntu:24.04",
+                        "script": "exit 0",
+                        "on_exit": {
+                            "image": "ubuntu:24.04",
+                            "script": f"echo $STEP_STATUS > {out}",
+                        },
+                    }
+                ],
+            }
+        )
+        wf = launch_local_workflow(config)
+        assert wf.get_status() == WorkflowStatus.SUCCEEDED
+        assert out.read_text().strip() == "Succeeded"
+
+    def test_exit_handler_runs_after_failure(self, tmp_path):
+        """on_exit handler runs even when the parent step fails and STEP_STATUS is 'Failed'."""
+        out = tmp_path / "status.txt"
+        config = WorkflowConfig.model_validate(
+            {
+                "name": "test",
+                "steps": [
+                    {
+                        "name": "s",
+                        "image": "ubuntu:24.04",
+                        "script": "exit 1",
+                        "on_exit": {
+                            "image": "ubuntu:24.04",
+                            "script": f"echo $STEP_STATUS > {out}",
+                        },
+                    }
+                ],
+            }
+        )
+        wf = launch_local_workflow(config)
+        assert wf.get_status() == WorkflowStatus.FAILED
+        assert out.read_text().strip() == "Failed"
+
+    def test_exit_handler_env_vars(self, tmp_path):
+        """Custom env vars on on_exit are passed to the exit handler."""
+        out = tmp_path / "env.txt"
+        config = WorkflowConfig.model_validate(
+            {
+                "name": "test",
+                "steps": [
+                    {
+                        "name": "s",
+                        "image": "ubuntu:24.04",
+                        "script": "exit 0",
+                        "on_exit": {
+                            "image": "ubuntu:24.04",
+                            "script": f"echo $MY_VAR > {out}",
+                            "env": {"MY_VAR": "hello"},
+                        },
+                    }
+                ],
+            }
+        )
+        launch_local_workflow(config)
+        assert out.read_text().strip() == "hello"
+
+
+# ---------------------------------------------------------------------------
+# Workflow-level exit handler
+# ---------------------------------------------------------------------------
+
+
+class TestWorkflowExitHandler:
+    def _config_with_workflow_exit(self, step_script: str, exit_script: str, exit_env: dict | None = None):
+        on_exit: dict = {"image": "ubuntu:24.04", "script": exit_script}
+        if exit_env:
+            on_exit["env"] = exit_env
+        return WorkflowConfig.model_validate(
+            {
+                "name": "test",
+                "steps": [{"name": "s", "image": "ubuntu:24.04", "script": step_script}],
+                "on_exit": on_exit,
+            }
+        )
+
+    def test_workflow_exit_handler_runs_after_success(self, tmp_path):
+        """Workflow on_exit handler runs when all steps succeed and WORKFLOW_STATUS is 'Succeeded'."""
+        out = tmp_path / "status.txt"
+        config = self._config_with_workflow_exit("exit 0", f"echo $WORKFLOW_STATUS > {out}")
+        wf = launch_local_workflow(config)
+        assert wf.get_status() == WorkflowStatus.SUCCEEDED
+        assert out.read_text().strip() == "Succeeded"
+
+    def test_workflow_exit_handler_runs_after_failure(self, tmp_path):
+        """Workflow on_exit handler runs when a step fails and WORKFLOW_STATUS is 'Failed'."""
+        out = tmp_path / "status.txt"
+        config = self._config_with_workflow_exit("exit 1", f"echo $WORKFLOW_STATUS > {out}")
+        wf = launch_local_workflow(config)
+        assert wf.get_status() == WorkflowStatus.FAILED
+        assert out.read_text().strip() == "Failed"
+
+    def test_workflow_exit_custom_env(self, tmp_path):
+        """Custom env vars on workflow on_exit are passed to the exit handler."""
+        out = tmp_path / "env.txt"
+        config = self._config_with_workflow_exit(
+            "exit 0", f"echo $WF_VAR > {out}", exit_env={"WF_VAR": "from-workflow-exit"}
+        )
+        launch_local_workflow(config)
+        assert out.read_text().strip() == "from-workflow-exit"
+
+    def test_step_and_workflow_exit_coexist(self, tmp_path):
+        """Per-step and workflow-level exit handlers both run independently."""
+        step_exit_marker = tmp_path / "step_exit.txt"
+        wf_exit_marker = tmp_path / "wf_exit.txt"
+        config = WorkflowConfig.model_validate(
+            {
+                "name": "test",
+                "steps": [
+                    {
+                        "name": "s",
+                        "image": "ubuntu:24.04",
+                        "script": "exit 0",
+                        "on_exit": {"image": "ubuntu:24.04", "script": f"touch {step_exit_marker}"},
+                    }
+                ],
+                "on_exit": {"image": "ubuntu:24.04", "script": f"touch {wf_exit_marker}"},
+            }
+        )
+        wf = launch_local_workflow(config)
+        assert wf.get_status() == WorkflowStatus.SUCCEEDED
+        assert step_exit_marker.exists(), "per-step exit handler should have run"
+        assert wf_exit_marker.exists(), "workflow-level exit handler should have run"

@@ -9,7 +9,7 @@ import logging
 
 import loggerado
 
-from .config import WorkflowConfig
+from .config import ExitStepConfig, WorkflowConfig
 from .backends.argo import ArgoWorkflow, launch_argo_workflow
 from .backends.argo.list_workflows import list_argo_workflows
 from .backends.local import LocalWorkflow, launch_local_workflow
@@ -58,4 +58,5 @@ __all__ = [
     "list_workflows",
     "wait",
     "WorkflowConfig",
+    "ExitStepConfig",
 ]

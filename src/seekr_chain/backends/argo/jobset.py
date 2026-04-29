@@ -486,14 +486,19 @@ def _write_peermaps_and_scripts(role_configs, js_name, step_config, assets_path)
 
 
 def build_jobset_context(
-    workflow_config, step_index, job_info, workflow_name, workflow_secrets, interactive: bool, assets_path: Path
+    workflow_config,
+    job_info,
+    workflow_name,
+    workflow_secrets,
+    interactive: bool,
+    assets_path: Path,
+    step_config,
 ) -> tuple[str, dict]:
     """Build the Jinja2 template context for a JobSet manifest.
 
     Returns (js_name, context_dict). The context dict is passed directly to
     the jobset.yaml.j2 template.
     """
-    step_config = workflow_config.steps[step_index]
     step_name = step_config.name
     js_name = f"{workflow_name}-{step_name}-js"
 
@@ -507,7 +512,7 @@ def build_jobset_context(
     # Check if we will be over 63 character limit
     for role_config in role_configs:
         if len(f"{js_name}-{role_config.name}-00-00-abcde") > 63:
-            js_name = f"{workflow_name.split('-')[-1]}-s{step_index:02d}-js"
+            js_name = f"{workflow_name.split('-')[-1]}-{step_name[:16]}-js"
             logger.warning(f"Generated jobset name is too long! Shortening to {js_name}")
             break
 
@@ -548,7 +553,13 @@ def build_jobset_context(
 
 
 def create_jobset_manifest(
-    workflow_config, step_index, job_info, workflow_name, workflow_secrets, interactive: bool, assets_path: Path
+    workflow_config,
+    job_info,
+    workflow_name,
+    workflow_secrets,
+    interactive: bool,
+    assets_path: Path,
+    step_config,
 ) -> tuple[str, str]:
     """Build and render the JobSet manifest.
 
@@ -558,7 +569,7 @@ def create_jobset_manifest(
 
     js_name, context = build_jobset_context(
         workflow_config=workflow_config,
-        step_index=step_index,
+        step_config=step_config,
         job_info=job_info,
         workflow_name=workflow_name,
         workflow_secrets=workflow_secrets,
