@@ -51,14 +51,32 @@ spec:
             dnsPolicy: {{ 'ClusterFirstWithHostNet' if role.host_network else 'ClusterFirst' }}
             terminationGracePeriodSeconds: 30
             initContainers:
-            - name: download-assets
-              image: {{ role.init_aws_cli_image }}
+            - name: chain-init
+              image: {{ role.init_image }}
               workingDir: /seekr-chain
               command: ["sh", "-c"]
               args:
-              - >-
-                aws s3 cp {{ remote_assets_path }} /seekr-chain/assets.tar.gz
-                && {{ role.init_upload_md_cmd }}
+              - |
+                set -e
+                echo "Downloading assets from {{ remote_assets_path }}..."
+                s5cmd cp {{ remote_assets_path }} /seekr-chain/assets.tar.gz
+                echo "Uploading pod metadata..."
+                {{ role.init_upload_md_cmd }}
+                echo "Unpacking assets..."
+                tar -xzf /seekr-chain/assets.tar.gz -C /seekr-chain
+                rm -f /seekr-chain/assets.tar.gz
+                ln -s {{ role.role_asset_path }}/* ./
+                echo "Injecting shell..."
+                cp /bin/busybox /seekr-chain/busybox
+                mkdir /seekr-chain/bin
+                ln -sf /seekr-chain/busybox /seekr-chain/bin/sh
+                ln -sf /seekr-chain/busybox /seekr-chain/bin/tee
+                ln -sf /seekr-chain/busybox /seekr-chain/bin/touch
+                ln -sf /seekr-chain/busybox /seekr-chain/bin/sleep
+                ln -sf /seekr-chain/busybox /seekr-chain/bin/head
+                ln -sf /seekr-chain/busybox /seekr-chain/bin/awk
+                ln -sf /seekr-chain/busybox /seekr-chain/bin/cat
+                echo "Done."
               volumeMounts:
               - name: workspace
                 mountPath: /seekr-chain
@@ -73,11 +91,17 @@ spec:
                   secretKeyRef:
                     name: {{ workflow_name }}
                     key: AWS_SECRET_ACCESS_KEY
-              - name: AWS_ENDPOINT_URL
+              - name: AWS_REGION
                 valueFrom:
                   secretKeyRef:
                     name: {{ workflow_name }}
-                    key: AWS_ENDPOINT_URL
+                    key: AWS_REGION
+                    optional: true
+              - name: S3_ENDPOINT_URL
+                valueFrom:
+                  secretKeyRef:
+                    name: {{ workflow_name }}
+                    key: S3_ENDPOINT_URL
                     optional: true
               - name: NODE_RANK
                 valueFrom:
@@ -91,38 +115,6 @@ spec:
                 valueFrom:
                   fieldRef:
                     fieldPath: "metadata.annotations['jobset.sigs.k8s.io/restart-attempt']"
-            - name: unpack-assets
-              image: {{ role.init_alpine_image }}
-              workingDir: /seekr-chain
-              command: ["sh", "-c"]
-              args:
-              - >-
-                set -e
-                && tar -xzf /seekr-chain/assets.tar.gz -C /seekr-chain
-                && rm -r /seekr-chain/assets.tar.gz
-                && ln -s {{ role.role_asset_path }}/* ./
-              volumeMounts:
-              - name: workspace
-                mountPath: /seekr-chain
-            - name: inject-shell
-              image: {{ role.init_busybox_image }}
-              workingDir: /seekr-chain
-              command:
-              - sh
-              - -c
-              - |
-                cp /bin/busybox /seekr-chain/busybox
-                mkdir /seekr-chain/bin
-                ln -sf /seekr-chain/busybox /seekr-chain/bin/sh
-                ln -sf /seekr-chain/busybox /seekr-chain/bin/tee
-                ln -sf /seekr-chain/busybox /seekr-chain/bin/touch
-                ln -sf /seekr-chain/busybox /seekr-chain/bin/sleep
-                ln -sf /seekr-chain/busybox /seekr-chain/bin/head
-                ln -sf /seekr-chain/busybox /seekr-chain/bin/awk
-                ln -sf /seekr-chain/busybox /seekr-chain/bin/cat
-              volumeMounts:
-              - name: workspace
-                mountPath: /seekr-chain
             containers:
             - name: main
               image: {{ role.image }}

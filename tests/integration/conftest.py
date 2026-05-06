@@ -262,9 +262,10 @@ def patch_configs_for_testing(job_name, datastore_root, monkeypatch, hermetic_fl
             # to the AWS SDK as endpointOverride, which defaults to HTTPS when no
             # protocol is specified (causing connection failure against MinIO).
             hermetic_secrets = {
-                "AWS_ENDPOINT_URL": _minio.endpoint_url_pod,
-                "FB_S3_ENDPOINT": _minio.endpoint_url_pod,
-                "AWS_DEFAULT_REGION": "us-east-1",
+                "AWS_ENDPOINT_URL": _minio.endpoint_url_pod,  # boto3 / AWS CLI
+                "S3_ENDPOINT_URL": _minio.endpoint_url_pod,  # s5cmd
+                "FB_S3_ENDPOINT": _minio.endpoint_url_pod,  # fluent-bit
+                "AWS_REGION": "us-east-1",
             }
             if config.secrets is None:
                 config.secrets = {}
