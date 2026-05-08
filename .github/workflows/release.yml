@@ -27,6 +27,7 @@ jobs:
         id: compute
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_EVENT_BEFORE: ${{ github.event.before }}
         run: |
           set -eu
 
@@ -41,43 +42,65 @@ jobs:
 
           echo "Latest tag: $LATEST_TAG"
 
-          # Find the PR that was merged via this push (retry for API propagation delay)
-          PR_NUMBER=""
-          for attempt in 1 2 3; do
-            PR_NUMBER=$(gh api "repos/$GITHUB_REPOSITORY/commits/$GITHUB_SHA/pulls" --jq '.[0].number' 2>/dev/null || echo "")
-            if [ -n "$PR_NUMBER" ] && [ "$PR_NUMBER" != "null" ]; then
-              break
+          # Enumerate all commits in this push (handles merge train batches)
+          PUSH_COMMITS=$(git log --format="%H" "${GITHUB_EVENT_BEFORE}..${GITHUB_SHA}" 2>/dev/null || echo "")
+          if [ -z "$PUSH_COMMITS" ]; then
+            PUSH_COMMITS="$GITHUB_SHA"
+          fi
+
+          echo "Commits in this push:"
+          echo "$PUSH_COMMITS"
+
+          # Find all PRs associated with commits in this push
+          PR_NUMBERS=""
+          for SHA in $PUSH_COMMITS; do
+            # Try GitHub API first (retry for propagation delay on the first commit)
+            NUM=""
+            for attempt in 1 2 3; do
+              NUM=$(gh api "repos/$GITHUB_REPOSITORY/commits/$SHA/pulls" --jq '.[0].number' 2>/dev/null || echo "")
+              if [ -n "$NUM" ] && [ "$NUM" != "null" ]; then
+                break
+              fi
+              if [ "$attempt" -lt 3 ]; then
+                echo "PR not yet indexed for $SHA, retrying in 10s (attempt $attempt/3)..."
+                sleep 10
+              fi
+            done
+
+            # Fallback: parse PR number from squash-merge commit message "(#N)"
+            if [ -z "$NUM" ] || [ "$NUM" = "null" ]; then
+              COMMIT_MSG=$(git log -1 --format='%s' "$SHA")
+              NUM=$(echo "$COMMIT_MSG" | grep -oE '\(#[0-9]+\)$' | grep -oE '[0-9]+' || echo "")
+              if [ -n "$NUM" ]; then
+                echo "Extracted PR number from commit message for $SHA: #$NUM"
+              fi
             fi
-            if [ "$attempt" -lt 3 ]; then
-              echo "PR not yet indexed, retrying in 10s (attempt $attempt/3)..."
-              sleep 10
+
+            if [ -n "$NUM" ] && [ "$NUM" != "null" ]; then
+              PR_NUMBERS="$PR_NUMBERS $NUM"
             fi
           done
 
-          # Fallback: parse PR number from squash-merge commit message "(#N)"
-          if [ -z "$PR_NUMBER" ] || [ "$PR_NUMBER" = "null" ]; then
-            COMMIT_MSG=$(git log -1 --format='%s' "$GITHUB_SHA")
-            PR_NUMBER=$(echo "$COMMIT_MSG" | grep -oE '\(#[0-9]+\)$' | grep -oE '[0-9]+' || echo "")
-            if [ -n "$PR_NUMBER" ]; then
-              echo "Extracted PR number from commit message: #$PR_NUMBER"
-            fi
-          fi
-
-          echo "PR number: $PR_NUMBER"
+          PR_NUMBERS=$(echo "$PR_NUMBERS" | tr ' ' '\n' | sort -u | tr '\n' ' ')
+          echo "PRs in this push: $PR_NUMBERS"
 
           # Skip if no PR is associated (e.g. a direct push to main)
-          if [ "$PR_NUMBER" = "null" ] || [ -z "$PR_NUMBER" ]; then
-            echo "No PR found for this push, skipping release"
+          if [ -z "$(echo "$PR_NUMBERS" | tr -d ' ')" ]; then
+            echo "No PRs found for this push, skipping release"
             echo "skip_release=true" >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
-          # Fetch all commit subjects from the PR (paginated)
-          COMMITS=$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER/commits" \
-            --paginate --jq '.[].commit.message | split("\n")[0]')
+          # Fetch all commit subjects from all PRs in this push
+          ALL_COMMITS=""
+          for PR in $PR_NUMBERS; do
+            COMMITS=$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR/commits" \
+              --paginate --jq '.[].commit.message | split("\n")[0]')
+            ALL_COMMITS=$(printf '%s\n%s' "$ALL_COMMITS" "$COMMITS")
+          done
 
-          echo "Commits in PR:"
-          echo "$COMMITS"
+          echo "All commits across PRs in this push:"
+          echo "$ALL_COMMITS"
 
           bump_level() {
             MSG="$1"
@@ -88,23 +111,23 @@ jobs:
             fi
           }
 
-          # no-bump escape hatch: if any commit starts with "no-bump:", skip release
-          if echo "$COMMITS" | grep -qE '^no-bump(\([^)]+\))?:'; then
-            BUMP="none"
-          else
-            MAX_LEVEL=0
-            while IFS= read -r TITLE; do
-              LEVEL=$(bump_level "$TITLE")
-              [ "$LEVEL" -gt "$MAX_LEVEL" ] && MAX_LEVEL=$LEVEL
-            done <<< "$COMMITS"
+          # no-bump escape hatch: filter out no-bump commits individually so a
+          # no-bump PR in a merge train batch doesn't suppress a feat PR in the same batch
+          EFFECTIVE_COMMITS=$(echo "$ALL_COMMITS" | grep -vE '^no-bump(\([^)]+\))?:' || true)
 
-            case "$MAX_LEVEL" in
-              3) BUMP="major" ;;
-              2) BUMP="minor" ;;
-              1) BUMP="patch" ;;
-              0) BUMP="none"  ;;
-            esac
-          fi
+          MAX_LEVEL=0
+          while IFS= read -r TITLE; do
+            [ -z "$TITLE" ] && continue
+            LEVEL=$(bump_level "$TITLE")
+            [ "$LEVEL" -gt "$MAX_LEVEL" ] && MAX_LEVEL=$LEVEL
+          done <<< "$EFFECTIVE_COMMITS"
+
+          case "$MAX_LEVEL" in
+            3) BUMP="major" ;;
+            2) BUMP="minor" ;;
+            1) BUMP="patch" ;;
+            0) BUMP="none"  ;;
+          esac
 
           echo "Bump type: $BUMP"
 
