@@ -14,6 +14,8 @@ import time
 from pathlib import Path
 from urllib.parse import urlparse
 
+from seekr_chain.backends.argo.jobset import _DEFAULT_INIT_IMAGE
+
 # When running inside GitLab CI, each job gets a unique cluster so concurrent
 # pipelines on the same runner don't collide.  Locally we keep a fixed name so
 # the cluster persists across test runs for fast iteration.
@@ -40,9 +42,7 @@ KUBECONFIG_PATH = Path(tempfile.gettempdir()) / f"{CLUSTER_NAME}-kubeconfig.yaml
 # Larger test-job images (ubuntu, python, etc.) pull through Docker Hub
 # registry auth configured in registries.yaml.
 HERMETIC_IMAGES = [
-    "amazon/aws-cli:2.25.11",
-    "alpine:3.22.0",
-    "busybox:1.37-uclibc",
+    _DEFAULT_INIT_IMAGE,
     "fluent/fluent-bit:2.2-debug",
     "ubuntu:24.04",
     "python:3.12-alpine",

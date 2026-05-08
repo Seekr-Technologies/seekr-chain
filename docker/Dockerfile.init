@@ -1,0 +1,12 @@
+FROM alpine:3.22.0@sha256:8a1f59ffb675680d47db6337b49d22281a139e9d709335b492be023728e11715 AS s5cmd-download
+ARG TARGETARCH
+ARG S5CMD_VERSION=2.2.2
+RUN apk add --no-cache curl ca-certificates \
+    && ARCH="$([ "$TARGETARCH" = "amd64" ] && echo "64bit" || echo "arm64")" \
+    && curl -fsSL "https://github.com/peak/s5cmd/releases/download/v${S5CMD_VERSION}/s5cmd_${S5CMD_VERSION}_Linux-${ARCH}.tar.gz" \
+         | tar -xz s5cmd
+
+FROM busybox:1.37-uclibc@sha256:e3a499df044f0129fd2e82a63177e7affe66ba6fd73acc9e231fd7695f06e5e2
+COPY --from=s5cmd-download /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
+COPY --from=s5cmd-download /s5cmd /bin/s5cmd
+CMD ["/bin/sh"]

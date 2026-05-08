@@ -28,12 +28,14 @@ _CONFIG_FILENAME = ".seekrchain.toml"
 # Add new config values here; both .env and env var resolution use this map.
 _ENV_VAR_MAP: dict[str, str] = {
     "SEEKRCHAIN_DATASTORE_ROOT": "datastore_root",
+    "SEEKRCHAIN_INIT_IMAGE": "init_image",
 }
 
 
 @dataclass(frozen=True)
 class UserConfig:
     datastore_root: str | None = None
+    init_image: str | None = None
 
 
 def _find_file_walking_up(filename: str) -> Path | None:
@@ -79,6 +81,7 @@ def _load_config() -> UserConfig:
 
     return UserConfig(
         datastore_root=values.get("datastore_root"),
+        init_image=values.get("init_image"),
     )
 
 
