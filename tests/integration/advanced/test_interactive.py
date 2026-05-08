@@ -62,7 +62,7 @@ class TestInteractiveActual:
             }
         )
 
-        seekr_chain.launch_argo_workflow(config, interactive=True)
+        seekr_chain.launch_k8s_workflow(config, interactive=True)
 
 
 class TestInteractive:
@@ -104,7 +104,7 @@ class TestInteractive:
 
             # Run the interactive workflow in a background thread
             t = threading.Thread(
-                target=seekr_chain.launch_argo_workflow,
+                target=seekr_chain.launch_k8s_workflow,
                 kwargs=dict(config=config, interactive=True),
                 daemon=True,
             )
@@ -144,7 +144,7 @@ class TestInteractive:
                 if match := re.match(r"chain delete (.+)", line.strip()):
                     print("DELETING WORKFLOW")
                     job_id = match.groups()[0]
-                    seekr_chain.ArgoWorkflow(id=job_id, namespace=config.namespace).delete()
+                    seekr_chain.K8sWorkflow(id=job_id, namespace=config.namespace).delete()
                     break
             else:
                 print("Workflow not found")

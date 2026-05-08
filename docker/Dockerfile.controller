@@ -1,0 +1,2 @@
+FROM python:3.12-slim
+RUN pip install --no-cache-dir 'kubernetes==35.0.0' 'PyYAML==6.0.2'

@@ -2,7 +2,7 @@
 
 import pytest
 
-from seekr_chain.backends.argo.launch_argo_workflow import _resolve_env_secrets
+from seekr_chain.backends.k8s.launch_k8s_workflow import _resolve_env_secrets
 from seekr_chain.config import WorkflowConfig
 
 
