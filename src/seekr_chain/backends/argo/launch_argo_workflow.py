@@ -193,7 +193,7 @@ def _create_workflow_secrets(config: WorkflowConfig, workflow_name: str, s3_cred
         env_key = cred_key.upper()
         if env_key in existing_keys:
             logger.warning(
-                "Skipping automatic injection from S3 credentials: "
+                "Skipping automatic injection of an S3 credential: "
                 "a secret with that name is already defined in your workflow config."
             )
             continue
