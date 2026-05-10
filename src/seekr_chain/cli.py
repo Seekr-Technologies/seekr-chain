@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import os
+import sys
 
 import click
 
@@ -67,7 +68,12 @@ def submit(config, follow, interactive, namespace, backend):
     job = seekr_chain.launch_workflow(config, interactive=interactive, backend=backend)
 
     if follow and not interactive:
-        job.follow()
+        from seekr_chain.backends.k8s.watched_state import WatchStalledError
+
+        try:
+            job.follow()
+        except WatchStalledError:
+            sys.exit(1)
 
 
 @main.command()
@@ -94,7 +100,12 @@ def logs(job_id, step, role, pod_index, attempt, timestamps, follow, all_replica
 
             print_logs(job_id, step, role, pod_index, attempt, timestamps)
         else:
-            workflow.follow(all_replicas=all_replicas)
+            from seekr_chain.backends.k8s.watched_state import WatchStalledError
+
+            try:
+                workflow.follow(all_replicas=all_replicas)
+            except WatchStalledError:
+                sys.exit(1)
     else:
         from seekr_chain.print_logs import print_logs
 
@@ -117,14 +128,20 @@ def status(job_id):
 @click.option("--poll-interval", type=click.INT, default=10, help="Polling interval in seconds")
 def wait(job_id, poll_interval):
     """Wait for a workflow to complete."""
-    import sys
-
     import seekr_chain
+    from seekr_chain.backends.k8s.watched_state import WatchStalledError
+    from seekr_chain.status import WorkflowStatus
 
     workflow = seekr_chain.K8sWorkflow(id=job_id)
-    status = seekr_chain.wait(workflow, poll_interval=poll_interval)
+    try:
+        status = seekr_chain.wait(workflow, poll_interval=poll_interval)
+    except WatchStalledError:
+        sys.exit(1)
     click.echo(f"{status.value} : {job_id}")
-    if status.is_failed():
+    # UNKNOWN means the job vanished mid-wait (e.g. deleted) rather than
+    # finishing — treat it as a failure so CI/automation gating on this
+    # exit code doesn't read a vanished job as success.
+    if status.is_failed() or status == WorkflowStatus.UNKNOWN:
         sys.exit(1)
 
 
@@ -133,9 +150,13 @@ def wait(job_id, poll_interval):
 def attach(job_id):
     """Attach to an interactive workflow."""
     import seekr_chain
+    from seekr_chain.backends.k8s.watched_state import WatchStalledError
 
     workflow = seekr_chain.K8sWorkflow(id=job_id)
-    workflow.attach()
+    try:
+        workflow.attach()
+    except WatchStalledError:
+        sys.exit(1)
 
 
 _STATUS_STYLES = {

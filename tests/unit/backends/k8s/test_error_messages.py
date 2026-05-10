@@ -1,6 +1,6 @@
 """Tests for improved error messages across the codebase."""
 
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -108,13 +108,18 @@ class TestKubectlPreflight:
             steps=[],
         )
 
+        mock_watcher = MagicMock()
+        mock_watcher.wait_for_first.return_value = empty_state
+        mock_watcher.connection_status.return_value = None
+        mock_watcher.__enter__.return_value = mock_watcher
+
         with (
-            patch.object(workflow, "get_detailed_state", return_value=empty_state),
             patch.object(workflow, "get_status"),
             patch(
                 "seekr_chain.backends.k8s.k8s_workflow.get_workflow_job_status",
                 return_value=(WorkflowStatus.RUNNING, None),
             ),
+            patch("seekr_chain.backends.k8s.k8s_workflow.workflow_state_watcher", return_value=mock_watcher),
             patch("seekr_chain.backends.k8s.k8s_workflow.first_running_or_finished_pod", return_value=pod),
             patch("seekr_chain.backends.k8s.k8s_workflow.shutil.which", return_value=None),
         ):

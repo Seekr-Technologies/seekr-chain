@@ -16,6 +16,12 @@ Public API:
   * ``first_running_or_finished_pod(...)`` — used by ``attach()`` to
     pick a pod to ``kubectl exec`` into.
   * ``is_jobset_suspended(...)`` — used by ``cancel()``.
+  * ``build_workflow_state(...)`` — pure tree-builder from already-fetched
+    Job/JobSet/Pod objects; used by ``get_workflow_state()`` and by
+    ``watched_state.workflow_state_watcher()`` (watch-driven caller).
+  * ``read_workflow_job(...)``, ``list_jobsets(...)``, ``list_pods(...)`` —
+    the individual fetch calls ``get_workflow_state()`` composes; exposed
+    so ``watched_state.py`` can seed its watch-based cache with the same calls.
 """
 
 import datetime
@@ -421,7 +427,7 @@ def _collect_step_state(name, roles, jobset: dict) -> StepState:
 # ---------------------------------------------------------------------------
 
 
-def _job_status_and_completion(job) -> tuple[WorkflowStatus, Optional[datetime.datetime]]:
+def job_status_and_completion(job) -> tuple[WorkflowStatus, Optional[datetime.datetime]]:
     """Map a Kubernetes Job's ``.status`` into ``(WorkflowStatus, completion_time)``.
 
     ``completion_time`` is populated only for terminal states.
@@ -437,19 +443,22 @@ def _job_status_and_completion(job) -> tuple[WorkflowStatus, Optional[datetime.d
     return WorkflowStatus.PENDING, None
 
 
-def _read_workflow_metadata(
-    k8s_batch, namespace: str, workflow_id: str
-) -> tuple[Optional[str], Optional[int], WorkflowStatus, Optional[datetime.datetime], Optional[datetime.datetime]]:
-    """Read controller Job → ``(name, total_steps, status, dt_start, dt_end)``.
+@dataclass
+class _JobMetadata:
+    name: Optional[str]
+    total_steps: Optional[int]
+    status: WorkflowStatus
+    dt_start: Optional[datetime.datetime]
+    dt_end: Optional[datetime.datetime]
 
-    Returns ``(None, None, UNKNOWN, None, None)`` if the Job no longer exists (404).
+
+def _job_metadata_from_object(job) -> _JobMetadata:
+    """Extract workflow-level metadata from an already-fetched Job.
+
+    Returns an all-``UNKNOWN``/``None`` ``_JobMetadata`` if ``job`` is ``None`` (not found).
     """
-    try:
-        job = k8s_batch.read_namespaced_job(name=workflow_id, namespace=namespace)
-    except k8s.client.exceptions.ApiException as e:
-        if e.status != 404:
-            raise
-        return None, None, WorkflowStatus.UNKNOWN, None, None
+    if job is None:
+        return _JobMetadata(name=None, total_steps=None, status=WorkflowStatus.UNKNOWN, dt_start=None, dt_end=None)
 
     labels = job.metadata.labels or {}
     annotations = job.metadata.annotations or {}
@@ -459,22 +468,22 @@ def _read_workflow_metadata(
     # Use start_time (pod scheduled) to match what ``chain list`` reports.
     # Fall back to creation_timestamp if the pod hasn't started yet.
     dt_start = _parse_timestamp(job.status.start_time) or _parse_timestamp(job.metadata.creation_timestamp)
-    status, dt_end = _job_status_and_completion(job)
-    return name, total_steps, status, dt_start, dt_end
+    status, dt_end = job_status_and_completion(job)
+    return _JobMetadata(name=name, total_steps=total_steps, status=status, dt_start=dt_start, dt_end=dt_end)
 
 
-def _list_jobsets_by_step(k8s_custom, namespace: str, workflow_id: str) -> dict[str, dict]:
-    """Return ``{step_name: jobset_dict}`` for all JobSets belonging to this workflow."""
+def read_workflow_job(k8s_batch, namespace: str, workflow_id: str) -> Optional[k8s.client.models.v1_job.V1Job]:
+    """Fetch the controller Job, or ``None`` if it no longer exists (404)."""
     try:
-        jobsets = k8s_custom.list_namespaced_custom_object(
-            group="jobset.x-k8s.io",
-            version="v1alpha2",
-            plural="jobsets",
-            namespace=namespace,
-            label_selector=f"seekr-chain/job-id={workflow_id}",
-        ).get("items", [])
-    except Exception:
-        jobsets = []
+        return k8s_batch.read_namespaced_job(name=workflow_id, namespace=namespace)
+    except k8s.client.exceptions.ApiException as e:
+        if e.status != 404:
+            raise
+        return None
+
+
+def _group_jobsets_by_step(jobsets: list[dict]) -> dict[str, dict]:
+    """Return ``{step_name: jobset_dict}`` from a list of raw JobSet objects."""
     return {
         js["metadata"]["labels"]["seekr-chain/step-name"]: js
         for js in jobsets
@@ -482,16 +491,29 @@ def _list_jobsets_by_step(k8s_custom, namespace: str, workflow_id: str) -> dict[
     }
 
 
-def _group_pods_by_step_and_role(k8s_v1, namespace: str, workflow_id: str, known_steps) -> dict[str, dict]:
-    """Return ``{step_name: {role_name: [pod, ...]}}`` for worker pods of this workflow.
+def list_jobsets(k8s_custom, namespace: str, workflow_id: str) -> tuple[list[dict], str]:
+    """Fetch all JobSets belonging to this workflow, as raw dicts.
+
+    Returns ``(items, resource_version)`` — the resourceVersion is the list
+    response's own, so a caller seeding a watch from it picks up exactly
+    where this snapshot left off instead of watching from scratch (``""``).
+    """
+    resp = k8s_custom.list_namespaced_custom_object(
+        group="jobset.x-k8s.io",
+        version="v1alpha2",
+        plural="jobsets",
+        namespace=namespace,
+        label_selector=f"seekr-chain/job-id={workflow_id}",
+    )
+    return resp.get("items", []), resp.get("metadata", {}).get("resourceVersion", "")
+
+
+def _group_pods_by_step(pods: list, known_steps) -> dict[str, dict]:
+    """Return ``{step_name: {role_name: [pod, ...]}}`` from a flat list of worker pods.
 
     ``known_steps`` seeds the result so steps with no pods yet still appear
     (e.g. a step suspended by Kueue before any pods exist).
     """
-    pods = k8s_v1.list_namespaced_pod(
-        namespace=namespace,
-        label_selector=f"seekr-chain/job-id={workflow_id},seekr-chain/is-controller!=true",
-    ).items
     roles_by_step: dict[str, dict] = {step_name: {} for step_name in known_steps}
     for pod in pods:
         step_name = pod.metadata.labels.get("seekr-chain/step")
@@ -502,6 +524,42 @@ def _group_pods_by_step_and_role(k8s_v1, namespace: str, workflow_id: str, known
     return roles_by_step
 
 
+def list_pods(k8s_v1, namespace: str, workflow_id: str) -> tuple[list, str]:
+    """Fetch all worker pods (excluding the controller pod) belonging to this workflow.
+
+    Returns ``(items, resource_version)`` — see ``list_jobsets`` docstring.
+    """
+    resp = k8s_v1.list_namespaced_pod(
+        namespace=namespace,
+        label_selector=f"seekr-chain/job-id={workflow_id},seekr-chain/is-controller!=true",
+    )
+    return resp.items, resp.metadata.resource_version or ""
+
+
+def build_workflow_state(workflow_id: str, job, jobsets: list[dict], pods: list) -> WorkflowState:
+    """Build a ``WorkflowState`` from already-fetched Job/JobSet/Pod objects.
+
+    Pure — makes no API calls. Shared by the one-shot ``get_workflow_state()``
+    and by watch-driven callers that maintain their own cache of raw objects.
+    """
+    meta = _job_metadata_from_object(job)
+    jobset_by_step = _group_jobsets_by_step(jobsets)
+    roles_by_step = _group_pods_by_step(pods, jobset_by_step.keys())
+    steps = [
+        _collect_step_state(step_name, roles_by_step.get(step_name, {}), js) for step_name, js in jobset_by_step.items()
+    ]
+    return WorkflowState(
+        id=workflow_id,
+        name=meta.name,
+        status=meta.status,
+        dt_start=meta.dt_start,
+        dt_end=meta.dt_end,
+        total_steps=meta.total_steps,
+        captured_at=datetime.datetime.now(tz=datetime.timezone.utc),
+        steps=steps,
+    )
+
+
 def get_workflow_state(k8s_custom, k8s_v1, k8s_batch, namespace: str, workflow_id: str) -> WorkflowState:
     """Build a complete ``WorkflowState`` snapshot for the given workflow.
 
@@ -510,22 +568,10 @@ def get_workflow_state(k8s_custom, k8s_v1, k8s_batch, namespace: str, workflow_i
     ``WorkflowState`` carries everything the rendering layer needs — no
     extra context required from the caller.
     """
-    name, total_steps, status, dt_start, dt_end = _read_workflow_metadata(k8s_batch, namespace, workflow_id)
-    jobset_by_step = _list_jobsets_by_step(k8s_custom, namespace, workflow_id)
-    roles_by_step = _group_pods_by_step_and_role(k8s_v1, namespace, workflow_id, jobset_by_step.keys())
-    steps = [
-        _collect_step_state(step_name, roles_by_step.get(step_name, {}), js) for step_name, js in jobset_by_step.items()
-    ]
-    return WorkflowState(
-        id=workflow_id,
-        name=name,
-        status=status,
-        dt_start=dt_start,
-        dt_end=dt_end,
-        total_steps=total_steps,
-        captured_at=datetime.datetime.now(tz=datetime.timezone.utc),
-        steps=steps,
-    )
+    job = read_workflow_job(k8s_batch, namespace, workflow_id)
+    jobsets, _ = list_jobsets(k8s_custom, namespace, workflow_id)
+    pods, _ = list_pods(k8s_v1, namespace, workflow_id)
+    return build_workflow_state(workflow_id, job, jobsets, pods)
 
 
 def get_workflow_job_status(
@@ -536,8 +582,13 @@ def get_workflow_job_status(
     Used by ``K8sWorkflow.get_status()`` (called repeatedly by ``wait()``) so
     callers can poll status without fetching the full workflow state.
     """
-    job = k8s_batch.read_namespaced_job_status(name=workflow_id, namespace=namespace)
-    return _job_status_and_completion(job)
+    try:
+        job = k8s_batch.read_namespaced_job_status(name=workflow_id, namespace=namespace)
+    except k8s.client.exceptions.ApiException as e:
+        if e.status != 404:
+            raise
+        return WorkflowStatus.UNKNOWN, None
+    return job_status_and_completion(job)
 
 
 def first_running_or_finished_pod(workflow_state: WorkflowState) -> Optional[PodState]:
