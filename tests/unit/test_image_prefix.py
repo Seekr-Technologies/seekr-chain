@@ -25,3 +25,14 @@ class TestResolveImage:
     def test_namespaced_image(self, monkeypatch):
         monkeypatch.setenv("SEEKR_CHAIN_IMAGE_PREFIX", "registry.example.com/mirror")
         assert resolve_image("amazon/aws-cli:2.25.11") == "registry.example.com/mirror/amazon/aws-cli:2.25.11"
+
+    def test_registry_host_stripped(self, monkeypatch):
+        monkeypatch.setenv("SEEKR_CHAIN_IMAGE_PREFIX", "registry.example.com/mirror")
+        assert (
+            resolve_image("ghcr.io/seekr-technologies/seekr-chain-init:1.0.0")
+            == "registry.example.com/mirror/seekr-technologies/seekr-chain-init:1.0.0"
+        )
+
+    def test_registry_host_with_port_stripped(self, monkeypatch):
+        monkeypatch.setenv("SEEKR_CHAIN_IMAGE_PREFIX", "registry.example.com/mirror")
+        assert resolve_image("my-registry.internal:5000/org/image:tag") == "registry.example.com/mirror/org/image:tag"

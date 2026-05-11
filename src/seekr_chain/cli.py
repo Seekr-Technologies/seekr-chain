@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
 
+import os
+
 import click
 
+from seekr_chain.utils import format_timestamp
 from seekr_chain.workflow import Backend
 
 
@@ -135,19 +138,48 @@ def attach(job_id):
     workflow.attach()
 
 
+_STATUS_STYLES = {
+    "Running": "cyan",
+    "Pending": "yellow",
+    "Succeeded": "green",
+    "Failed": "red",
+    "Error": "red",
+    "Terminated": "red",
+    "Omitted": "dim",
+    "Skipped": "dim",
+}
+
+
 @main.command(name="list")
 @click.option("-n", "--namespace", default=None, help="Kubernetes namespace (default: from kubeconfig context)")
-@click.option("--limit", type=click.INT, default=None, help="Maximum number of workflows to list")
-@click.option("-u", "--user", default=None, help="Filter workflows by submitting user")
-def list_cmd(namespace, limit, user):
+@click.option(
+    "-l", "--limit", type=click.INT, default=20, show_default=True, help="Most recent workflows to show (0 = no limit)"
+)
+@click.option("-u", "--user", default=None, help="Filter workflows by user (default: current $USER)")
+@click.option("-A", "--all-users", is_flag=True, help="Show workflows from all users")
+def list_cmd(namespace, limit, user, all_users):
     """List workflows."""
     from rich.box import SIMPLE_HEAD
     from rich.console import Console
     from rich.table import Table
+    from rich.text import Text
 
     import seekr_chain
 
-    workflows = seekr_chain.list_workflows(namespace=namespace, limit=limit, user=user)
+    if all_users:
+        effective_user = None
+    elif user is not None:
+        effective_user = user
+    else:
+        effective_user = os.environ.get("USER")
+
+    workflows = seekr_chain.list_workflows(namespace=namespace, user=effective_user)
+    workflows.sort(key=lambda wf: wf["created"])
+
+    if limit:
+        running = [wf for wf in workflows if wf["status"] in ("Running", "Pending")]
+        finished = [wf for wf in workflows if wf["status"] not in ("Running", "Pending")]
+        workflows = finished[-limit:] + running
 
     table = Table(box=SIMPLE_HEAD, pad_edge=False)
     table.add_column("ID")
@@ -155,10 +187,13 @@ def list_cmd(namespace, limit, user):
     table.add_column("User")
     table.add_column("Status")
     table.add_column("Created")
-    table.add_column("Duration")
+    table.add_column("Duration", justify="right")
 
     for wf in workflows:
-        table.add_row(wf["name"], wf["job_name"], wf["user"], wf["status"], wf["created"], wf["duration"])
+        status_text = Text(wf["status"], style=_STATUS_STYLES.get(wf["status"], ""))
+        table.add_row(
+            wf["name"], wf["job_name"], wf["user"], status_text, format_timestamp(wf["created"]), wf["duration"]
+        )
 
     Console().print(table)
 

@@ -13,9 +13,13 @@ from seekr_chain.config import (
     StepConfig,
     WorkflowConfig,
 )
+from seekr_chain.user_config import config as _user_config
 from seekr_chain.utils import format_bytes, resolve_image
 
 logger = logging.getLogger(__name__)
+
+_DEFAULT_INIT_IMAGE = "ghcr.io/seekr-technologies/seekr-chain-init:latest@sha256:f1fc456cffae92eab86c18814f3668c766ab12b69231308083ff128a8d4d0a9c"
+_INIT_IMAGE = _user_config.init_image or _DEFAULT_INIT_IMAGE
 
 
 def _get_pvcs(config) -> tuple[list, list]:
@@ -237,14 +241,13 @@ def _build_role_context(
         "shm_size": role_config.resources.shm_size,
         "shm_unlimited": shm_unlimited,
         "step_args": step_args,
-        # Init container images and computed paths
-        "init_aws_cli_image": resolve_image("amazon/aws-cli:2.25.11"),
-        "init_alpine_image": resolve_image("alpine:3.22.0"),
-        "init_busybox_image": resolve_image("busybox:1.37-uclibc"),
+        # Init container image and computed paths
+        "init_image": resolve_image(_INIT_IMAGE),
         "remote_md_path": remote_md_path,
         "role_asset_path": str(role_asset_path),
         "init_upload_md_cmd": (
-            f'printf \'{{"pod_name":"%s"}}\' $SEEKR_CHAIN_POD_INSTANCE_ID | aws s3 cp - {remote_md_path}'
+            f'printf \'{{"pod_name":"%s"}}\' $SEEKR_CHAIN_POD_INSTANCE_ID > /tmp/metadata.json'
+            f" && s5cmd cp /tmp/metadata.json {remote_md_path}"
         ),
         # Log sidecar
         "log_sidecar_image": resolve_image("fluent/fluent-bit:2.2-debug"),

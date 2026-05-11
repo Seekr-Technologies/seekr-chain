@@ -8,11 +8,25 @@ from pathlib import Path
 
 
 def resolve_image(image: str) -> str:
-    """Prepend SEEKR_CHAIN_IMAGE_PREFIX to an image name when the env var is set."""
+    """Prepend SEEKR_CHAIN_IMAGE_PREFIX to an image name when the env var is set.
+
+    If the image already contains a registry host (identified by a leading
+    component that contains '.' or ':'), that host is stripped before the
+    prefix is applied so the result is a valid image reference.
+
+    Examples with prefix=registry.example.com/mirror:
+      ubuntu:24.04                              -> registry.example.com/mirror/ubuntu:24.04
+      amazon/aws-cli:2.25.11                    -> registry.example.com/mirror/amazon/aws-cli:2.25.11
+      ghcr.io/org/image:1.0.0                   -> registry.example.com/mirror/org/image:1.0.0
+    """
     prefix = os.environ.get("SEEKR_CHAIN_IMAGE_PREFIX", "")
-    if prefix:
-        return f"{prefix.rstrip('/')}/{image}"
-    return image
+    if not prefix:
+        return image
+    # Strip an existing registry host (first path component containing '.' or ':')
+    parts = image.split("/", 1)
+    if len(parts) == 2 and ("." in parts[0] or ":" in parts[0]):
+        image = parts[1]
+    return f"{prefix.rstrip('/')}/{image}"
 
 
 def generate_id(N=6):
@@ -86,6 +100,20 @@ def get_size(p: Path) -> int:
             pass
         return total
     return 0
+
+
+def format_timestamp(ts: str) -> str:
+    """Convert a UTC ISO 8601 timestamp to a local-time human-readable string."""
+    from datetime import datetime, timezone
+
+    if not ts:
+        return ""
+    try:
+        dt_utc = datetime.strptime(ts, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+        dt_local = dt_utc.astimezone()
+        return dt_local.strftime("%b %d %H:%M")
+    except ValueError:
+        return ts
 
 
 def summarize_dir(path, sort_by_size: bool = True, detail: bool = False) -> str:

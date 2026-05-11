@@ -4,7 +4,7 @@ import yaml
 
 from seekr_chain.backends.argo import render
 from seekr_chain.backends.argo.job_info import get_job_info
-from seekr_chain.backends.argo.jobset import build_jobset_context
+from seekr_chain.backends.argo.jobset import _DEFAULT_INIT_IMAGE, build_jobset_context
 from seekr_chain.config import WorkflowConfig
 
 DATASTORE_ROOT = "s3://test-bucket/seekr-chain/"
@@ -114,8 +114,38 @@ class TestJobsetTemplateRendering:
         manifest = yaml.safe_load(rendered)
 
         pod_spec = manifest["spec"]["replicatedJobs"][0]["template"]["spec"]["template"]["spec"]
-        init_names = [c["name"] for c in pod_spec["initContainers"]]
-        assert init_names == ["download-assets", "unpack-assets", "inject-shell"]
+        init_containers = pod_spec["initContainers"]
+        assert [c["name"] for c in init_containers] == ["chain-init"]
+        assert init_containers[0]["image"] == _DEFAULT_INIT_IMAGE
+
+    def test_init_container_has_required_env(self, tmp_path):
+        config = _minimal_config()
+        job_info = _fake_job_info()
+
+        _, context = build_jobset_context(
+            workflow_config=config,
+            step_index=0,
+            job_info=job_info,
+            workflow_name="ab1234",
+            workflow_secrets=[],
+            interactive=False,
+            assets_path=tmp_path / "assets",
+        )
+
+        rendered = render.render("jobset.yaml.j2", context)
+        manifest = yaml.safe_load(rendered)
+
+        pod_spec = manifest["spec"]["replicatedJobs"][0]["template"]["spec"]["template"]["spec"]
+        init_container = pod_spec["initContainers"][0]
+        env_names = [e["name"] for e in init_container.get("env", [])]
+
+        assert "AWS_ACCESS_KEY_ID" in env_names
+        assert "AWS_SECRET_ACCESS_KEY" in env_names
+        assert "AWS_REGION" in env_names
+        assert "S3_ENDPOINT_URL" in env_names
+        assert "NODE_RANK" in env_names
+        assert "SEEKR_CHAIN_POD_INSTANCE_ID" in env_names
+        assert "RESTART_ATTEMPT" in env_names
 
     def test_main_and_sidecar_containers(self, tmp_path):
         config = _minimal_config()
