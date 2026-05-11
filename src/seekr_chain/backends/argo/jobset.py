@@ -365,7 +365,7 @@ def _build_affinity(workflow_config) -> tuple[dict | None, list[str]]:
 
 
 def _get_step_resources(config) -> dict:
-    CPU_RESOURCE_MARGIN = 0.99
+    CPU_RESOURCE_MARGIN = 0.95
     MEM_RESOURCE_MARGIN = 0.95
     ES_RESOURCE_MARGIN = 0.80
 
