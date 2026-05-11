@@ -72,7 +72,10 @@ def _create_secrets(workflow_name: str, s3_creds: dict, config: WorkflowConfig):
     secrets.update(_resolve_env_secrets(config))
 
     if s3_creds:
-        secrets = {**secrets, **{key.upper(): value for key, value in s3_creds.items()}}
+        # Only fill in creds the user hasn't already set — explicit config always wins.
+        for k, v in s3_creds.items():
+            if k.upper() not in secrets:
+                secrets[k.upper()] = v
 
     v1 = k8s_utils.get_core_v1_api()
 
@@ -184,14 +187,23 @@ def _create_workflow_secrets(config: WorkflowConfig, workflow_name: str, s3_cred
             )
 
     # S3 credentials are also stored in the per-workflow K8s Secret.
+    # Skip any key the user has already defined — explicit config always wins.
+    existing_keys = {entry["name"] for entry in out}
     for cred_key in (s3_creds or {}).keys():
+        env_key = cred_key.upper()
+        if env_key in existing_keys:
+            logger.warning(
+                "Skipping automatic injection of an S3 credential: "
+                "a secret with that name is already defined in your workflow config."
+            )
+            continue
         out.append(
             {
-                "name": cred_key.upper(),
+                "name": env_key,
                 "valueFrom": {
                     "secretKeyRef": {
                         "name": workflow_name,
-                        "key": cred_key.upper(),
+                        "key": env_key,
                     }
                 },
             }
