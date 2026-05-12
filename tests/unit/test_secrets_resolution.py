@@ -1,8 +1,8 @@
-"""Tests for env secret resolution in launch_argo_workflow."""
+"""Tests for env secret resolution in launch_k8s_workflow."""
 
 import pytest
 
-from seekr_chain.backends.argo.launch_argo_workflow import (
+from seekr_chain.backends.k8s.launch_k8s_workflow import (
     _create_workflow_secrets,
     _resolve_env_secrets,
 )
@@ -162,6 +162,6 @@ class TestCreateWorkflowSecrets:
         from unittest.mock import patch
 
         config = _config_with_secrets({"AWS_ACCESS_KEY_ID": "user-key"})
-        with patch("seekr_chain.backends.argo.launch_argo_workflow.logger") as mock_logger:
+        with patch("seekr_chain.backends.k8s.launch_k8s_workflow.logger") as mock_logger:
             _create_workflow_secrets(config, "wf-abc", FAKE_S3_CREDS)
         assert mock_logger.warning.called

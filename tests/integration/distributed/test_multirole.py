@@ -43,7 +43,7 @@ class TestMultiRole:
             }
         )
 
-        job = seekr_chain.launch_argo_workflow(config)
+        job = seekr_chain.launch_k8s_workflow(config)
         job.follow()
 
         seekr_chain.wait(job, poll_interval=1)
@@ -101,10 +101,11 @@ class TestMultiRole:
             }
         )
 
-        job = seekr_chain.launch_argo_workflow(config)
+        job = seekr_chain.launch_k8s_workflow(config)
         job.follow()
 
         seekr_chain.wait(job, poll_interval=1)
+        time.sleep(5)
 
         logs = job.get_logs().to_dict()
 

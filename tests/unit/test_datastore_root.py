@@ -1,12 +1,12 @@
-"""Tests for datastore root resolution and ArgoWorkflow reconnect behaviour."""
+"""Tests for datastore root resolution and K8sWorkflow reconnect behaviour."""
 
 from unittest.mock import MagicMock, patch
 
 import pytest
 from kubernetes.client.rest import ApiException
 
-from seekr_chain.backends.argo.argo_workflow import ArgoWorkflow
-from seekr_chain.backends.argo.job_info import get_job_info
+from seekr_chain.backends.k8s.job_info import get_job_info
+from seekr_chain.backends.k8s.k8s_workflow import K8sWorkflow
 from tests.unit.conftest import no_dotenv, no_toml_files
 
 
@@ -24,32 +24,31 @@ class TestGetJobInfoError:
                 get_job_info("some-id")
 
 
-class TestArgoWorkflowReconnect:
+class TestK8sWorkflowReconnect:
     def _make_workflow(self, id="test-id-abc123", datastore_root=None, k8s_status=200):
-        """Create an ArgoWorkflow with mocked k8s clients."""
+        """Create a K8sWorkflow with mocked k8s clients."""
+        mock_batch = MagicMock()
+        if k8s_status == 404:
+            mock_batch.read_namespaced_job.side_effect = ApiException(status=404)
+        elif k8s_status == 500:
+            mock_batch.read_namespaced_job.side_effect = ApiException(status=500)
+        else:
+            mock_job = MagicMock()
+            mock_job.metadata.annotations = {"seekr-chain/datastore-root": datastore_root} if datastore_root else {}
+            mock_batch.read_namespaced_job.return_value = mock_job
+
         with (
-            patch("seekr_chain.backends.argo.argo_workflow.k8s_utils") as mock_k8s_utils,
-            patch("seekr_chain.backends.argo.argo_workflow.boto3") as mock_boto3,
-            patch("kubernetes.config.list_kube_config_contexts") as mock_ctx,
+            patch("seekr_chain.backends.k8s.k8s_workflow.k8s_utils") as mock_k8s_utils,
+            patch("seekr_chain.backends.k8s.k8s_workflow.boto3") as mock_boto3,
+            patch("seekr_chain.backends.k8s.k8s_workflow.k8s") as mock_k8s,
         ):
-            mock_ctx.return_value = (None, {"context": {"namespace": "argo"}})
+            mock_k8s.config.list_kube_config_contexts.return_value = (None, {"context": {"namespace": "argo"}})
             mock_k8s_utils.get_core_v1_api.return_value = MagicMock()
-            mock_custom = MagicMock()
-            mock_k8s_utils.get_custom_objects_api.return_value = mock_custom
+            mock_k8s_utils.get_custom_objects_api.return_value = MagicMock()
+            mock_k8s.client.BatchV1Api.return_value = mock_batch
             mock_boto3.client.return_value = MagicMock()
 
-            if k8s_status == 404:
-                mock_custom.get_namespaced_custom_object.side_effect = ApiException(status=404)
-            elif k8s_status == 500:
-                mock_custom.get_namespaced_custom_object.side_effect = ApiException(status=500)
-            else:
-                mock_custom.get_namespaced_custom_object.return_value = {
-                    "metadata": {
-                        "annotations": ({"seekr-chain/datastore-root": datastore_root} if datastore_root else {})
-                    }
-                }
-
-            return ArgoWorkflow(id=id)
+            return K8sWorkflow(id=id)
 
     def test_k8s_404_falls_back_to_env_var(self, monkeypatch):
         monkeypatch.setenv("SEEKRCHAIN_DATASTORE_ROOT", "s3://bucket/seekr-chain/")
