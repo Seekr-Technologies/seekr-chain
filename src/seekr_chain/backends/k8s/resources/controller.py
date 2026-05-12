@@ -90,8 +90,7 @@ def _load_phases(
                 if name in phases and phase in ("SUCCEEDED", "FAILED"):
                     phases[name] = phase
             print(
-                f"[controller] restored phases from ConfigMap: "
-                f"{[n for n, p in phases.items() if p != 'PENDING']}",
+                f"[controller] restored phases from ConfigMap: {[n for n, p in phases.items() if p != 'PENDING']}",
                 flush=True,
             )
     except kubernetes.client.exceptions.ApiException as e:
@@ -344,15 +343,23 @@ def main() -> int:
                         phases[step_name] = "SUCCEEDED"
                         print(f"[controller] step={step_name!r} SUCCEEDED", flush=True)
                         _emit_event(
-                            k8s_v1, namespace, workflow_id, job_uid,
-                            "StepSucceeded", f"Step {step_name!r} completed successfully",
+                            k8s_v1,
+                            namespace,
+                            workflow_id,
+                            job_uid,
+                            "StepSucceeded",
+                            f"Step {step_name!r} completed successfully",
                         )
                     elif terminal == "Failed":
                         phases[step_name] = "FAILED"
                         print(f"[controller] step={step_name!r} FAILED", flush=True)
                         _emit_event(
-                            k8s_v1, namespace, workflow_id, job_uid,
-                            "StepFailed", f"Step {step_name!r} failed",
+                            k8s_v1,
+                            namespace,
+                            workflow_id,
+                            job_uid,
+                            "StepFailed",
+                            f"Step {step_name!r} failed",
                             event_type="Warning",
                         )
 
@@ -387,16 +394,24 @@ def main() -> int:
     failed = [n for n, p in phases.items() if p == "FAILED"]
     if failed:
         _emit_event(
-            k8s_v1, namespace, workflow_id, job_uid,
-            "WorkflowFailed", f"Workflow failed — failed steps: {failed}",
+            k8s_v1,
+            namespace,
+            workflow_id,
+            job_uid,
+            "WorkflowFailed",
+            f"Workflow failed — failed steps: {failed}",
             event_type="Warning",
         )
         print(f"[controller] workflow FAILED — failed steps: {failed}", file=sys.stderr, flush=True)
         return 1
 
     _emit_event(
-        k8s_v1, namespace, workflow_id, job_uid,
-        "WorkflowSucceeded", "All steps completed successfully",
+        k8s_v1,
+        namespace,
+        workflow_id,
+        job_uid,
+        "WorkflowSucceeded",
+        "All steps completed successfully",
     )
     print("[controller] workflow SUCCEEDED — all steps completed", flush=True)
     return 0

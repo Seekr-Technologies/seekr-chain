@@ -507,7 +507,9 @@ class TestMainWatchReconnect:
             patch.object(controller.kubernetes.client, "CoreV1Api", MagicMock()),
             patch.object(controller.kubernetes, "watch", MagicMock(Watch=mock_watch_cls)),
             patch.object(controller, "_load_manifest", return_value={"metadata": {"name": "a-js"}, "spec": {}}),
-            patch.object(controller, "_load_phases", side_effect=lambda _v1, _ns, _wid, d: {s["name"]: "PENDING" for s in d}),
+            patch.object(
+                controller, "_load_phases", side_effect=lambda _v1, _ns, _wid, d: {s["name"]: "PENDING" for s in d}
+            ),
             patch.object(controller, "_save_phases"),
             patch.object(controller, "_emit_event"),
             patch.object(controller, "_touch_heartbeat"),
@@ -559,7 +561,9 @@ class TestMainWatchReconnect:
             patch.object(controller.kubernetes.client, "CoreV1Api", MagicMock()),
             patch.object(controller.kubernetes, "watch", MagicMock(Watch=mock_watch_cls)),
             patch.object(controller, "_load_manifest", return_value={"metadata": {"name": "a-js"}, "spec": {}}),
-            patch.object(controller, "_load_phases", side_effect=lambda _v1, _ns, _wid, d: {s["name"]: "PENDING" for s in d}),
+            patch.object(
+                controller, "_load_phases", side_effect=lambda _v1, _ns, _wid, d: {s["name"]: "PENDING" for s in d}
+            ),
             patch.object(controller, "_save_phases"),
             patch.object(controller, "_emit_event"),
             patch.object(controller, "_touch_heartbeat"),
