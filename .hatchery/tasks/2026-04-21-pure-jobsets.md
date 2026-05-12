@@ -23,6 +23,39 @@ the S3 asset tarball. The controller only needs `kubernetes` + `pyyaml`.
 
 ## Summary
 
+### Before / After / Why
+
+**Before**: Argo Workflows managed the DAG. Every step was already just submitting a
+JobSet anyway, which meant three unnecessary levels of nesting:
+
+```
+Argo workflow → Argo executor pod (per step) → JobSet
+```
+
+Argo was a heavy cluster dependency for what is essentially a "wait for deps → submit
+JobSet → watch for completion" loop.
+
+**Now**: each workflow gets a single lightweight controller `batch/v1 Job`. That pod
+watches its child JobSets, submitting each step as it becomes unblocked. Just a simple
+DAG runner — no Argo in the path.
+
+**What we gain**:
+- **Latency**: the test DAG example drops from ~90s to ~45s. The extra Argo nesting
+  added substantial overhead on every step transition.
+- **No Argo cluster dependency** — runs on any Kubernetes cluster with the JobSet CRD.
+- **Expanded lifecycle hooks**: Argo only supported `on_exit` (runs after every step
+  regardless of outcome). We can now add `on_success` and `on_failure` separately.
+  This matters in practice: without `on_failure`, Argo would spin up an exit-handler
+  pod after every successful step just to do nothing.
+
+**What we lose**:
+- **Argo UI** — the workflow graph and step status view. Not actually useful here:
+  because every step was a JobSet, the Argo UI couldn't show job logs or meaningful
+  metrics anyway — it only had visibility into its own executor pods, not the actual
+  workers. `chain status` and `chain logs` cover the same ground for real workloads.
+- **Argo metrics export** — same caveat: Argo only exported metrics about its own pods,
+  not the JobSet workers. Not a real loss.
+
 ### Architecture
 
 ```
