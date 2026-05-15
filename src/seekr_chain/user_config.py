@@ -29,6 +29,7 @@ _CONFIG_FILENAME = ".seekrchain.toml"
 _ENV_VAR_MAP: dict[str, str] = {
     "SEEKRCHAIN_DATASTORE_ROOT": "datastore_root",
     "SEEKRCHAIN_INIT_IMAGE": "init_image",
+    "SEEKRCHAIN_CONTROLLER_IMAGE": "controller_image",
 }
 
 
@@ -36,6 +37,7 @@ _ENV_VAR_MAP: dict[str, str] = {
 class UserConfig:
     datastore_root: str | None = None
     init_image: str | None = None
+    controller_image: str | None = None
 
 
 def _find_file_walking_up(filename: str) -> Path | None:
@@ -82,6 +84,7 @@ def _load_config() -> UserConfig:
     return UserConfig(
         datastore_root=values.get("datastore_root"),
         init_image=values.get("init_image"),
+        controller_image=values.get("controller_image"),
     )
 
 

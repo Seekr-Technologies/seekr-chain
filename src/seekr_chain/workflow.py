@@ -5,7 +5,8 @@ from enum import Enum
 
 
 class Backend(str, Enum):
-    ARGO = "ARGO"
+    K8S = "K8S"
+    ARGO = "ARGO"  # deprecated — routes to K8S backend
     LOCAL = "LOCAL"
 
 

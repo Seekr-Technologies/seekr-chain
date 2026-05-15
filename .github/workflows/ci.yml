@@ -38,7 +38,7 @@ jobs:
 
   test-integration:
     name: test-integration
-    needs: test-unit
+    needs: [test-unit]
     runs-on: ubuntu-latest
     timeout-minutes: 60
 
@@ -56,9 +56,6 @@ jobs:
           curl -fsSLO https://dl.k8s.io/release/v1.32.3/bin/linux/amd64/kubectl
           echo "ab209d0c5134b61486a0486585604a616a5bb2fc07df46d304b3c95817b2d79f  kubectl" | sha256sum -c
           chmod +x kubectl && sudo mv kubectl /usr/local/bin/
-
-      - name: Install argo CLI
-        run: ARGO_VERSION=v3.6.7 bash scripts/install-argo.sh
 
       - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
 

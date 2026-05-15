@@ -48,7 +48,7 @@ def config_file_with_code(tmp_path):
 
 class TestSubmit:
     def test_basic(self, config_file):
-        """No flags → launch_argo_workflow called once with interactive=False; follow not called."""
+        """No flags → launch_k8s_workflow called once with interactive=False; follow not called."""
         mock_job = MagicMock()
         runner = CliRunner()
 
@@ -64,7 +64,7 @@ class TestSubmit:
         mock_job.follow.assert_not_called()
 
     def test_follow(self, config_file):
-        """--follow flag → launch_argo_workflow called; then job.follow() called."""
+        """--follow flag → launch_k8s_workflow called; then job.follow() called."""
         mock_job = MagicMock()
         runner = CliRunner()
 
@@ -75,7 +75,7 @@ class TestSubmit:
         mock_job.follow.assert_called_once()
 
     def test_interactive(self, config_file):
-        """--interactive flag → launch_argo_workflow(interactive=True); follow not called."""
+        """--interactive flag → launch_k8s_workflow(interactive=True); follow not called."""
         mock_job = MagicMock()
         runner = CliRunner()
 
@@ -168,7 +168,7 @@ class TestLogsFollow:
         mock_workflow = MagicMock()
         mock_workflow.get_status.return_value = MagicMock(is_finished=MagicMock(return_value=False))
 
-        with patch("seekr_chain.ArgoWorkflow", return_value=mock_workflow):
+        with patch("seekr_chain.K8sWorkflow", return_value=mock_workflow):
             result = runner.invoke(main, ["logs", "my-job", "--follow"])
 
         assert result.exit_code == 0, result.output
@@ -181,7 +181,7 @@ class TestLogsFollow:
         mock_workflow.get_status.return_value = MagicMock(is_finished=MagicMock(return_value=True))
 
         with (
-            patch("seekr_chain.ArgoWorkflow", return_value=mock_workflow),
+            patch("seekr_chain.K8sWorkflow", return_value=mock_workflow),
             patch("seekr_chain.print_logs.print_logs") as mock_print_logs,
         ):
             result = runner.invoke(main, ["logs", "my-job", "--follow"])
@@ -196,14 +196,14 @@ class TestLogsFollow:
         mock_workflow = MagicMock()
         mock_workflow.get_status.return_value = MagicMock(is_finished=MagicMock(return_value=False))
 
-        with patch("seekr_chain.ArgoWorkflow", return_value=mock_workflow):
+        with patch("seekr_chain.K8sWorkflow", return_value=mock_workflow):
             result = runner.invoke(main, ["logs", "my-job", "--follow", "--all-replicas"])
 
         assert result.exit_code == 0, result.output
         mock_workflow.follow.assert_called_once_with(all_replicas=True)
 
     def test_no_follow(self):
-        """Without --follow, print_logs is called (no ArgoWorkflow constructed)."""
+        """Without --follow, print_logs is called (no K8sWorkflow constructed)."""
         runner = CliRunner()
 
         with patch("seekr_chain.print_logs.print_logs") as mock_print_logs:
@@ -215,14 +215,14 @@ class TestLogsFollow:
 
 class TestStatus:
     def test_status(self):
-        """chain status my-job → ArgoWorkflow constructed, get_status and format_state called."""
+        """chain status my-job → K8sWorkflow constructed, get_status and format_state called."""
         runner = CliRunner()
         mock_workflow = MagicMock()
         mock_workflow.get_status.return_value = MagicMock(value="RUNNING")
         mock_workflow.get_detailed_state.return_value = "state-obj"
         mock_workflow.format_state.return_value = "  RUNNING : step-1"
 
-        with patch("seekr_chain.ArgoWorkflow", return_value=mock_workflow) as mock_cls:
+        with patch("seekr_chain.K8sWorkflow", return_value=mock_workflow) as mock_cls:
             result = runner.invoke(main, ["status", "my-job"])
 
         assert result.exit_code == 0, result.output
@@ -243,7 +243,7 @@ class TestWait:
         mock_status.is_failed.return_value = False
 
         with (
-            patch("seekr_chain.ArgoWorkflow", return_value=mock_workflow) as mock_cls,
+            patch("seekr_chain.K8sWorkflow", return_value=mock_workflow) as mock_cls,
             patch("seekr_chain.wait", return_value=mock_status) as mock_wait,
         ):
             result = runner.invoke(main, ["wait", "my-job"])
@@ -261,7 +261,7 @@ class TestWait:
         mock_status.is_failed.return_value = True
 
         with (
-            patch("seekr_chain.ArgoWorkflow", return_value=mock_workflow),
+            patch("seekr_chain.K8sWorkflow", return_value=mock_workflow),
             patch("seekr_chain.wait", return_value=mock_status),
         ):
             result = runner.invoke(main, ["wait", "my-job"])
@@ -277,7 +277,7 @@ class TestWait:
         mock_status.is_failed.return_value = False
 
         with (
-            patch("seekr_chain.ArgoWorkflow", return_value=mock_workflow),
+            patch("seekr_chain.K8sWorkflow", return_value=mock_workflow),
             patch("seekr_chain.wait", return_value=mock_status) as mock_wait,
         ):
             result = runner.invoke(main, ["wait", "my-job", "--poll-interval", "5"])
@@ -288,11 +288,11 @@ class TestWait:
 
 class TestAttach:
     def test_attach(self):
-        """chain attach my-job → ArgoWorkflow(id='my-job') constructed and .attach() called."""
+        """chain attach my-job → K8sWorkflow(id='my-job') constructed and .attach() called."""
         runner = CliRunner()
         mock_workflow = MagicMock()
 
-        with patch("seekr_chain.ArgoWorkflow", return_value=mock_workflow) as mock_cls:
+        with patch("seekr_chain.K8sWorkflow", return_value=mock_workflow) as mock_cls:
             result = runner.invoke(main, ["attach", "my-job"])
 
         assert result.exit_code == 0, result.output
@@ -303,63 +303,64 @@ class TestAttach:
 class TestListWorkflows:
     """Unit tests for the list_workflows k8s_utils function."""
 
-    @patch("seekr_chain.backends.argo.list_workflows.kubernetes")
+    @patch("seekr_chain.backends.k8s.list_workflows.kubernetes")
     def test_label_selector(self, mock_k8s):
         """list_workflows filters to seekr-chain workflows via label selector."""
-        from seekr_chain.backends.argo.list_workflows import list_argo_workflows as list_workflows
+        from seekr_chain.backends.k8s.list_workflows import list_k8s_workflows as list_workflows
 
-        mock_custom = MagicMock()
-        mock_custom.list_namespaced_custom_object.return_value = {"items": []}
-        mock_k8s.client.CustomObjectsApi.return_value = mock_custom
+        mock_batch = MagicMock()
+        mock_result = MagicMock()
+        mock_result.items = []
+        mock_batch.list_namespaced_job.return_value = mock_result
+        mock_k8s.client.BatchV1Api.return_value = mock_batch
         mock_k8s.config.list_kube_config_contexts.return_value = ([], {"context": {"namespace": "default"}})
 
         list_workflows()
 
-        call_kwargs = mock_custom.list_namespaced_custom_object.call_args.kwargs
+        call_kwargs = mock_batch.list_namespaced_job.call_args.kwargs
         assert call_kwargs["label_selector"] == "seekr-chain/job-id"
 
-    @patch("seekr_chain.backends.argo.list_workflows.kubernetes")
+    @patch("seekr_chain.backends.k8s.list_workflows.kubernetes")
     def test_label_selector_with_user(self, mock_k8s):
         """list_workflows with user= appends user label selector."""
-        from seekr_chain.backends.argo.list_workflows import list_argo_workflows as list_workflows
+        from seekr_chain.backends.k8s.list_workflows import list_k8s_workflows as list_workflows
 
-        mock_custom = MagicMock()
-        mock_custom.list_namespaced_custom_object.return_value = {"items": []}
-        mock_k8s.client.CustomObjectsApi.return_value = mock_custom
+        mock_batch = MagicMock()
+        mock_result = MagicMock()
+        mock_result.items = []
+        mock_batch.list_namespaced_job.return_value = mock_result
+        mock_k8s.client.BatchV1Api.return_value = mock_batch
         mock_k8s.config.list_kube_config_contexts.return_value = ([], {"context": {"namespace": "default"}})
 
         list_workflows(user="alice")
 
-        call_kwargs = mock_custom.list_namespaced_custom_object.call_args.kwargs
+        call_kwargs = mock_batch.list_namespaced_job.call_args.kwargs
         assert call_kwargs["label_selector"] == "seekr-chain/job-id,seekr-chain/user=alice"
 
-    @patch("seekr_chain.backends.argo.list_workflows.kubernetes")
+    @patch("seekr_chain.backends.k8s.list_workflows.kubernetes")
     def test_returns_job_name_and_user(self, mock_k8s):
         """list_workflows extracts job_name and user from workflow labels."""
-        from seekr_chain.backends.argo.list_workflows import list_argo_workflows as list_workflows
+        from seekr_chain.backends.k8s.list_workflows import list_k8s_workflows as list_workflows
 
-        mock_custom = MagicMock()
-        mock_custom.list_namespaced_custom_object.return_value = {
-            "items": [
-                {
-                    "metadata": {
-                        "name": "abc123",
-                        "creationTimestamp": "2026-01-01T00:00:00Z",
-                        "labels": {
-                            "seekr-chain/job-id": "abc123",
-                            "seekr-chain/job-name": "my-training",
-                            "seekr-chain/user": "bob",
-                        },
-                    },
-                    "status": {
-                        "phase": "Succeeded",
-                        "startedAt": "2026-01-01T00:00:00Z",
-                        "finishedAt": "2026-01-01T00:05:00Z",
-                    },
-                }
-            ]
+        mock_job = MagicMock()
+        mock_job.metadata.name = "abc123"
+        mock_job.metadata.creation_timestamp = None
+        mock_job.metadata.labels = {
+            "seekr-chain/job-id": "abc123",
+            "seekr-chain/job-name": "my-training",
+            "seekr-chain/user": "bob",
         }
-        mock_k8s.client.CustomObjectsApi.return_value = mock_custom
+        mock_job.status.succeeded = 1
+        mock_job.status.failed = None
+        mock_job.status.active = None
+        mock_job.status.start_time = None
+        mock_job.status.completion_time = None
+
+        mock_batch = MagicMock()
+        mock_result = MagicMock()
+        mock_result.items = [mock_job]
+        mock_batch.list_namespaced_job.return_value = mock_result
+        mock_k8s.client.BatchV1Api.return_value = mock_batch
         mock_k8s.config.list_kube_config_contexts.return_value = ([], {"context": {"namespace": "default"}})
 
         result = list_workflows()
@@ -553,7 +554,7 @@ class TestList:
 
 
 class TestSubmitBackend:
-    def test_default_backend_is_argo(self, config_file):
+    def test_default_backend_is_k8s(self, config_file):
         mock_job = MagicMock()
         runner = CliRunner()
 
@@ -561,7 +562,7 @@ class TestSubmitBackend:
             result = runner.invoke(main, ["submit", str(config_file)])
 
         assert result.exit_code == 0, result.output
-        assert mock_launch.call_args.kwargs.get("backend") == "argo"
+        assert mock_launch.call_args.kwargs.get("backend") == "k8s"
 
     def test_local_backend_flag(self, config_file):
         mock_job = MagicMock()
@@ -594,11 +595,11 @@ class TestSubmitBackend:
 
 class TestDelete:
     def test_delete(self):
-        """chain delete my-job → ArgoWorkflow(id='my-job') constructed and .delete() called."""
+        """chain delete my-job → K8sWorkflow(id='my-job') constructed and .delete() called."""
         runner = CliRunner()
         mock_workflow = MagicMock()
 
-        with patch("seekr_chain.ArgoWorkflow", return_value=mock_workflow) as mock_cls:
+        with patch("seekr_chain.K8sWorkflow", return_value=mock_workflow) as mock_cls:
             result = runner.invoke(main, ["delete", "my-job"])
 
         assert result.exit_code == 0, result.output
@@ -611,7 +612,7 @@ class TestDelete:
         runner = CliRunner()
         mock_workflow = MagicMock()
 
-        with patch("seekr_chain.ArgoWorkflow", return_value=mock_workflow) as mock_cls:
+        with patch("seekr_chain.K8sWorkflow", return_value=mock_workflow) as mock_cls:
             result = runner.invoke(main, ["delete", "job-1", "job-2"])
 
         assert result.exit_code == 0, result.output
@@ -625,11 +626,11 @@ class TestDelete:
 
 class TestCancel:
     def test_cancel(self):
-        """chain cancel my-job → ArgoWorkflow(id='my-job') constructed and .cancel() called."""
+        """chain cancel my-job → K8sWorkflow(id='my-job') constructed and .cancel() called."""
         runner = CliRunner()
         mock_workflow = MagicMock()
 
-        with patch("seekr_chain.ArgoWorkflow", return_value=mock_workflow) as mock_cls:
+        with patch("seekr_chain.K8sWorkflow", return_value=mock_workflow) as mock_cls:
             result = runner.invoke(main, ["cancel", "my-job"])
 
         assert result.exit_code == 0, result.output
@@ -642,7 +643,7 @@ class TestCancel:
         runner = CliRunner()
         mock_workflow = MagicMock()
 
-        with patch("seekr_chain.ArgoWorkflow", return_value=mock_workflow) as mock_cls:
+        with patch("seekr_chain.K8sWorkflow", return_value=mock_workflow) as mock_cls:
             result = runner.invoke(main, ["cancel", "job-1", "job-2"])
 
         assert result.exit_code == 0, result.output
