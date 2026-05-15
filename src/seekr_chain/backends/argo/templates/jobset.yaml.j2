@@ -76,6 +76,12 @@ spec:
                 ln -sf /seekr-chain/busybox /seekr-chain/bin/head
                 ln -sf /seekr-chain/busybox /seekr-chain/bin/awk
                 ln -sf /seekr-chain/busybox /seekr-chain/bin/cat
+                echo "Relaxing permissions for non-root main container..."
+                # /seekr-chain itself: entrypoint writes logs.txt, .hb, .shutdown, .last_rc here
+                chmod a+rwx /seekr-chain
+                # workspace: user's workingDir; may exist from assets.tar.gz (if code: was set) or not
+                mkdir -p /seekr-chain/workspace
+                chmod -R a+rwX /seekr-chain/workspace
                 echo "Done."
               volumeMounts:
               - name: workspace
