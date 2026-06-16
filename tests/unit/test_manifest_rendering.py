@@ -148,8 +148,7 @@ class TestJobsetTemplateRendering:
             "the main container's UID) can create logs.txt and heartbeat/shutdown files"
         )
         assert "chmod -R a+rwX /seekr-chain/workspace" in init_script, (
-            "init container must chmod /seekr-chain/workspace so user scripts can write "
-            "to their workingDir"
+            "init container must chmod /seekr-chain/workspace so user scripts can write to their workingDir"
         )
         assert "mkdir -p /seekr-chain/workspace" in init_script, (
             "init container must ensure /seekr-chain/workspace exists (assets.tar.gz only "
