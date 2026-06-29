@@ -1,171 +1,209 @@
 # Task: nix-images
 
-**Status**: complete (POC stage 1)
+**Status**: complete
 **Branch**: hatchery/nix-images
 **Created**: 2026-06-25 15:15
 
 ## Objective
 
-seekr-chain currently requires users to build/push a docker image and
+seekr-chain originally required users to build/push a Docker image and
 reference it from the job config. The pull side of that pattern has two
-inherent ceilings: registry pull speed (capped even from our own mirrors)
+inherent ceilings: registry pull speed (capped even from local mirrors)
 and sequential layer extraction inside the pod. As ML training images
 grow (multi-GB ROCm+pytorch+FA bases plus thin top layers for
-per-experiment deps), those ceilings become the bottleneck.
+per-experiment deps), those ceilings dominate startup time.
 
-Alternative architecture (per a public Anthropic lecture): define the
-runtime environment as a **nix expression**, build it ahead of time, push
-the resulting **nix closure** to object storage, and have the k8s pod use
-a tiny bootstrap image that fetches the closure at startup. Wins:
+This branch ships **nix-mode roles** as an alternative: a role declares
+a nix expression (typically a flake), seekr-chain evaluates it locally
+to compute a content-addressed `/nix/store/<hash>-<name>` closure path,
+and the pod boots from a tiny "nix-runner" OCI image that fetches the
+closure from a binary cache at startup. Wins:
 
 - Per-path parallel fetches from object storage (vs. sequential layer pulls).
 - Content-addressed cross-image deduplication of store paths.
-- Push only changes the new store paths (e.g. bumping `transformers`
-  uploads ~megabytes, not multi-GB), automatically — no Dockerfile layer
-  ordering required.
+- Push only the changed store paths (e.g. bumping `transformers` uploads
+  ~megabytes, not multi-GB) — automatic, no Dockerfile layer ordering needed.
+- Warm-node hostPath caching: once a closure is on a node, consumer pods
+  scheduled to the same node skip the fetch entirely.
 
-The POC's purpose was to validate the loop end-to-end (build → push →
-pod fetch → exec) with seekr-chain's actual cluster, without yet
-templatizing the pattern into seekr-chain itself.
+Validated end-to-end at scale by example 10 (two-node ROCm all-reduce
+bandwidth test), which hits ~297 GB/s — matching the image-mode baseline
+on the same fabric, with the closure fetching in seconds instead of the
+multi-minute docker-image pull.
 
 ## Context
 
-- Build host: Apple Silicon Mac. ThreatLocker blocked the Determinate
-  installer's Keychain access, so nix was installed via the upstream
-  installer with flakes enabled manually. Cross-compiling
-  `aarch64-darwin → x86_64-linux` is fragile (python especially), so the
-  actual builds run inside a `nixos/nix:2.21.1` podman container on the
-  Mac — flake mounted in, persistent docker volume at `/nix` to warm the
-  store across runs, AWS creds forwarded via env + `~/.aws` mount.
-- Two nix-in-container gotchas surfaced during setup, both seccomp:
-    1. `sandbox = false` alone isn't enough; nix also has an independent
-       `filter-syscalls` flag, on by default, that installs its own BPF
-       program. Podman's default seccomp profile blocks `seccomp(2)`,
-       which trips both. The fix is **both** `sandbox = false` **and**
-       `filter-syscalls = false` in nix.conf inside the container.
-    2. Setting these via `NIX_CONFIG=$'…\n…'` doesn't reliably work —
-       podman truncates newline-containing env values. Writing
-       `/etc/nix/nix.conf` from inside the container's startup script is
-       the unambiguous fix. Same applies to the `Dockerfile.nix-runner`
-       image (baked at image-build time).
-- Cache: native nix `s3://` against `seekr-ml-taw` (us-east-1) — a
-  shared bucket. nix's S3 store puts objects (`<hash>.narinfo`,
-  `nar/*.nar.xz`, `nix-cache-info`) at the bucket root with
-  content-addressed names, so coexisting with other content is fine in
-  practice (no collisions). A dedicated bucket would be cleaner for
-  lifecycle/metrics separation; deferred.
-- Briefly explored a `file://` + `s5cmd sync` indirection to put the
-  cache under a key prefix inside an existing bucket. Reverted in
-  commit `2d8b3db` because the production target is the HTTP cache
-  daemon (Seekr-fs over OCI), under which nix talks the binary cache
-  HTTP protocol natively. Keeping the POC on pure `nix copy --to s3://`
-  + `nix copy --from s3://` means the production migration is a single
-  URL swap (`s3://...` → `http://cache.internal`) with no flow changes.
-
-## Verified result
-
-End-to-end run on 2026-06-25:
-
-- Closure: `seekr-chain-nix-poc-env` (python 3.12.7 + requests 2.31.0 +
-  coreutils + bash). 39 store paths.
-- Pushed via `build-in-docker.sh` to `s3://seekr-ml-taw?region=us-east-1`.
-- Runner image (`k8-nexus.cb.ntent.com:7443/ntent/seekr-chain/nix-runner:poc`)
-  built + pushed via `run.sh --skip-build --skip-push`.
-- Pod in `argo-workflows` namespace; uses the existing `aws-creds` secret.
-- `nix copy --from` pulled all 39 paths in **9.976s wall**; pod exec'd
-  python from the closure and printed the expected versions.
-
-For this small closure that timing is similar to a docker pull of an
-equivalent image — the architectural win shows up at scale, not on a
-toy. The point of the run was to prove the **loop works**, not to
-demonstrate a speedup.
+- nix on the submit machine evaluates the user's expression and produces
+  a deterministic closure hash. If the closure isn't already in the binary
+  cache, seekr-chain injects a synthetic build step at the front of the
+  DAG; the user's nix-mode step `depends_on` it. The build step runs on
+  the cluster, builds the closure, pushes it to the cache, and exits.
+- The runtime is the `seekr-chain-nix-runner` OCI image (built from
+  `docker/Dockerfile.nix-runner`). It ships nix + s5cmd + nothing else;
+  the user's actual deps land at runtime from the closure.
+- nix-in-unprivileged-container needs **both** `sandbox = false` and
+  `filter-syscalls = false` in `/etc/nix/nix.conf`. Either alone trips
+  the container runtime's default seccomp profile (which blocks
+  `seccomp(2)`, which both flags use). The runtime image bakes this in;
+  the chain-nix-init script writes the same config at runtime.
+- Cache: native nix `s3://` protocol against a configured bucket
+  (`nix_store` in `~/.seekrchain.toml` or per-step `nix.store`). nix
+  rejects path prefixes on `s3://` URIs — bucket must be bare
+  (`s3://my-bucket?region=...`). seekr-chain validates this at submit.
 
 ## Summary
 
-### Key decisions
+### Architecture
 
-- **Pure native nix protocol on push and pull.** No `file://` or `s5cmd`
-  intermediaries in the steady-state POC, because the production target
-  (HTTP cache daemon backed by Seekr-fs over OCI) is also pure-nix-
-  protocol from nix's point of view. Migration is a URL swap.
-- **Single container in the pod, not init/main split.** `/nix/store`
-  paths are absolute, so the volume holding the closure must be mounted
-  at `/nix/store` in any container that exec's from it — but doing that
-  shadows the runner image's built-in nix tooling. POC sidesteps by
-  doing fetch + exec in one container with the image's `/nix/store`.
-  Production seekr-chain integration needs a different shape (see
-  README "Production gaps → 1").
-- **Build host = podman container on the Mac.** Cross-compile would
-  have meant fighting python builds; remote-builder setup would have
-  meant fighting ThreatLocker. Podman + `nixos/nix` image is reliable
-  and survives across iterations via a persistent named volume at `/nix`.
+- **`NixConfig` schema** (`src/seekr_chain/config.py`): adds a `nix:`
+  field to `RoleSpecConfig`. Mutually exclusive with `image:` — a role
+  is either image-mode or nix-mode, never both. Required field
+  `expression: str` (default `"./"`) is interpreted as a path relative
+  to `code.path`; the same string is used for submit-time eval and
+  inside the build pod's `nix build` invocation. Optional `store`,
+  `build`, `system`, `attr`, `build_resources`.
+- **Submit-time pre-pass** (`src/seekr_chain/nix_resolution.py`):
+  `resolve_nix_steps()` walks every nix-mode role, validates that
+  `nix.expression` is contained in `code.path`, evaluates the closure
+  hash via `nix eval`, checks the configured store via an S3 HEAD on
+  `<store>/<hash>.narinfo`, and synthesizes one build step per unique
+  missing closure (deduped across roles that share an expression).
+  `depends_on` wires each consumer to its build step.
+- **`chain-nix-init` init container** (rendered in
+  `templates/_nix_init_container.yaml.j2`, script in
+  `resources/chain-nix-init.sh`): runs after `chain-init` (which
+  downloads the resource bundle), mounts the shared `/nix` volume at
+  `/nix-shared`, runs `nix copy --from $store $closure` with a
+  size-watching watchdog (kills the pull if no progress for 2 minutes,
+  or 30 minutes total) and three attempts. Prints a summary distinguishing
+  "already on node" (warm cache) from "pulled fresh."
+- **Main container** runs the user's script under the nix-runner image's
+  `/bin/sh`, with `PATH=$CLOSURE/bin:$PATH` and
+  `LD_LIBRARY_PATH=$CLOSURE/lib:$LD_LIBRARY_PATH` exported. The
+  closure's RPATH-baked references to `/nix/store/<hash>/lib` resolve
+  via the mounted volume; `LD_LIBRARY_PATH` is a fallback for `dlopen()`
+  calls that resolve unqualified library names (RCCL → libibverbs, etc.).
+- **Warm-node caching via closure-hash podAffinity**: every pod that
+  consumes or produces a given closure carries the label
+  `seekr-chain.nix/closure: <hash>` and a soft podAffinity
+  (`preferredDuringSchedulingIgnoredDuringExecution`, weight 50,
+  topology=`kubernetes.io/hostname`) targeting other pods with the same
+  label. The scheduler prefers nodes where the closure has already been
+  fetched — turning the per-node hostPath store into a free warm cache.
+- **hostPath store volume**: shared at `/var/lib/seekr-chain/nix` by
+  default. Consumer pods mount at `/nix` with `subPath=nix` so
+  `chain-nix-init`'s chroot writes (which land at
+  `/nix-shared/nix/store/<hash>` on disk) surface at `/nix/store/<hash>`
+  in main — exactly where the closure's RPATHs expect them. Build pods
+  mount the same volume at `/nix-shared` (no subPath) and use
+  `--store local?root=/nix-shared` to direct writes into the same
+  on-disk location. emptyDir is supported as a fallback for clusters
+  whose PodSecurity doesn't admit hostPath.
+- **GHCR-published nix-runner image**: published via
+  `.github/workflows/build-nix-runner-image.yml` against
+  `docker/nix-runner.version`. Pinned in
+  `nix_resolution._DEFAULT_NIX_RUNNER_IMAGE` with sha256 digest.
 
 ### Patterns established
 
-- `nix.conf` for nix-in-unprivileged-container needs **both**
-  `sandbox = false` and `filter-syscalls = false`. One isn't enough.
-- Configure nix in-container by writing `/etc/nix/nix.conf` from the
-  startup script. Don't try `NIX_CONFIG` with multi-line values through
-  podman — newlines get eaten.
-- `nix copy --to s3://bucket?region=…` and `nix copy --from s3://…`
-  work with the standard AWS SDK credential chain (env vars, `~/.aws`,
-  IMDS). Mounting `~/.aws:/root/.aws:ro` into the build container
-  covers long-lived keys and the SSO cache simultaneously.
-- The runner image (`Dockerfile.nix-runner`) deliberately ships with
-  nothing but `nix` and the nix.conf tweaks. Everything else lands at
-  runtime from the binary cache.
+- **Script source lives in `resources/`**: `chain-nix-init.sh` and
+  `nix-build.sh` ship as standalone files copied into every job's
+  upload bundle (mirroring `fluentbit.sh`). Per-job parameters get
+  passed via env vars (`SEEKR_CHAIN_NIX_STORE`, `SEEKR_CHAIN_NIX_CLOSURE`,
+  `SEEKR_CHAIN_NIX_EXPRESSION`, `_SYSTEM`, `_ATTR`, `_COMPRESSION`) on
+  the container, not baked into the script as f-string substitutions.
+  This keeps the rendered manifest readable and the scripts independently
+  editable.
+- **`nix.expression` is one path string, interpreted relative to
+  `code.path`** on both sides of the wire. Submit-side eval and pod-side
+  `nix build` get the same string. Lexical containment check
+  (`os.path.normpath`) rejects `../escape` paths but allows symlinks
+  inside `code.path` to escape (the upload follows symlinks and brings
+  the content along).
+- **Build step is image-mode with env-var markers, not a nix-mode role
+  itself.** The whole point of the build step is to *create* the
+  closure, so closure-fetch semantics don't apply. `_detect_closure_hash`
+  sees the build step's env, attaches the same closure-hash label, and
+  the same podAffinity preference applies — so consumer pods naturally
+  cluster on the node that ran the build.
+- **No GC yet.** The hostPath store grows unbounded. v1 deliberately
+  ships without a GC policy; the warm cache is the win. Size-based GC
+  (delete oldest store paths until under a configurable limit) is a
+  reasonable next step; see Followups.
 
-### Files added (under `nix_poc/`)
+### Files added / changed
 
-- `flake.nix` + `flake.lock` — closure definition.
-- `Dockerfile.nix-runner` — bootstrap image.
-- `manifest.yaml` — k8s Job template with `__PLACEHOLDERS__`.
-- `build-in-docker.sh` — Mac/podman build+push path.
-- `run.sh` — native-nix-host orchestrator; also handles the
-  runner-image build/push and manifest render (with `--skip-build
-  --skip-push`) when the build happened elsewhere.
-- `.gitignore` — covers `/result`, `.closure`, rendered manifest.
-- `README.md` — walkthrough + production gaps + next steps.
+- `src/seekr_chain/config.py` — `NixConfig`, `RoleSpecConfig` image/nix mutex.
+- `src/seekr_chain/nix_resolution.py` — submit-time pre-pass.
+- `src/seekr_chain/nix_utils.py` — `eval_closure_path`, `closure_exists`,
+  `closure_hash_from_path`.
+- `src/seekr_chain/user_config.py` — `nix_store`, `nix_runner_image`,
+  `nix_store_volume_kind`, `nix_store_hostpath`, `nix_compression` fields.
+- `src/seekr_chain/backends/argo/jobset.py` — `_resolve_nix_role`,
+  `_select_role_runtime`, `_detect_closure_hash`, closure-hash affinity.
+- `src/seekr_chain/backends/argo/templates/jobset.yaml.j2` — closure-hash
+  label, podAffinity, nix-store volume; init container in a separate
+  partial (`_nix_init_container.yaml.j2`) via `{% include %}`.
+- `src/seekr_chain/backends/argo/resources/chain-nix-init.sh`,
+  `nix-build.sh` — runtime scripts.
+- `docker/Dockerfile.nix-runner`, `docker/nix-runner.version` — runtime image.
+- `.github/workflows/build-nix-runner-image.yml` — GHCR publish workflow.
+- `examples/6_nix_runtime` … `examples/10_nix_bandwidth_test` — five
+  examples covering single-node, multi-node, ROCm, torchrun, and the
+  bandwidth test that validates the fast path.
+- `tests/unit/test_nix_*.py`, `tests/integration/core/test_nix_job.py`,
+  `tests/test_code/7_nix_basic/` — schema + rendering + injection +
+  end-to-end coverage.
 
 ### Gotchas a future agent should know
 
-- **Closure paths are absolute and arch-specific.** A closure built for
-  `x86_64-linux` cannot run on `aarch64-linux` or darwin and vice
-  versa. The flake outputs both linux arches; ensure you pick the right
-  one for your cluster.
-- **The `buildEnv` closure root is tiny (~580K)** because it's a
-  symlink tree pointing into the transitive deps. Don't mistake that
-  for the actual fetched data — the transitive paths together are
-  hundreds of MB.
-- **The runner image's `/nix/store` shadows any volume mounted at
-  `/nix/store`.** Don't mount an emptyDir at `/nix/store` and expect
-  nix to keep working. The init/main split that seekr-chain's pattern
-  wants needs a different volume strategy — see README Production gap #1.
-- **The pod doesn't get cross-pod store reuse.** Every pod's
-  `/nix/store` is the runner image's own. Warm-node dedup needs either
-  `hostPath`, a node-affinity PVC, or `nix-snapshotter`. Out of scope
-  for this POC, but the most important production decision for actual
-  speedup.
-- **AWS creds: use existing `aws-creds` secret** in `argo-workflows`.
-  Same one seekr-chain workloads use. The manifest hardcodes that name.
+- **`/nix/store` is absolute, content-addressed, and arch-specific.**
+  A closure built for `x86_64-linux` cannot run on `aarch64-linux`. The
+  `nix.system` field defaults to `x86_64-linux`; set it explicitly on
+  ARM clusters.
+- **The nix-runner image's `/nix` is shadowed by the hostPath mount.**
+  This is fine for consumer pods because main doesn't need the image's
+  nix tooling (it runs the user's binaries from the closure). The build
+  pod NEEDS the image's nix tooling, so it mounts the hostPath at
+  `/nix-shared` (not `/nix`) and uses `--store local?root=/nix-shared`
+  to direct writes into the chroot while keeping image's `/nix` intact.
+- **No GC.** The hostPath at `/var/lib/seekr-chain/nix` accumulates store
+  paths over time. Watch disk usage on cluster nodes; manual cleanup is
+  `nix-store --delete /var/lib/seekr-chain/nix/nix/store/<old-hash>-*`
+  until a policy lands.
+- **nix's s3 store rejects path prefixes.** Use `s3://bucket?region=...`,
+  not `s3://bucket/some/prefix`. seekr-chain validates this at submit
+  with a clear error. If you need a prefix, give the cache its own bucket.
+- **AWS_REQUEST_TIMEOUT matters.** The chain-nix-init script sets a
+  10-minute per-request timeout on the AWS SDK; without it, a stalled
+  TCP connection looks like "slow but progressing" forever. Combined
+  with the size-growth watchdog, this catches real hangs in <2 minutes.
+- **Closure-baked env vars use bash's `:=` operator** so runtime overrides
+  still win. See `examples/10_nix_bandwidth_test/flake.nix`'s
+  `tuned-torchrun` wrapper for the pattern — `:` `${NCCL_IB_GID_INDEX:=3}`
+  sets the default only if the var is unset.
 
-### Next steps (in priority order)
+### Followups (not blocking)
 
-1. **Seekr-fs HTTP cache daemon.** The architectural unlock. Resolves
-   OCI transport, prefix limitations, and the substituter-as-build-cache
-   gap simultaneously. Nix points at one URL; the daemon translates
-   nix binary cache HTTP ↔ OCI. Reference implementation to fork or
-   study: `harmonia`.
-2. **Real closure**: repackage one ROCm+pytorch+FA training image as a
-   nix expression. The numbers from a 5 GB closure are what will
-   actually inform whether to commit to this architecture.
-3. **Templatize into seekr-chain**: add `nix:` field to `RoleSpecConfig`,
-   teach the JobSet renderer to emit the closure-fetch pattern with the
-   init/main split (mounted `/nix` volume, runner image with relocatable
-   nix tooling). This is the work that turns the POC into a real
-   seekr-chain feature.
-
-Items 1 and 2 are independent and can proceed in parallel. Item 3
-depends on at least 1 being designed (since the manifest shape changes
-between `s3://` and the daemon's HTTP URL is trivial, but the init/main
-split design is non-trivial and informs the templated form).
+1. **HTTP binary cache daemon backed by Seekr-fs / OCI.** Replaces the
+   bare-s3 cache with an HTTP service that nix can talk to natively, on
+   top of any object storage backend. URL swap; no other code change.
+2. **hostPath GC.** Size-based: above a configurable threshold (suggest
+   50 GiB default via `nix_store_max_size`), enumerate top-level store
+   entries, sort by atime, delete oldest until under threshold. Runs at
+   the end of `chain-nix-init` post-fetch. Skips the just-fetched
+   closure.
+3. **Build-pod mount layout investigation.** Current build pod builds
+   into image's `/nix`, then `nix copy --to local?root=/nix-shared` to
+   warm the hostPath. The image's `/nix` is duplicate work. Worth
+   investigating: install image's nix at `/opt/nix-bootstrap`, mount
+   hostPath at `/nix` proper, copy bootstrap → hostPath once per node,
+   build directly into hostPath. The known blocker (flake-source path
+   validation with `--store local?root=` in chroot mode) may not apply
+   when nix is operating on its actual `/nix` store. Spike before
+   committing.
+4. **Tighter runtime isolation (deferred per review).** hostPath `/nix`
+   exposes other closures on the node alongside the active one. Real
+   isolation cost is one closure-sized copy at pod startup; on local
+   NVMe this is fast. Add as an opt-in third value of
+   `nix_store_volume_kind` if multi-tenant requirements emerge.
