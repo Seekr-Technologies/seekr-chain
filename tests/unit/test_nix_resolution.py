@@ -506,7 +506,7 @@ class TestClosureCache:
         _eval_role_closure (used by _resolve_nix_role + _detect_closure_hash)
         must read the cache instead of evaling again.
         """
-        from seekr_chain.backends.argo.jobset import _eval_role_closure
+        from seekr_chain.backends.k8s.jobset import _eval_role_closure
         from seekr_chain.config import NixConfig
 
         eval_count = {"n": 0}

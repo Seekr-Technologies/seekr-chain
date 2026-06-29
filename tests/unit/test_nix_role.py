@@ -107,7 +107,7 @@ def _patch_user_config(monkeypatch, user_config):
     user_config alone wouldn't change the cached image binding either.
     """
     from seekr_chain import nix_resolution as nr_mod
-    from seekr_chain.backends.argo import jobset as jobset_mod
+    from seekr_chain.backends.k8s import jobset as jobset_mod
 
     monkeypatch.setattr(jobset_mod, "_user_config", user_config)
     monkeypatch.setattr(nr_mod, "_user_config", user_config)
@@ -141,7 +141,7 @@ def _closure_present(monkeypatch):
 
 class TestResolveNixRole:
     def test_expression_evaluated_into_env(self, monkeypatch, _user_config_with_nix_image, _closure_present):
-        from seekr_chain.backends.argo.jobset import _resolve_nix_role
+        from seekr_chain.backends.k8s.jobset import _resolve_nix_role
         from seekr_chain.config import RoleSpecConfig
 
         _mock_eval(monkeypatch, "/nix/store/jppn-foo")
@@ -174,7 +174,7 @@ class TestResolveNixRole:
 
     def test_store_falls_back_to_user_config(self, monkeypatch, _closure_present):
         """Per-step `store` is None → uses ~/.seekrchain.toml's nix_store."""
-        from seekr_chain.backends.argo.jobset import _resolve_nix_role
+        from seekr_chain.backends.k8s.jobset import _resolve_nix_role
         from seekr_chain.config import RoleSpecConfig
         from seekr_chain.user_config import UserConfig
 
@@ -194,7 +194,7 @@ class TestResolveNixRole:
         assert _resolve_nix_role(role)["store_uri"] == "s3://default-bucket"
 
     def test_no_store_anywhere_errors(self, monkeypatch):
-        from seekr_chain.backends.argo.jobset import _resolve_nix_role
+        from seekr_chain.backends.k8s.jobset import _resolve_nix_role
         from seekr_chain.config import RoleSpecConfig
         from seekr_chain.user_config import UserConfig
 
@@ -212,7 +212,7 @@ class TestResolveNixRole:
         """When user_config.nix_runner_image is unset, fall back to the
         hardcoded _DEFAULT_NIX_RUNNER_IMAGE. Same pattern as init_image.
         """
-        from seekr_chain.backends.argo.jobset import _DEFAULT_NIX_RUNNER_IMAGE, _resolve_nix_role
+        from seekr_chain.backends.k8s.jobset import _DEFAULT_NIX_RUNNER_IMAGE, _resolve_nix_role
         from seekr_chain.config import RoleSpecConfig
         from seekr_chain.user_config import UserConfig
 
@@ -235,7 +235,7 @@ class TestResolveNixRole:
         the time _resolve_nix_role runs, the closure-presence contract is
         the caller's responsibility.
         """
-        from seekr_chain.backends.argo.jobset import _resolve_nix_role
+        from seekr_chain.backends.k8s.jobset import _resolve_nix_role
         from seekr_chain.config import RoleSpecConfig
 
         # Even with closure_exists returning False, no error — render-time
@@ -253,7 +253,7 @@ class TestResolveNixRole:
 
     def test_build_false_with_missing_closure_errors(self, monkeypatch, _user_config_with_nix_image):
         """nix.build=False means: error fast at submit if closure isn't in the store."""
-        from seekr_chain.backends.argo.jobset import _resolve_nix_role
+        from seekr_chain.backends.k8s.jobset import _resolve_nix_role
         from seekr_chain.config import RoleSpecConfig
 
         monkeypatch.setattr("seekr_chain.nix_utils.closure_exists", lambda *_a, **_k: False)
@@ -268,7 +268,7 @@ class TestResolveNixRole:
             _resolve_nix_role(role)
 
     def test_build_false_with_present_closure_ok(self, monkeypatch, _user_config_with_nix_image):
-        from seekr_chain.backends.argo.jobset import _resolve_nix_role
+        from seekr_chain.backends.k8s.jobset import _resolve_nix_role
         from seekr_chain.config import RoleSpecConfig
 
         monkeypatch.setattr("seekr_chain.nix_utils.closure_exists", lambda *_a, **_k: True)
@@ -283,7 +283,7 @@ class TestResolveNixRole:
         assert _resolve_nix_role(role)["closure"] == "/nix/store/abc-x"
 
     def test_returns_closure_hash_for_label(self, monkeypatch, _user_config_with_nix_image, _closure_present):
-        from seekr_chain.backends.argo.jobset import _resolve_nix_role
+        from seekr_chain.backends.k8s.jobset import _resolve_nix_role
         from seekr_chain.config import RoleSpecConfig
 
         _mock_eval(monkeypatch, "/nix/store/abc12345-foo")
@@ -298,7 +298,7 @@ class TestResolveNixRole:
         assert result["closure_hash"] == "abc12345"
 
     def test_default_volume_kind_is_hostpath(self, monkeypatch, _user_config_with_nix_image, _closure_present):
-        from seekr_chain.backends.argo.jobset import _resolve_nix_role
+        from seekr_chain.backends.k8s.jobset import _resolve_nix_role
         from seekr_chain.config import RoleSpecConfig
 
         _mock_eval(monkeypatch, "/nix/store/abc-x")
@@ -312,8 +312,8 @@ class TestResolveNixRole:
         assert result["hostpath"] == "/var/lib/seekr-chain/nix"
 
     def test_volume_kind_override_to_emptydir(self, monkeypatch, _closure_present):
-        from seekr_chain.backends.argo import jobset as jobset_mod
-        from seekr_chain.backends.argo.jobset import _resolve_nix_role
+        from seekr_chain.backends.k8s import jobset as jobset_mod
+        from seekr_chain.backends.k8s.jobset import _resolve_nix_role
         from seekr_chain.config import RoleSpecConfig
         from seekr_chain.user_config import UserConfig
 
@@ -334,8 +334,8 @@ class TestResolveNixRole:
         assert _resolve_nix_role(role)["volume_kind"] == "emptyDir"
 
     def test_volume_kind_invalid_rejected(self, monkeypatch, _closure_present):
-        from seekr_chain.backends.argo import jobset as jobset_mod
-        from seekr_chain.backends.argo.jobset import _resolve_nix_role
+        from seekr_chain.backends.k8s import jobset as jobset_mod
+        from seekr_chain.backends.k8s.jobset import _resolve_nix_role
         from seekr_chain.config import RoleSpecConfig
         from seekr_chain.user_config import UserConfig
 
@@ -371,9 +371,9 @@ def _render_nix_jobset(
     Wires the minimum stubs: nix-runner image, closure_exists returning True.
     Workflow has a single nix-mode role.
     """
-    from seekr_chain.backends.argo import jobset as jobset_mod, render
-    from seekr_chain.backends.argo.job_info import get_job_info
-    from seekr_chain.backends.argo.jobset import build_jobset_context
+    from seekr_chain.backends.k8s import jobset as jobset_mod, render
+    from seekr_chain.backends.k8s.job_info import get_job_info
+    from seekr_chain.backends.k8s.jobset import build_jobset_context
     from seekr_chain.user_config import UserConfig
     import yaml
 
@@ -442,11 +442,11 @@ class TestNixRendering:
         # Default size budget set on the env. Used by nix-gc.sh. Read from
         # the module constant so this assertion doesn't drift if we tune
         # the default later.
-        from seekr_chain.backends.argo.jobset import _DEFAULT_NIX_STORE_MAX_BYTES
+        from seekr_chain.backends.k8s.jobset import _DEFAULT_NIX_STORE_MAX_BYTES
         assert env_dict["SEEKR_CHAIN_NIX_STORE_MAX_BYTES"] == str(_DEFAULT_NIX_STORE_MAX_BYTES)
 
     def test_size_parser_handles_iec_suffixes(self):
-        from seekr_chain.backends.argo.jobset import _parse_size_to_bytes
+        from seekr_chain.backends.k8s.jobset import _parse_size_to_bytes
         assert _parse_size_to_bytes("50G") == 50 * 1024**3
         assert _parse_size_to_bytes("50GiB") == 50 * 1024**3
         assert _parse_size_to_bytes("50 G") == 50 * 1024**3
@@ -532,9 +532,9 @@ class TestNixRendering:
         """When resolve_nix_steps populated role.nix._warm_nodes, the renderer
         injects a soft nodeAffinity preferring those hostnames (weight 90).
         """
-        from seekr_chain.backends.argo import jobset as jobset_mod, render
-        from seekr_chain.backends.argo.job_info import get_job_info
-        from seekr_chain.backends.argo.jobset import build_jobset_context
+        from seekr_chain.backends.k8s import jobset as jobset_mod, render
+        from seekr_chain.backends.k8s.job_info import get_job_info
+        from seekr_chain.backends.k8s.jobset import build_jobset_context
         from seekr_chain.user_config import UserConfig
         import yaml
 
@@ -594,9 +594,9 @@ class TestNixRendering:
 
     def test_non_nix_role_has_no_closure_label_or_affinity(self, tmp_path):
         """Sanity: image-mode roles get neither the label nor the closure affinity."""
-        from seekr_chain.backends.argo import render
-        from seekr_chain.backends.argo.job_info import get_job_info
-        from seekr_chain.backends.argo.jobset import build_jobset_context
+        from seekr_chain.backends.k8s import render
+        from seekr_chain.backends.k8s.job_info import get_job_info
+        from seekr_chain.backends.k8s.jobset import build_jobset_context
         import yaml
 
         cfg = WorkflowConfig(
@@ -636,9 +636,9 @@ class TestNixRendering:
         That's the mechanism by which a consumer step's podAffinity preference
         targets the node that ran the build — same label, same topology key.
         """
-        from seekr_chain.backends.argo import jobset as jobset_mod, render
-        from seekr_chain.backends.argo.job_info import get_job_info
-        from seekr_chain.backends.argo.jobset import build_jobset_context
+        from seekr_chain.backends.k8s import jobset as jobset_mod, render
+        from seekr_chain.backends.k8s.job_info import get_job_info
+        from seekr_chain.backends.k8s.jobset import build_jobset_context
         from seekr_chain.nix_resolution import resolve_nix_steps
         from seekr_chain.user_config import UserConfig
         import yaml
@@ -719,9 +719,9 @@ class TestNixRendering:
         This is the cache-hit mechanism for jobs that mix closures: pod A
         attracts to nodes where the same closure-A ran (not closure-B).
         """
-        from seekr_chain.backends.argo import render
-        from seekr_chain.backends.argo.job_info import get_job_info
-        from seekr_chain.backends.argo.jobset import build_jobset_context
+        from seekr_chain.backends.k8s import render
+        from seekr_chain.backends.k8s.job_info import get_job_info
+        from seekr_chain.backends.k8s.jobset import build_jobset_context
         from seekr_chain.user_config import UserConfig
         import yaml
 
@@ -793,9 +793,9 @@ class TestNixRendering:
         affinity target means both prefer ANY pod with that closure on
         node — including the build pod that produced it.
         """
-        from seekr_chain.backends.argo import render
-        from seekr_chain.backends.argo.job_info import get_job_info
-        from seekr_chain.backends.argo.jobset import build_jobset_context
+        from seekr_chain.backends.k8s import render
+        from seekr_chain.backends.k8s.job_info import get_job_info
+        from seekr_chain.backends.k8s.jobset import build_jobset_context
         from seekr_chain.user_config import UserConfig
         import yaml
 
@@ -854,9 +854,9 @@ class TestNixRendering:
         term in preferredDuringSchedulingIgnoredDuringExecution. The closure
         cache-hit affordance is additive, not exclusive.
         """
-        from seekr_chain.backends.argo import render
-        from seekr_chain.backends.argo.job_info import get_job_info
-        from seekr_chain.backends.argo.jobset import build_jobset_context
+        from seekr_chain.backends.k8s import render
+        from seekr_chain.backends.k8s.job_info import get_job_info
+        from seekr_chain.backends.k8s.jobset import build_jobset_context
         from seekr_chain.user_config import UserConfig
         import yaml
 

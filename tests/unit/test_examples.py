@@ -6,8 +6,8 @@ from pathlib import Path
 import pytest
 import yaml
 
-from seekr_chain.backends.argo.job_info import get_job_info
-from seekr_chain.backends.argo.jobset import create_jobset_manifest
+from seekr_chain.backends.k8s.job_info import get_job_info
+from seekr_chain.backends.k8s.jobset import create_jobset_manifest
 from seekr_chain.config import WorkflowConfig
 
 BASE_DIR = Path(__file__).resolve().parent.parent.parent / "examples"
@@ -44,7 +44,7 @@ class TestExamples:
         # test_nix_utils.py and test_nix_role.py; here we just want the
         # rendering pipeline to flow end-to-end on the example config.
         if _config_uses_nix(config):
-            from seekr_chain.backends.argo import jobset as jobset_mod
+            from seekr_chain.backends.k8s import jobset as jobset_mod
             from seekr_chain.user_config import UserConfig
 
             monkeypatch.setattr(

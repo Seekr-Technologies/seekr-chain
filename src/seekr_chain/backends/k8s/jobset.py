@@ -24,7 +24,7 @@ from seekr_chain.utils import format_bytes, resolve_image
 
 logger = logging.getLogger(__name__)
 
-_DEFAULT_INIT_IMAGE = "ghcr.io/seekr-technologies/seekr-chain-init:latest@sha256:f1fc456cffae92eab86c18814f3668c766ab12b69231308083ff128a8d4d0a9c"
+_DEFAULT_INIT_IMAGE = "ghcr.io/seekr-technologies/seekr-chain-init:1.0.0@sha256:f1fc456cffae92eab86c18814f3668c766ab12b69231308083ff128a8d4d0a9c"
 _INIT_IMAGE = _user_config.init_image or _DEFAULT_INIT_IMAGE
 
 
@@ -878,7 +878,13 @@ def _write_peermaps_and_scripts(role_configs, js_name, step_config, assets_path)
 
 
 def build_jobset_context(
-    workflow_config, step_index, job_info, workflow_name, workflow_secrets, interactive: bool, assets_path: Path
+    workflow_config,
+    step_index,
+    job_info,
+    workflow_name,
+    workflow_secrets,
+    interactive: bool,
+    assets_path: Path,
 ) -> tuple[str, dict]:
     """Build the Jinja2 template context for a JobSet manifest.
 
@@ -941,13 +947,19 @@ def build_jobset_context(
 
 
 def create_jobset_manifest(
-    workflow_config, step_index, job_info, workflow_name, workflow_secrets, interactive: bool, assets_path: Path
+    workflow_config,
+    step_index,
+    job_info,
+    workflow_name,
+    workflow_secrets,
+    interactive: bool,
+    assets_path: Path,
 ) -> tuple[str, str]:
     """Build and render the JobSet manifest.
 
     Returns (js_name, rendered_yaml_string).
     """
-    from seekr_chain.backends.argo import render
+    from seekr_chain.backends.k8s import render
 
     js_name, context = build_jobset_context(
         workflow_config=workflow_config,

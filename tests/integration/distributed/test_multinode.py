@@ -40,7 +40,7 @@ class TestMultinode:
             },
         )
 
-        job = seekr_chain.launch_argo_workflow(config)
+        job = seekr_chain.launch_k8s_workflow(config)
         job.follow()
 
         seekr_chain.wait(job, poll_interval=1)
@@ -108,7 +108,7 @@ class TestMultinode:
             },
         )
 
-        job = seekr_chain.launch_argo_workflow(config)
+        job = seekr_chain.launch_k8s_workflow(config)
 
         job.follow()
         seekr_chain.wait(job, poll_interval=1)
@@ -176,7 +176,7 @@ class TestMultinode:
             },
         )
 
-        job = seekr_chain.launch_argo_workflow(config)
+        job = seekr_chain.launch_k8s_workflow(config)
         job.follow()
 
         seekr_chain.wait(job, poll_interval=1)
@@ -247,7 +247,7 @@ class TestMultinode:
             },
         )
 
-        job = seekr_chain.launch_argo_workflow(config)
+        job = seekr_chain.launch_k8s_workflow(config)
         job.follow()
 
         seekr_chain.wait(job, poll_interval=1)

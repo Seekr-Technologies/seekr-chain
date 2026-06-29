@@ -1,4 +1,4 @@
-"""Tests for env secret resolution in launch_argo_workflow."""
+"""Tests for env secret resolution in launch_k8s_workflow."""
 
 import datetime
 from unittest.mock import MagicMock, patch
@@ -6,7 +6,7 @@ from unittest.mock import MagicMock, patch
 import kubernetes
 import pytest
 
-from seekr_chain.backends.argo.launch_argo_workflow import (
+from seekr_chain.backends.k8s.launch_k8s_workflow import (
     _create_secrets,
     _create_workflow_secrets,
     _resolve_env_secrets,
@@ -165,7 +165,7 @@ class TestCreateWorkflowSecrets:
     def test_warning_logged_when_skipping(self):
         """A warning is emitted for each s3_creds key suppressed by user config."""
         config = _config_with_secrets({"AWS_ACCESS_KEY_ID": "user-key"})
-        with patch("seekr_chain.backends.argo.launch_argo_workflow.logger") as mock_logger:
+        with patch("seekr_chain.backends.k8s.launch_k8s_workflow.logger") as mock_logger:
             _create_workflow_secrets(config, "wf-abc", FAKE_S3_CREDS)
         assert mock_logger.warning.called
 
@@ -183,10 +183,10 @@ class TestCreateSecretsCleanup:
 
         with (
             patch(
-                "seekr_chain.backends.argo.launch_argo_workflow.k8s_utils.get_core_v1_api",
+                "seekr_chain.backends.k8s.launch_k8s_workflow.k8s_utils.get_core_v1_api",
                 return_value=mock_v1,
             ),
-            patch("seekr_chain.backends.argo.launch_argo_workflow.logger") as mock_logger,
+            patch("seekr_chain.backends.k8s.launch_k8s_workflow.logger") as mock_logger,
         ):
             _create_secrets("wf-1", {}, config)
 
@@ -210,10 +210,10 @@ class TestCreateSecretsCleanup:
 
         with (
             patch(
-                "seekr_chain.backends.argo.launch_argo_workflow.k8s_utils.get_core_v1_api",
+                "seekr_chain.backends.k8s.launch_k8s_workflow.k8s_utils.get_core_v1_api",
                 return_value=mock_v1,
             ),
-            patch("seekr_chain.backends.argo.launch_argo_workflow.logger") as mock_logger,
+            patch("seekr_chain.backends.k8s.launch_k8s_workflow.logger") as mock_logger,
         ):
             _create_secrets("wf-1", {}, config)
 

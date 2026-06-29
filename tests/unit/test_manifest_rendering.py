@@ -2,9 +2,9 @@
 
 import yaml
 
-from seekr_chain.backends.argo import render
-from seekr_chain.backends.argo.job_info import get_job_info
-from seekr_chain.backends.argo.jobset import _DEFAULT_INIT_IMAGE, build_jobset_context
+from seekr_chain.backends.k8s import render
+from seekr_chain.backends.k8s.job_info import get_job_info
+from seekr_chain.backends.k8s.jobset import _DEFAULT_INIT_IMAGE, build_jobset_context
 from seekr_chain.config import WorkflowConfig
 
 DATASTORE_ROOT = "s3://test-bucket/seekr-chain/"
@@ -523,127 +523,6 @@ class TestJobsetTemplateRendering:
         privileged = main_container["securityContext"]["privileged"]
         # Must be a native Python bool (parsed from YAML true/false), not a string
         assert isinstance(privileged, bool)
-
-
-class TestWorkflowTemplateRendering:
-    def _build_workflow_context(self, jobset_yaml: str = "apiVersion: jobset.x-k8s.io/v1alpha2\nkind: JobSet\n"):
-        return {
-            "workflow_name": "ab1234",
-            "job_id": "ab1234",
-            "job_name": "test-job",
-            "user": "testuser",
-            "datastore_root": "s3://test-bucket/seekr-chain/",
-            "ttl_seconds": 604800,
-            "dag_tasks": [{"name": "train"}],
-            "steps": [
-                {
-                    "name": "train",
-                    "jobset_name": "ab1234-train-js",
-                    "jobset_yaml": jobset_yaml,
-                    "labels": {},
-                }
-            ],
-        }
-
-    def test_renders_valid_yaml(self):
-        context = self._build_workflow_context()
-        rendered = render.render("workflow.yaml.j2", context)
-        manifest = yaml.safe_load(rendered)
-
-        assert manifest is not None
-        assert manifest["apiVersion"] == "argoproj.io/v1alpha1"
-        assert manifest["kind"] == "Workflow"
-
-    def test_workflow_name(self):
-        context = self._build_workflow_context()
-        rendered = render.render("workflow.yaml.j2", context)
-        manifest = yaml.safe_load(rendered)
-
-        assert manifest["metadata"]["name"] == "ab1234"
-
-    def test_ttl_strategy(self):
-        context = self._build_workflow_context()
-        rendered = render.render("workflow.yaml.j2", context)
-        manifest = yaml.safe_load(rendered)
-
-        assert manifest["spec"]["ttlStrategy"]["secondsAfterCompletion"] == 604800
-
-    def test_entrypoint(self):
-        context = self._build_workflow_context()
-        rendered = render.render("workflow.yaml.j2", context)
-        manifest = yaml.safe_load(rendered)
-
-        assert manifest["spec"]["entrypoint"] == "seekr-chain-main"
-
-    def test_dag_tasks(self):
-        context = self._build_workflow_context()
-        rendered = render.render("workflow.yaml.j2", context)
-        manifest = yaml.safe_load(rendered)
-
-        templates = manifest["spec"]["templates"]
-        main_template = next(t for t in templates if t["name"] == "seekr-chain-main")
-        tasks = main_template["dag"]["tasks"]
-        assert len(tasks) == 1
-        assert tasks[0]["name"] == "train"
-
-    def test_step_template_present(self):
-        context = self._build_workflow_context()
-        rendered = render.render("workflow.yaml.j2", context)
-        manifest = yaml.safe_load(rendered)
-
-        templates = manifest["spec"]["templates"]
-        step_template = next(t for t in templates if t["name"] == "train")
-        assert step_template["resource"]["action"] == "create"
-        assert step_template["resource"]["successCondition"] == "status.terminalState == Completed"
-
-    def test_jobset_yaml_embedded(self):
-        """JobSet YAML must be parseable from within the manifest field."""
-        context = self._build_workflow_context(
-            jobset_yaml="apiVersion: jobset.x-k8s.io/v1alpha2\nkind: JobSet\nmetadata:\n  name: test\n"
-        )
-        rendered = render.render("workflow.yaml.j2", context)
-        manifest = yaml.safe_load(rendered)
-
-        templates = manifest["spec"]["templates"]
-        step_template = next(t for t in templates if t["name"] == "train")
-        embedded_yaml = step_template["resource"]["manifest"]
-
-        # The embedded string must itself be parseable YAML
-        embedded = yaml.safe_load(embedded_yaml)
-        assert embedded["kind"] == "JobSet"
-
-    def test_dag_task_with_dependencies(self):
-        context = self._build_workflow_context()
-        context["dag_tasks"] = [
-            {"name": "step-a"},
-            {"name": "step-b", "dependencies": ["step-a"]},
-        ]
-        context["steps"].append(
-            {
-                "name": "step-b",
-                "jobset_name": "ab1234-step-b-js",
-                "jobset_yaml": "apiVersion: jobset.x-k8s.io/v1alpha2\nkind: JobSet\n",
-            }
-        )
-        rendered = render.render("workflow.yaml.j2", context)
-        manifest = yaml.safe_load(rendered)
-
-        templates = manifest["spec"]["templates"]
-        main_template = next(t for t in templates if t["name"] == "seekr-chain-main")
-        tasks = {t["name"]: t for t in main_template["dag"]["tasks"]}
-
-        assert "dependencies" not in tasks["step-a"] or tasks["step-a"].get("dependencies") is None
-        assert tasks["step-b"]["dependencies"] == ["step-a"]
-
-    def test_labels_present(self):
-        context = self._build_workflow_context()
-        rendered = render.render("workflow.yaml.j2", context)
-        manifest = yaml.safe_load(rendered)
-
-        labels = manifest["metadata"]["labels"]
-        assert labels["seekr-chain/job-id"] == "ab1234"
-        assert labels["seekr-chain/job-name"] == "test-job"
-        assert labels["seekr-chain/user"] == "testuser"
 
 
 class TestJobsetEnvAndConfig:

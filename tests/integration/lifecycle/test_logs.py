@@ -1,7 +1,7 @@
 import seekr_chain
+from seekr_chain import K8sWorkflow as ArgoWorkflow
 from seekr_chain import s3_utils
 from seekr_chain._testing import assert_nested_match
-from seekr_chain.backends.argo.argo_workflow import ArgoWorkflow
 
 TS_REGEX = r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}.\d{6}Z"
 
@@ -30,7 +30,7 @@ class TestLogs:
             }
         )
 
-        job = seekr_chain.launch_argo_workflow(config)
+        job = seekr_chain.launch_k8s_workflow(config)
         job.follow()
 
         status = seekr_chain.wait(job, poll_interval=1)
@@ -116,7 +116,7 @@ class TestLogs:
             }
         )
 
-        job = seekr_chain.launch_argo_workflow(config)
+        job = seekr_chain.launch_k8s_workflow(config)
         job.follow()
 
         status = seekr_chain.wait(job, poll_interval=1)
@@ -180,7 +180,7 @@ class TestLogs:
             }
         )
 
-        job = seekr_chain.launch_argo_workflow(config)
+        job = seekr_chain.launch_k8s_workflow(config)
         job.follow()
 
         status = seekr_chain.wait(job, poll_interval=1)
@@ -248,7 +248,7 @@ class TestLogs:
             }
         )
 
-        job = seekr_chain.launch_argo_workflow(config)
+        job = seekr_chain.launch_k8s_workflow(config)
         job.follow()
         status = seekr_chain.wait(job, poll_interval=1)
         assert status.is_successful()

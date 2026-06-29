@@ -32,6 +32,7 @@ _CONFIG_FILENAME = ".seekrchain.toml"
 _ENV_VAR_MAP: dict[str, str] = {
     "SEEKRCHAIN_DATASTORE_ROOT": "datastore_root",
     "SEEKRCHAIN_INIT_IMAGE": "init_image",
+    "SEEKRCHAIN_CONTROLLER_IMAGE": "controller_image",
     "SEEKRCHAIN_NIX_STORE": "nix_store",
     "SEEKRCHAIN_NIX_RUNNER_IMAGE": "nix_runner_image",
     "SEEKRCHAIN_NIX_STORE_VOLUME_KIND": "nix_store_volume_kind",
@@ -91,6 +92,7 @@ class UserConfig:
 
     datastore_root: str | None = None
     init_image: str | None = None
+    controller_image: str | None = None
     nix_store: str | None = None
     nix_runner_image: str | None = None
     nix_store_volume_kind: str | None = None
@@ -143,6 +145,7 @@ def _load_config() -> UserConfig:
     return UserConfig(
         datastore_root=values.get("datastore_root"),
         init_image=values.get("init_image"),
+        controller_image=values.get("controller_image"),
         nix_store=values.get("nix_store"),
         nix_runner_image=values.get("nix_runner_image"),
         nix_store_volume_kind=values.get("nix_store_volume_kind"),
