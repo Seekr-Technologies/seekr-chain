@@ -283,6 +283,13 @@ class NixConfig(BaseModel):
     # cache hot; running it 3x per submit (which is what happened before this
     # cache existed) noticeably slowed `chain submit`.
     _resolved_closure: Optional[str] = PrivateAttr(default=None)
+    # Submit-time cache: resolve_nix_steps queries the k8s API for pods that
+    # have previously pulled this closure (label seekr-chain.nix/closure=<hash>)
+    # and stashes their node names here. The renderer injects them as a soft
+    # nodeAffinity preference so the scheduler steers new pods toward warm
+    # nodes. None = not queried yet (e.g. unit tests that bypass resolution);
+    # [] = queried, no warm nodes known (first-ever pull).
+    _warm_nodes: Optional[list[str]] = PrivateAttr(default=None)
 
 
 class RoleSpecConfig(BaseModel):

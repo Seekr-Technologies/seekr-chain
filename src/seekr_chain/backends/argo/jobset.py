@@ -30,7 +30,7 @@ _INIT_IMAGE = _user_config.init_image or _DEFAULT_INIT_IMAGE
 
 _DEFAULT_NIX_STORE_VOLUME_KIND = "hostPath"
 _DEFAULT_NIX_STORE_HOSTPATH = "/var/lib/seekr-chain/nix"
-_DEFAULT_NIX_STORE_MAX_BYTES = 50 * 1024**3  # 50 GiB
+_DEFAULT_NIX_STORE_MAX_BYTES = 128 * 1024**3  # GiB
 
 
 def _parse_size_to_bytes(s: str) -> int:
@@ -360,14 +360,47 @@ def _detect_closure_hash(role_config, code_path: str | None = None) -> str | Non
     return None
 
 
-def _merge_affinity_with_closure(base_affinity: dict | None, closure_hash: str | None) -> dict | None:
-    """Combine the workflow-level affinity with a per-role closure-hash term.
+def _detect_warm_nodes(role_config) -> list[str]:
+    """Return the warm node names this role should prefer, or [].
 
-    Adds a soft (``preferredDuringSchedulingIgnoredDuringExecution``, weight 50)
-    podAffinity for ``seekr-chain.nix/closure: <hash>`` so the scheduler
-    prefers nodes where another pod with the same closure has run — the
-    "warm node" property. Soft (not required) so that under capacity
-    pressure pods can spread to cold nodes without blocking.
+    Populated by ``resolve_nix_steps`` (the submit-time pass) for nix-mode
+    roles via :func:`nix_utils.find_warm_nodes`. Build steps (image-mode
+    with SEEKR_CHAIN_NIX_CLOSURE in env) get [] — they're producers, not
+    consumers, so they don't benefit from steering toward existing warm
+    nodes.
+
+    Returns [] when resolution didn't run (unit tests that bypass
+    resolve_nix_steps), which keeps nodeAffinity injection a no-op.
+    """
+    if role_config.nix is not None and role_config.nix._warm_nodes:
+        return role_config.nix._warm_nodes
+    return []
+
+
+def _merge_affinity_with_closure(
+    base_affinity: dict | None,
+    closure_hash: str | None,
+    warm_nodes: list[str] | None = None,
+) -> dict | None:
+    """Combine the workflow-level affinity with closure warm-cache hints.
+
+    Two terms get added, both soft (``preferredDuringSchedulingIgnoredDuringExecution``):
+
+    1. **podAffinity** on ``seekr-chain.nix/closure=<hash>`` (weight 50). Helps
+       *concurrent* warm-cache: multiple pods in the same submit sharing a
+       closure attract toward each other's node. Only matches Pending/Running
+       pods, so it does not help across workflow boundaries.
+
+    2. **nodeAffinity** on ``kubernetes.io/hostname In [warm_nodes]`` (weight 90).
+       Helps *sequential* warm-cache: pods from earlier submits left a record
+       (the closure label on completed pods, queried at submit time by
+       :func:`nix_utils.find_warm_nodes`). nodeAffinity matches against node
+       labels directly so it works regardless of pod liveness.
+
+    Both are soft — under capacity pressure pods spread to cold nodes
+    rather than blocking. weight 90 on nodeAffinity is high relative to
+    weight 50 on podAffinity because nodeAffinity is the more authoritative
+    "this closure literally exists on that node's disk" signal.
 
     A deep copy keeps the workflow-level affinity dict (shared across all
     roles in a step) from being mutated.
@@ -375,19 +408,38 @@ def _merge_affinity_with_closure(base_affinity: dict | None, closure_hash: str |
     if closure_hash is None:
         return base_affinity
     affinity = copy.deepcopy(base_affinity) if base_affinity else {}
+
+    # podAffinity: concurrent co-scheduling on closure label.
     pa = affinity.setdefault("podAffinity", {})
     pref = pa.setdefault("preferredDuringSchedulingIgnoredDuringExecution", [])
     pref.append(
         {
             "weight": 50,
             "podAffinityTerm": {
-                "labelSelector": {
-                    "matchLabels": {"seekr-chain.nix/closure": closure_hash}
-                },
+                "labelSelector": {"matchLabels": {"seekr-chain.nix/closure": closure_hash}},
                 "topologyKey": "kubernetes.io/hostname",
             },
         }
     )
+
+    # nodeAffinity: sequential warm-cache via known warm node hostnames.
+    if warm_nodes:
+        na = affinity.setdefault("nodeAffinity", {})
+        na_pref = na.setdefault("preferredDuringSchedulingIgnoredDuringExecution", [])
+        na_pref.append(
+            {
+                "weight": 90,
+                "preference": {
+                    "matchExpressions": [
+                        {
+                            "key": "kubernetes.io/hostname",
+                            "operator": "In",
+                            "values": warm_nodes,
+                        }
+                    ]
+                },
+            }
+        )
     return affinity
 
 
@@ -513,7 +565,9 @@ def _build_role_context(
 
     code_path = workflow_config.code.path if workflow_config.code else None
     main_image, step_args, nix_main_env, nix_init_ctx, nix_volume_ctx = _select_role_runtime(
-        role_config, code_path=code_path, interactive=interactive,
+        role_config,
+        code_path=code_path,
+        interactive=interactive,
     )
 
     pvcs_raw, pvc_mounts = _get_pvcs(role_config)
@@ -550,7 +604,8 @@ def _build_role_context(
     # build steps (which PRODUCE it via env-var marker) — same label, so
     # a user step naturally prefers the node where the build step ran.
     closure_hash = _detect_closure_hash(role_config, code_path=code_path)
-    role_affinity = _merge_affinity_with_closure(workflow_affinity, closure_hash)
+    warm_nodes = _detect_warm_nodes(role_config)
+    role_affinity = _merge_affinity_with_closure(workflow_affinity, closure_hash, warm_nodes)
 
     return {
         "name": js_pod_name,

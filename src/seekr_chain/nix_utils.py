@@ -189,3 +189,63 @@ def closure_exists(store_uri: str, closure_path: str) -> bool:
             "internal source)."
         ) from e
     return sfs.exists(narinfo_uri)
+
+
+# Label every nix-mode pod (consumer or build) carries: identifies the
+# closure that pod fetched/produced. Used both by the rendered podAffinity
+# (concurrent co-scheduling) and by find_warm_nodes() below.
+NIX_CLOSURE_LABEL = "seekr-chain.nix/closure"
+
+
+def find_warm_nodes(
+    closure_hash: str,
+    namespace: str,
+    limit: int = 10,
+) -> list[str]:
+    """Return node names that have pulled this closure recently.
+
+    Queries the k8s API for pods carrying the ``NIX_CLOSURE_LABEL=<hash>``
+    label in the given namespace, regardless of phase (Running, Succeeded,
+    Failed — they all serve as evidence that the closure landed on that
+    node's hostPath store).
+
+    Returns up to ``limit`` unique node names, most-recent first. This is
+    what seekr-chain injects as a soft nodeAffinity preference at submit
+    time — same warm-cache signal as podAffinity, but works across
+    workflow boundaries because completed pods are still in the API for
+    the duration of the workflow TTL.
+
+    Returns ``[]`` on any error (kubeconfig not set, RBAC denied, network
+    unreachable, ...) — the warm-cache is a soft hint and a missing one
+    means the scheduler falls back to a cold pull. Never raises.
+    """
+    try:
+        from seekr_chain import k8s_utils
+    except ImportError:
+        return []
+
+    try:
+        v1 = k8s_utils.get_core_v1_api()
+        result = v1.list_namespaced_pod(
+            namespace=namespace,
+            label_selector=f"{NIX_CLOSURE_LABEL}={closure_hash}",
+        )
+    except Exception as e:
+        logger.warning(
+            "could not query warm nodes for closure %s in %s: %s; "
+            "scheduler will pick without warm-cache hint",
+            closure_hash, namespace, e,
+        )
+        return []
+
+    # Sort by creation_timestamp descending so the most-recently-pulled
+    # nodes are preferred. Deduplicate while preserving order.
+    pods = [p for p in result.items if p.spec.node_name]
+    pods.sort(key=lambda p: p.metadata.creation_timestamp or 0, reverse=True)
+    seen: list[str] = []
+    for p in pods:
+        if p.spec.node_name not in seen:
+            seen.append(p.spec.node_name)
+            if len(seen) >= limit:
+                break
+    return seen

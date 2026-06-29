@@ -107,3 +107,111 @@ class TestClosureExists:
         monkeypatch.setitem(sys.modules, "seekr_fs", None)
         with pytest.raises(ImportError, match="seekr-fs is required"):
             closure_exists("oci://ns/bucket", "/nix/store/abc-x")
+
+
+class TestFindWarmNodes:
+    """Query the k8s API for pods with the closure-hash label and gather
+    their unique node names, most-recent first. This is the data source
+    for the submit-time nodeAffinity injection.
+    """
+
+    def _mock_pod(self, name, node, created):
+        """Build a minimal V1Pod-shaped object for the test."""
+        from unittest.mock import MagicMock
+
+        pod = MagicMock()
+        pod.metadata.name = name
+        pod.metadata.creation_timestamp = created
+        pod.spec.node_name = node
+        return pod
+
+    def _mock_api(self, monkeypatch, pods=None, raises=None):
+        """Stub get_core_v1_api so find_warm_nodes can be exercised offline."""
+        from unittest.mock import MagicMock
+
+        v1 = MagicMock()
+        if raises:
+            v1.list_namespaced_pod.side_effect = raises
+        else:
+            result = MagicMock()
+            result.items = pods or []
+            v1.list_namespaced_pod.return_value = result
+
+        from seekr_chain import k8s_utils
+        monkeypatch.setattr(k8s_utils, "get_core_v1_api", lambda: v1)
+        return v1
+
+    def test_returns_unique_nodes_newest_first(self, monkeypatch):
+        from seekr_chain.nix_utils import find_warm_nodes
+        import datetime
+
+        # Three pods across two nodes, with different creation times.
+        pods = [
+            self._mock_pod("a", "node-old",   datetime.datetime(2026, 6, 1)),
+            self._mock_pod("b", "node-new",   datetime.datetime(2026, 6, 3)),
+            self._mock_pod("c", "node-mid",   datetime.datetime(2026, 6, 2)),
+        ]
+        self._mock_api(monkeypatch, pods=pods)
+
+        nodes = find_warm_nodes("abc123", namespace="argo-workflows")
+        assert nodes == ["node-new", "node-mid", "node-old"]
+
+    def test_dedups_multiple_pods_on_same_node(self, monkeypatch):
+        from seekr_chain.nix_utils import find_warm_nodes
+        import datetime
+
+        pods = [
+            self._mock_pod("a", "node-1", datetime.datetime(2026, 6, 1)),
+            self._mock_pod("b", "node-1", datetime.datetime(2026, 6, 2)),
+            self._mock_pod("c", "node-2", datetime.datetime(2026, 6, 3)),
+        ]
+        self._mock_api(monkeypatch, pods=pods)
+
+        nodes = find_warm_nodes("abc123", namespace="argo-workflows")
+        # node-1 has two pods but appears once; node-2 is newest.
+        assert nodes == ["node-2", "node-1"]
+
+    def test_respects_limit(self, monkeypatch):
+        from seekr_chain.nix_utils import find_warm_nodes
+        import datetime
+
+        pods = [
+            self._mock_pod(f"p{i}", f"node-{i}", datetime.datetime(2026, 6, i + 1))
+            for i in range(20)
+        ]
+        self._mock_api(monkeypatch, pods=pods)
+
+        nodes = find_warm_nodes("abc123", namespace="argo-workflows", limit=5)
+        assert len(nodes) == 5
+        # All newest 5, descending.
+        assert nodes == [f"node-{i}" for i in range(19, 14, -1)]
+
+    def test_empty_when_no_matching_pods(self, monkeypatch):
+        from seekr_chain.nix_utils import find_warm_nodes
+
+        self._mock_api(monkeypatch, pods=[])
+        assert find_warm_nodes("abc123", namespace="argo-workflows") == []
+
+    def test_skips_pods_with_no_node_name(self, monkeypatch):
+        """A pod that hasn't been scheduled yet (no spec.nodeName) shouldn't
+        appear in the warm list — we can't infer a node from it.
+        """
+        from seekr_chain.nix_utils import find_warm_nodes
+        import datetime
+
+        pods = [
+            self._mock_pod("pending", None, datetime.datetime(2026, 6, 5)),
+            self._mock_pod("scheduled", "node-a", datetime.datetime(2026, 6, 1)),
+        ]
+        self._mock_api(monkeypatch, pods=pods)
+
+        assert find_warm_nodes("abc123", namespace="argo-workflows") == ["node-a"]
+
+    def test_api_failure_returns_empty(self, monkeypatch):
+        """k8s API errors degrade gracefully: warm-cache is a soft hint;
+        we'd rather schedule cold than fail the submit.
+        """
+        from seekr_chain.nix_utils import find_warm_nodes
+
+        self._mock_api(monkeypatch, raises=RuntimeError("apiserver unreachable"))
+        assert find_warm_nodes("abc123", namespace="argo-workflows") == []

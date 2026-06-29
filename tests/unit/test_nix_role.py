@@ -439,8 +439,11 @@ class TestNixRendering:
         env_dict = {e["name"]: e.get("value") for e in nix_init["env"] if "value" in e}
         assert env_dict["SEEKR_CHAIN_NIX_STORE"] == "s3://bucket"
         assert env_dict["SEEKR_CHAIN_NIX_CLOSURE"] == "/nix/store/abc12345def-train"
-        # Default size budget: 50 GiB. Used by nix-gc.sh.
-        assert env_dict["SEEKR_CHAIN_NIX_STORE_MAX_BYTES"] == str(50 * 1024**3)
+        # Default size budget set on the env. Used by nix-gc.sh. Read from
+        # the module constant so this assertion doesn't drift if we tune
+        # the default later.
+        from seekr_chain.backends.argo.jobset import _DEFAULT_NIX_STORE_MAX_BYTES
+        assert env_dict["SEEKR_CHAIN_NIX_STORE_MAX_BYTES"] == str(_DEFAULT_NIX_STORE_MAX_BYTES)
 
     def test_size_parser_handles_iec_suffixes(self):
         from seekr_chain.backends.argo.jobset import _parse_size_to_bytes
@@ -524,6 +527,70 @@ class TestNixRendering:
         term = closure_terms[0]
         assert term["weight"] == 50
         assert term["podAffinityTerm"]["topologyKey"] == "kubernetes.io/hostname"
+
+    def test_warm_nodes_render_node_affinity(self, tmp_path, monkeypatch):
+        """When resolve_nix_steps populated role.nix._warm_nodes, the renderer
+        injects a soft nodeAffinity preferring those hostnames (weight 90).
+        """
+        from seekr_chain.backends.argo import jobset as jobset_mod, render
+        from seekr_chain.backends.argo.job_info import get_job_info
+        from seekr_chain.backends.argo.jobset import build_jobset_context
+        from seekr_chain.user_config import UserConfig
+        import yaml
+
+        _patch_user_config(monkeypatch, UserConfig(nix_runner_image="img:tag"))
+        monkeypatch.setattr("seekr_chain.nix_utils.closure_exists", lambda *_a, **_k: True)
+        _mock_eval(monkeypatch, "/nix/store/warmhash-x")
+
+        cfg = WorkflowConfig(
+            name="t", code={"path": "/tmp/t"},
+            steps=[
+                {
+                    "name": "train",
+                    "nix": {"expression": "./", "store": "s3://b", "build": False},
+                    "script": "echo",
+                    "resources": {"cpus_per_node": "1", "mem_per_node": "1Gi", "ephemeral_storage_per_node": "1Gi"},
+                }
+            ],
+        )
+        # Simulate what resolve_nix_steps would have done: cache warm nodes
+        # on the role's NixConfig private attr.
+        cfg.steps[0].nix._warm_nodes = ["node-a", "node-b", "node-c"]
+
+        job_info = get_job_info("ab1234", datastore_root="s3://b/")
+        _, context = build_jobset_context(
+            workflow_config=cfg, step_index=0, job_info=job_info,
+            workflow_name="ab1234", workflow_secrets=[], interactive=False,
+            assets_path=tmp_path / "assets",
+        )
+        manifest = yaml.safe_load(render.render("jobset.yaml.j2", context))
+        pod = manifest["spec"]["replicatedJobs"][0]["template"]["spec"]["template"]
+
+        node_affinity = pod["spec"]["affinity"]["nodeAffinity"]
+        preferred = node_affinity["preferredDuringSchedulingIgnoredDuringExecution"]
+        # The closure-warm-cache term: weight 90, hostname In [warm_nodes].
+        warm_terms = [
+            t for t in preferred
+            if any(
+                e.get("key") == "kubernetes.io/hostname" and e.get("operator") == "In"
+                for e in t["preference"].get("matchExpressions", [])
+            )
+        ]
+        assert len(warm_terms) == 1
+        term = warm_terms[0]
+        assert term["weight"] == 90
+        values = term["preference"]["matchExpressions"][0]["values"]
+        assert values == ["node-a", "node-b", "node-c"]
+
+    def test_no_warm_nodes_no_node_affinity(self, tmp_path, monkeypatch):
+        """When _warm_nodes is None or [], no nodeAffinity term is added.
+        podAffinity (concurrent co-scheduling) is still rendered as usual.
+        """
+        _manifest, pod = _render_nix_jobset(tmp_path=tmp_path, monkeypatch=monkeypatch)
+        # podAffinity still there (the closure-label term).
+        assert "podAffinity" in pod["spec"]["affinity"]
+        # nodeAffinity not added — no warm nodes known.
+        assert "nodeAffinity" not in pod["spec"]["affinity"]
 
     def test_non_nix_role_has_no_closure_label_or_affinity(self, tmp_path):
         """Sanity: image-mode roles get neither the label nor the closure affinity."""

@@ -246,7 +246,9 @@ def resolve_nix_steps(config: WorkflowConfig) -> WorkflowConfig:
             "/seekr-chain/workspace, which is populated from code.path."
         )
 
-    role_to_closure, needed_builds = _collect_needed_builds(nix_roles_by_step, config.code.path)
+    role_to_closure, needed_builds = _collect_needed_builds(
+        nix_roles_by_step, config.code.path, config.namespace or "argo",
+    )
     if not needed_builds:
         return config
 
@@ -256,6 +258,7 @@ def resolve_nix_steps(config: WorkflowConfig) -> WorkflowConfig:
 def _collect_needed_builds(
     nix_roles_by_step: list[tuple],
     code_path: str,
+    namespace: str,
 ) -> tuple[dict[int, str], dict[str, NixConfig]]:
     """Walk the nix-mode roles, eval each closure, and return:
 
@@ -263,10 +266,19 @@ def _collect_needed_builds(
     - ``needed_builds``: closure_path -> representative NixConfig for roles
       whose closure is missing from the store and need an auto-build
 
+    Side effects on each role's NixConfig:
+
+    - ``_resolved_closure`` cached so the jobset renderer doesn't re-eval.
+    - ``_warm_nodes`` populated via a single k8s API call per unique closure
+      (the renderer injects these as a soft nodeAffinity preference).
+
     Raises if any role has ``build=False`` but the closure isn't in the store.
     """
     role_to_closure: dict[int, str] = {}
     needed_builds: dict[str, NixConfig] = {}
+    # Dedup the warm-node query across roles in the same submit. One API
+    # call per unique closure-hash, not per role.
+    warm_nodes_cache: dict[str, list[str]] = {}
 
     for step, nix_roles in nix_roles_by_step:
         for role in nix_roles:
@@ -280,6 +292,14 @@ def _collect_needed_builds(
             # Cache for downstream (jobset rendering) so we don't re-eval.
             role.nix._resolved_closure = closure
             role_to_closure[id(role)] = closure
+
+            closure_hash = nix_utils.closure_hash_from_path(closure)
+            if closure_hash not in warm_nodes_cache:
+                warm_nodes_cache[closure_hash] = nix_utils.find_warm_nodes(
+                    closure_hash, namespace=namespace,
+                )
+            role.nix._warm_nodes = warm_nodes_cache[closure_hash]
+
             store_uri = _resolve_store_uri(role.nix, role_name)
 
             if nix_utils.closure_exists(store_uri, closure):
