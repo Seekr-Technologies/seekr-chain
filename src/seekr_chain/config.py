@@ -6,7 +6,7 @@ from enum import Enum
 from typing import Annotated, Literal, Optional, Self, Union
 
 import pydantic
-from pydantic import Field, field_validator, model_validator
+from pydantic import Field, PrivateAttr, field_validator, model_validator
 
 
 class BaseModel(pydantic.BaseModel):
@@ -275,6 +275,14 @@ class NixConfig(BaseModel):
     store: Optional[str] = None
     build: bool = True
     build_resources: Optional[ResourceConfig] = None
+
+    # Submit-time cache: resolve_nix_steps evaluates the closure path once
+    # and stashes it here so downstream callers (jobset's _resolve_nix_role,
+    # _detect_closure_hash) don't re-shell out to `nix eval`. Each call costs
+    # ~1.5s of subprocess + flake-re-eval overhead even with nix's internal
+    # cache hot; running it 3x per submit (which is what happened before this
+    # cache existed) noticeably slowed `chain submit`.
+    _resolved_closure: Optional[str] = PrivateAttr(default=None)
 
 
 class RoleSpecConfig(BaseModel):

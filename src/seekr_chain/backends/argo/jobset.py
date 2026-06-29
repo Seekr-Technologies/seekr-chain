@@ -83,9 +83,18 @@ def _eval_role_closure(nix_cfg, code_path: str | None):
     time eval and the build pod's ``cd workspace; nix build path:./...`` agree
     on this contract (see ``_validate_expression_under_code_path``).
 
+    Returns the cached ``nix_cfg._resolved_closure`` if ``resolve_nix_steps``
+    already evaluated it during the submit-time pre-pass — each `nix eval`
+    is a ~1.5s subprocess even when nix's internal cache is hot, so repeating
+    it 3x per submit (render-time on every role + closure-hash detection) is
+    a real cost. Falls through to a fresh eval when the cache is unset
+    (unit tests that bypass resolve_nix_steps).
+
     ``code_path`` may be None in unit tests that render in isolation and mock
     eval_closure_path; in that case we pass the raw expression through.
     """
+    if nix_cfg._resolved_closure is not None:
+        return nix_cfg._resolved_closure
 
     if code_path:
         full = os.path.normpath(os.path.join(code_path, nix_cfg.expression))

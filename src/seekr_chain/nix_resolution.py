@@ -277,6 +277,8 @@ def _collect_needed_builds(
             closure = nix_utils.eval_closure_path(
                 resolved_expression, attr=role.nix.attr, system=role.nix.system,
             )
+            # Cache for downstream (jobset rendering) so we don't re-eval.
+            role.nix._resolved_closure = closure
             role_to_closure[id(role)] = closure
             store_uri = _resolve_store_uri(role.nix, role_name)
 

@@ -427,6 +427,56 @@ class TestExpressionValidation:
         resolve_nix_steps(c)
 
 
+class TestClosureCache:
+    """resolve_nix_steps should populate role.nix._resolved_closure so
+    downstream callers (jobset rendering) don't re-shell to `nix eval`.
+    """
+
+    def test_closure_cached_on_nix_config(self, monkeypatch, _nix_user_config):
+        from seekr_chain.nix_resolution import resolve_nix_steps
+
+        _existing(monkeypatch)
+        # Count eval calls — should be exactly one per role.
+        calls = {"n": 0}
+        def fake_eval(*_a, **_k):
+            calls["n"] += 1
+            return "/nix/store/cachedhash-x"
+        monkeypatch.setattr("seekr_chain.nix_utils.eval_closure_path", fake_eval)
+
+        c = WorkflowConfig(
+            name="t", code={"path": "/tmp/t"},
+            steps=[{"name": "a", "nix": {"expression": "./"}, "script": "echo"}],
+        )
+        out = resolve_nix_steps(c)
+        assert calls["n"] == 1
+        assert out.steps[0].nix._resolved_closure == "/nix/store/cachedhash-x"
+
+    def test_jobset_reuses_cached_closure(self, monkeypatch, _nix_user_config):
+        """After resolve_nix_steps populates the cache, jobset's
+        _eval_role_closure (used by _resolve_nix_role + _detect_closure_hash)
+        must read the cache instead of evaling again.
+        """
+        from seekr_chain.backends.argo.jobset import _eval_role_closure
+        from seekr_chain.config import NixConfig
+
+        eval_count = {"n": 0}
+        def fake_eval(*_a, **_k):
+            eval_count["n"] += 1
+            return "/nix/store/freshhash-x"
+        monkeypatch.setattr("seekr_chain.nix_utils.eval_closure_path", fake_eval)
+
+        nix = NixConfig(expression="./")
+        nix._resolved_closure = "/nix/store/cachedhash-x"
+        # Cache hit — no eval, returns cached value.
+        assert _eval_role_closure(nix, "/tmp/t") == "/nix/store/cachedhash-x"
+        assert eval_count["n"] == 0
+
+        # Cache miss (fresh NixConfig) — eval runs.
+        fresh = NixConfig(expression="./")
+        assert _eval_role_closure(fresh, "/tmp/t") == "/nix/store/freshhash-x"
+        assert eval_count["n"] == 1
+
+
 class TestStoreUriValidation:
     def test_s3_with_prefix_rejected(self, monkeypatch, _no_eval_needed):
         """nix's native s3:// store can't handle path prefixes — fail fast."""
