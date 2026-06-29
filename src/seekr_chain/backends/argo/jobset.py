@@ -8,21 +8,20 @@ import textwrap
 from pathlib import Path
 from typing import Optional
 
-from seekr_chain import constants, k8s_utils, s3_utils
+from seekr_chain import constants, k8s_utils, nix_utils, s3_utils
 from seekr_chain.config import (
     SingleRoleStepConfig,
     StepConfig,
     WorkflowConfig,
 )
-from seekr_chain.user_config import config as _user_config
-from seekr_chain.utils import format_bytes, resolve_image
-
-logger = logging.getLogger(__name__)
-
 from seekr_chain.nix_resolution import (
     _DEFAULT_NIX_RUNNER_IMAGE,
     _get_nix_runner_image,
 )
+from seekr_chain.user_config import config as _user_config
+from seekr_chain.utils import format_bytes, resolve_image
+
+logger = logging.getLogger(__name__)
 
 _DEFAULT_INIT_IMAGE = "ghcr.io/seekr-technologies/seekr-chain-init:latest@sha256:f1fc456cffae92eab86c18814f3668c766ab12b69231308083ff128a8d4d0a9c"
 _INIT_IMAGE = _user_config.init_image or _DEFAULT_INIT_IMAGE
@@ -67,7 +66,6 @@ def _eval_role_closure(nix_cfg, code_path: str | None):
     ``code_path`` may be None in unit tests that render in isolation and mock
     eval_closure_path; in that case we pass the raw expression through.
     """
-    from seekr_chain import nix_utils
 
     if code_path:
         full = os.path.normpath(os.path.join(code_path, nix_cfg.expression))
@@ -101,7 +99,6 @@ def _resolve_nix_role(role_config, code_path: str | None = None) -> dict:
     ``hostpath``
         Host filesystem path used when ``volume_kind == "hostPath"``.
     """
-    from seekr_chain import nix_utils
 
     nix = role_config.nix
     # Eval requires nix on the local PATH; the error from nix_utils is
@@ -319,13 +316,11 @@ def _detect_closure_hash(role_config, code_path: str | None = None) -> str | Non
       same label, so consumers prefer nodes where producers ran.
     """
     if role_config.nix is not None:
-        from seekr_chain import nix_utils
         closure = _eval_role_closure(role_config.nix, code_path)
         return nix_utils.closure_hash_from_path(closure)
     env = role_config.env or {}
     closure_path = env.get("SEEKR_CHAIN_NIX_CLOSURE")
     if closure_path:
-        from seekr_chain import nix_utils
         return nix_utils.closure_hash_from_path(closure_path)
     return None
 

@@ -27,6 +27,7 @@ from __future__ import annotations
 import logging
 import os
 from typing import Optional
+from urllib.parse import urlparse
 
 from seekr_chain import nix_utils
 from seekr_chain.config import (
@@ -85,8 +86,6 @@ def _validate_store_uri(uri: str, role_name: str) -> None:
     """
     if not uri.startswith("s3://"):
         return
-
-    from urllib.parse import urlparse
 
     parsed = urlparse(uri)
     # path is "" for s3://bucket?... and "/" for s3://bucket/?...; anything
