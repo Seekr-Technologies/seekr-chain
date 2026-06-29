@@ -42,38 +42,52 @@ _ENV_VAR_MAP: dict[str, str] = {
 
 @dataclass(frozen=True)
 class UserConfig:
+    """Process-wide configuration loaded from env vars + ``.seekrchain.toml``.
+
+    Parameters
+    ----------
+    datastore_root :
+        Base seekr-fs URI for workflow artifacts (assets, logs, metadata).
+    init_image :
+        OCI image for the chain-init container. Defaults to the pinned
+        ``ghcr.io/seekr-technologies/seekr-chain-init`` build.
+    nix_store :
+        Default URI for the nix binary cache (e.g. ``s3://bucket``); any
+        nix store type works. Used when a step's ``nix.store`` is not
+        explicitly set; per-step overrides win.
+    nix_runner_image :
+        OCI image for nix-mode roles. Must contain ``nix`` + ``s5cmd`` with
+        experimental-features + sandbox + filter-syscalls configured (see
+        ``docker/Dockerfile.nix-runner`` for the reference build).
+    nix_store_volume_kind :
+        Volume kind for the in-pod ``/nix`` store. ``"hostPath"`` (default)
+        shares the closure across pods on the same node (free per-node
+        warm cache); requires the cluster's PodSecurity to admit hostPath
+        volumes. ``"emptyDir"`` is per-pod — use when hostPath isn't
+        allowed.
+    nix_store_hostpath :
+        Host filesystem path when ``nix_store_volume_kind == "hostPath"``.
+        Defaults to ``/var/lib/seekr-chain/nix``; created on demand
+        (DirectoryOrCreate), so no pre-provisioning DaemonSet is required.
+    nix_compression :
+        Compression scheme for NARs the build step uploads. Affects only
+        new uploads — existing paths keep whichever scheme they were written
+        with (each narinfo records its own; consumers decode accordingly).
+        Default ``"ZSTD"`` (fast, multi-threaded, good ratio). ``"NONE"``
+        is faster end-to-end when storage is cheap and bandwidth is high
+        (e.g. OCI Object Storage with ~10 GB/s links). ``"XZ"`` is small
+        but ~5x slower and single-threaded; matches cache.nixos.org's
+        historical format. ``"BZIP2"`` and ``"GZIP"`` are supported by nix
+        but rarely chosen.
+    """
+
     datastore_root: str | None = None
     init_image: str | None = None
-    # Default seekr-fs URI for the nix binary cache (e.g. s3://bucket/nix-cache).
-    # Used when a step's `nix.store` is not explicitly set. Per-step overrides win.
     nix_store: str | None = None
-    # OCI image for nix-mode roles. Must contain `nix` + `s5cmd` and have
-    # experimental-features + sandbox + filter-syscalls configured (see
-    # docker/Dockerfile.nix-runner for the reference build).
     nix_runner_image: str | None = None
-    # Volume kind for the in-pod /nix store:
-    #   "hostPath"  — share across pods on the same node. Closures fetched by
-    #                 earlier pods are reused by later pods landing on the
-    #                 same node (free per-node cache). Default. Requires the
-    #                 cluster's PodSecurity to admit hostPath volumes.
-    #   "emptyDir"  — per-pod. Closure pull repeats on every pod. Use when
-    #                 hostPath isn't allowed by the cluster.
-    nix_store_volume_kind: str | None = None  # defaults to "hostPath" at use site
-    # Host path used when nix_store_volume_kind == "hostPath". Created on
-    # demand (DirectoryOrCreate) — no pre-provisioning DaemonSet required.
-    nix_store_hostpath: str | None = None  # defaults to /var/lib/seekr-chain/nix
-    # Compression scheme for NARs uploaded to nix_store. Affects only new
-    # uploads — existing paths in the cache keep whichever compression they
-    # were written with (each narinfo records its own scheme; consumers
-    # decode accordingly).
-    #   "ZSTD"  — fast, multi-threaded; good default. (Current default.)
-    #   "NONE"  — no compression. Use when storage is cheap + bandwidth is
-    #             high (e.g. OCI Object Storage with ~10 GB/s links). Saves
-    #             producer + consumer CPU at the cost of storage size.
-    #   "XZ"    — small, slow, single-threaded. nix's historical default;
-    #             matches cache.nixos.org's format.
-    #   "BZIP2", "GZIP" — supported by nix but rarely chosen.
-    nix_compression: NixCompression | None = None  # defaults to "ZSTD" at use site
+    nix_store_volume_kind: str | None = None
+    nix_store_hostpath: str | None = None
+    nix_compression: NixCompression | None = None
 
 
 def _find_file_walking_up(filename: str) -> Path | None:
