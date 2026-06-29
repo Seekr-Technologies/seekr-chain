@@ -98,18 +98,22 @@ class TestRoleSpecImageXorNix:
 
 
 def _patch_user_config(monkeypatch, user_config):
-    """Patch both modules that hold their own _user_config reference.
+    """Patch both modules that hold their own _user_config reference, and
+    also re-derive the _NIX_RUNNER_IMAGE binding.
 
     jobset.py and nix_resolution.py each `from seekr_chain.user_config import
-    config as _user_config` at import time, creating two bindings. The runtime
-    helpers (e.g. _get_nix_runner_image lives in nix_resolution) read whichever
-    module's binding they live next to, so monkeypatching one isn't enough.
+    config as _user_config` at import time, creating two bindings. _NIX_RUNNER_IMAGE
+    is computed once at import from that _user_config, so a runtime override of
+    user_config alone wouldn't change the cached image binding either.
     """
     from seekr_chain import nix_resolution as nr_mod
     from seekr_chain.backends.argo import jobset as jobset_mod
 
     monkeypatch.setattr(jobset_mod, "_user_config", user_config)
     monkeypatch.setattr(nr_mod, "_user_config", user_config)
+    resolved_image = user_config.nix_runner_image or nr_mod._DEFAULT_NIX_RUNNER_IMAGE
+    monkeypatch.setattr(jobset_mod, "_NIX_RUNNER_IMAGE", resolved_image)
+    monkeypatch.setattr(nr_mod, "_NIX_RUNNER_IMAGE", resolved_image)
 
 
 @pytest.fixture

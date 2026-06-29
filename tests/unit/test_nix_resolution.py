@@ -28,13 +28,14 @@ def _nix_user_config(monkeypatch):
     from seekr_chain import nix_resolution as nr_mod
     from seekr_chain.user_config import UserConfig
 
-    monkeypatch.setattr(
-        nr_mod, "_user_config",
-        UserConfig(
-            nix_store="s3://test-bucket",  # bare bucket — nix's s3 store rejects prefixes
-            nix_runner_image="registry.example.com/nix-runner:test",
-        ),
+    cfg = UserConfig(
+        nix_store="s3://test-bucket",  # bare bucket — nix's s3 store rejects prefixes
+        nix_runner_image="registry.example.com/nix-runner:test",
     )
+    monkeypatch.setattr(nr_mod, "_user_config", cfg)
+    # _NIX_RUNNER_IMAGE is computed once at module import from _user_config,
+    # so we have to re-derive it here too.
+    monkeypatch.setattr(nr_mod, "_NIX_RUNNER_IMAGE", cfg.nix_runner_image)
 
 
 @pytest.fixture

@@ -16,7 +16,7 @@ from seekr_chain.config import (
 )
 from seekr_chain.nix_resolution import (
     _DEFAULT_NIX_RUNNER_IMAGE,
-    _get_nix_runner_image,
+    _NIX_RUNNER_IMAGE,
 )
 from seekr_chain.user_config import config as _user_config
 from seekr_chain.utils import format_bytes, resolve_image
@@ -138,7 +138,7 @@ def _resolve_nix_role(role_config, code_path: str | None = None) -> dict:
     hostpath = _user_config.nix_store_hostpath or _DEFAULT_NIX_STORE_HOSTPATH
 
     return {
-        "image": _get_nix_runner_image(),
+        "image": _NIX_RUNNER_IMAGE,
         "closure": closure,
         "closure_hash": closure_hash,
         "store_uri": store_uri,

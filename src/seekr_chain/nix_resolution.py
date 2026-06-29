@@ -42,6 +42,38 @@ from seekr_chain.user_config import config as _user_config
 
 logger = logging.getLogger(__name__)
 
+# Default runtime image for nix-mode roles. Built from
+# `docker/Dockerfile.nix-runner` via the `Build Nix Runner Image`
+# GitHub Actions workflow; the version pinned here must match the
+# value in `docker/nix-runner.version`.
+#
+# Bump both files together whenever the Dockerfile changes — k8s
+# caches non-:latest tags per-node forever otherwise, and the workflow
+# refuses to overwrite an existing tag.
+_DEFAULT_NIX_RUNNER_IMAGE = "ghcr.io/seekr-technologies/seekr-chain-nix-runner:0.1.1@sha256:5058a650ca2f8c4ac5dde4eeb6ed13a4d7cd037ab886c4738e4502ed83490343"
+_NIX_RUNNER_IMAGE = _user_config.nix_runner_image or _DEFAULT_NIX_RUNNER_IMAGE
+
+# Default when user_config.nix_compression isn't set. zstd: fast,
+# multi-threaded, good ratio. See user_config.NixCompression for allowed values.
+_DEFAULT_NIX_COMPRESSION = "zstd"
+
+# Build step's script source lives at resources/nix-build.sh and gets
+# uploaded with every job. The step invokes it via chain-entrypoint.sh
+# (image-mode wrapper), and reads its config from these env vars set on
+# the build step's container:
+#   SEEKR_CHAIN_NIX_STORE       binary cache URI to push to
+#   SEEKR_CHAIN_NIX_CLOSURE     expected /nix/store path
+#   SEEKR_CHAIN_NIX_EXPRESSION  flake path inside /seekr-chain/workspace
+#   SEEKR_CHAIN_NIX_SYSTEM      e.g. x86_64-linux
+#   SEEKR_CHAIN_NIX_ATTR        attr inside the flake (default: "default")
+#   SEEKR_CHAIN_NIX_COMPRESSION compression scheme for NAR uploads
+#
+# SEEKR_CHAIN_NIX_CLOSURE in env (not just script-baked) lets
+# _detect_closure_hash see it on the build step's role.env and attach the
+# `seekr-chain.nix/closure: <hash>` label so consumer pods' podAffinity
+# preference targets the node that ran the build (warm cache).
+_BUILD_SCRIPT_INVOCATION = "sh /seekr-chain/resources/nix-build.sh"
+
 # Modest defaults — fits a small python closure on a typical worker node.
 # Large native builds (pytorch from source, FA, ROCm packages) should set
 # `nix.build_resources` explicitly with more CPU / RAM.
@@ -101,29 +133,6 @@ def _validate_store_uri(uri: str, role_name: str) -> None:
         )
 
 
-# Build step's script source lives at resources/nix-build.sh and gets
-# uploaded with every job. The step invokes it via chain-entrypoint.sh
-# (image-mode wrapper), and reads its config from these env vars set on
-# the build step's container:
-#   SEEKR_CHAIN_NIX_STORE       binary cache URI to push to
-#   SEEKR_CHAIN_NIX_CLOSURE     expected /nix/store path
-#   SEEKR_CHAIN_NIX_EXPRESSION  flake path inside /seekr-chain/workspace
-#   SEEKR_CHAIN_NIX_SYSTEM      e.g. x86_64-linux
-#   SEEKR_CHAIN_NIX_ATTR        attr inside the flake (default: "default")
-#   SEEKR_CHAIN_NIX_COMPRESSION compression scheme for NAR uploads
-#
-# SEEKR_CHAIN_NIX_CLOSURE in env (not just script-baked) lets
-# _detect_closure_hash see it on the build step's role.env and attach the
-# `seekr-chain.nix/closure: <hash>` label so consumer pods' podAffinity
-# preference targets the node that ran the build (warm cache).
-
-# Default when user_config.nix_compression isn't set. zstd: fast,
-# multi-threaded, good ratio. See user_config.NixCompression for allowed values.
-_DEFAULT_NIX_COMPRESSION = "zstd"
-
-_BUILD_SCRIPT_INVOCATION = "sh /seekr-chain/resources/nix-build.sh"
-
-
 def _make_build_step(
     closure_path: str,
     nix_cfg: NixConfig,
@@ -177,26 +186,6 @@ def _build_step_name(closure_path: str) -> str:
     visually distinguishable from user-authored steps.
     """
     return f"nix-build-{nix_utils.closure_hash_from_path(closure_path)[:12]}"
-
-
-# Default runtime image for nix-mode roles. Built from
-# `docker/Dockerfile.nix-runner` via the `Build Nix Runner Image`
-# GitHub Actions workflow; the version pinned here must match the
-# value in `docker/nix-runner.version`.
-#
-# Bump both files together whenever the Dockerfile changes — k8s
-# caches non-:latest tags per-node forever otherwise, and the workflow
-# refuses to overwrite an existing tag.
-_DEFAULT_NIX_RUNNER_IMAGE = "ghcr.io/seekr-technologies/seekr-chain-nix-runner:0.1.1@sha256:5058a650ca2f8c4ac5dde4eeb6ed13a4d7cd037ab886c4738e4502ed83490343"
-
-
-def _get_nix_runner_image() -> str:
-    """Resolve the nix-runner image; fall back to the hardcoded default.
-
-    Same helper is re-exported from :mod:`seekr_chain.backends.argo.jobset`
-    so render-time code doesn't have to reach across modules.
-    """
-    return _user_config.nix_runner_image or _DEFAULT_NIX_RUNNER_IMAGE
 
 
 def _validate_expression_under_code_path(expression: str, code_path: str, role_name: str) -> str:
@@ -261,7 +250,6 @@ def resolve_nix_steps(config: WorkflowConfig) -> WorkflowConfig:
 
     # Resolve closure paths for every nix role (eval if needed) and group
     # missing-but-needed-to-build closures by their path.
-    nix_runner_image: Optional[str] = None
     needed_builds: dict[str, NixConfig] = {}  # closure_path -> representative NixConfig
     # role identity -> resolved closure path. id() is fine here: each role is a
     # distinct pydantic instance and we use this dict only within this call.
@@ -278,10 +266,6 @@ def resolve_nix_steps(config: WorkflowConfig) -> WorkflowConfig:
             )
             role_to_closure[id(role)] = closure
             store_uri = _resolve_store_uri(role.nix, role.name or step.name)
-
-            # Lazy-resolve the runner image only when we actually have a nix role.
-            if nix_runner_image is None:
-                nix_runner_image = _get_nix_runner_image()
 
             if nix_utils.closure_exists(store_uri, closure):
                 logger.debug("nix closure %s already in %s", closure, store_uri)
@@ -328,7 +312,7 @@ def resolve_nix_steps(config: WorkflowConfig) -> WorkflowConfig:
                 closure_path=closure,
                 nix_cfg=repr_nix_cfg,
                 step_name=name,
-                nix_runner_image=nix_runner_image,
+                nix_runner_image=_NIX_RUNNER_IMAGE,
                 store_uri=store_uri,
             )
         )
