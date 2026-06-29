@@ -620,3 +620,191 @@ class TestNixRendering:
         # rather than consuming one.
         init_names = [c["name"] for c in pod["spec"]["initContainers"]]
         assert "chain-nix-init" not in init_names
+
+    def test_two_steps_with_distinct_closures_get_distinct_labels(self, tmp_path, monkeypatch):
+        """Two nix-mode steps with different closures get different labels +
+        each pod's closure podAffinity targets its OWN hash.
+
+        This is the cache-hit mechanism for jobs that mix closures: pod A
+        attracts to nodes where the same closure-A ran (not closure-B).
+        """
+        from seekr_chain.backends.argo import render
+        from seekr_chain.backends.argo.job_info import get_job_info
+        from seekr_chain.backends.argo.jobset import build_jobset_context
+        from seekr_chain.user_config import UserConfig
+        import yaml
+
+        _patch_user_config(monkeypatch, UserConfig(nix_runner_image="img:tag"))
+        monkeypatch.setattr("seekr_chain.nix_utils.closure_exists", lambda *_a, **_k: True)
+
+        cfg = WorkflowConfig(
+            name="t",
+            steps=[
+                {
+                    "name": "a",
+                    "nix": {"closure": "/nix/store/aaaa1111-a", "store": "s3://b", "build": False},
+                    "script": "echo",
+                    "resources": {"cpus_per_node": "1", "mem_per_node": "1Gi", "ephemeral_storage_per_node": "1Gi"},
+                },
+                {
+                    "name": "b",
+                    "nix": {"closure": "/nix/store/bbbb2222-b", "store": "s3://b", "build": False},
+                    "script": "echo",
+                    "resources": {"cpus_per_node": "1", "mem_per_node": "1Gi", "ephemeral_storage_per_node": "1Gi"},
+                },
+            ],
+        )
+        job_info = get_job_info("ab1234", datastore_root="s3://b/")
+        pods = []
+        for i in range(2):
+            _, context = build_jobset_context(
+                workflow_config=cfg,
+                step_index=i,
+                job_info=job_info,
+                workflow_name="ab1234",
+                workflow_secrets=[],
+                interactive=False,
+                assets_path=tmp_path / f"assets-{i}",
+            )
+            manifest = yaml.safe_load(render.render("jobset.yaml.j2", context))
+            pods.append(manifest["spec"]["replicatedJobs"][0]["template"]["spec"]["template"])
+
+        # Each pod carries its own closure hash.
+        assert pods[0]["metadata"]["labels"]["seekr-chain.nix/closure"] == "aaaa1111"
+        assert pods[1]["metadata"]["labels"]["seekr-chain.nix/closure"] == "bbbb2222"
+
+        # Each pod's podAffinity targets its OWN hash, not the other's.
+        def _closure_targets(pod):
+            preferred = pod["spec"]["affinity"]["podAffinity"][
+                "preferredDuringSchedulingIgnoredDuringExecution"
+            ]
+            return [
+                p["podAffinityTerm"]["labelSelector"]["matchLabels"]["seekr-chain.nix/closure"]
+                for p in preferred
+                if "seekr-chain.nix/closure" in p["podAffinityTerm"]["labelSelector"]["matchLabels"]
+            ]
+
+        assert _closure_targets(pods[0]) == ["aaaa1111"]
+        assert _closure_targets(pods[1]) == ["bbbb2222"]
+
+    def test_two_steps_sharing_closure_share_label_and_affinity(self, tmp_path, monkeypatch):
+        """Two steps that consume the same closure get the same label + affinity.
+
+        Same label means the two consumer pods mutually attract: whichever
+        lands first creates the warm node, the second prefers it. Same
+        affinity target means both prefer ANY pod with that closure on
+        node — including the build pod that produced it.
+        """
+        from seekr_chain.backends.argo import render
+        from seekr_chain.backends.argo.job_info import get_job_info
+        from seekr_chain.backends.argo.jobset import build_jobset_context
+        from seekr_chain.user_config import UserConfig
+        import yaml
+
+        _patch_user_config(monkeypatch, UserConfig(nix_runner_image="img:tag"))
+        monkeypatch.setattr("seekr_chain.nix_utils.closure_exists", lambda *_a, **_k: True)
+
+        same = "/nix/store/sharedhash-z"
+        cfg = WorkflowConfig(
+            name="t",
+            steps=[
+                {
+                    "name": s,
+                    "nix": {"closure": same, "store": "s3://b", "build": False},
+                    "script": "echo",
+                    "resources": {"cpus_per_node": "1", "mem_per_node": "1Gi", "ephemeral_storage_per_node": "1Gi"},
+                }
+                for s in ("a", "b")
+            ],
+        )
+        job_info = get_job_info("ab1234", datastore_root="s3://b/")
+        pods = []
+        for i in range(2):
+            _, context = build_jobset_context(
+                workflow_config=cfg,
+                step_index=i,
+                job_info=job_info,
+                workflow_name="ab1234",
+                workflow_secrets=[],
+                interactive=False,
+                assets_path=tmp_path / f"assets-{i}",
+            )
+            manifest = yaml.safe_load(render.render("jobset.yaml.j2", context))
+            pods.append(manifest["spec"]["replicatedJobs"][0]["template"]["spec"]["template"])
+
+        assert (
+            pods[0]["metadata"]["labels"]["seekr-chain.nix/closure"]
+            == pods[1]["metadata"]["labels"]["seekr-chain.nix/closure"]
+            == "sharedhash"
+        )
+        for pod in pods:
+            preferred = pod["spec"]["affinity"]["podAffinity"][
+                "preferredDuringSchedulingIgnoredDuringExecution"
+            ]
+            closure_terms = [
+                p for p in preferred
+                if p["podAffinityTerm"]["labelSelector"]["matchLabels"].get("seekr-chain.nix/closure")
+                    == "sharedhash"
+            ]
+            assert len(closure_terms) == 1
+
+    def test_user_supplied_podaffinity_coexists_with_closure_affinity(self, tmp_path, monkeypatch):
+        """A user-declared pod-affinity rule must not displace the closure term.
+
+        If the user sets workflow.affinity for packing, the rendered pod
+        ends up with BOTH their pack term and the auto-injected closure
+        term in preferredDuringSchedulingIgnoredDuringExecution. The closure
+        cache-hit affordance is additive, not exclusive.
+        """
+        from seekr_chain.backends.argo import render
+        from seekr_chain.backends.argo.job_info import get_job_info
+        from seekr_chain.backends.argo.jobset import build_jobset_context
+        from seekr_chain.user_config import UserConfig
+        import yaml
+
+        _patch_user_config(monkeypatch, UserConfig(nix_runner_image="img:tag"))
+        monkeypatch.setattr("seekr_chain.nix_utils.closure_exists", lambda *_a, **_k: True)
+
+        cfg = WorkflowConfig(
+            name="t",
+            affinity=[{"type": "POD", "direction": "ATTRACT", "group": "pack-it"}],
+            steps=[
+                {
+                    "name": "a",
+                    "nix": {"closure": "/nix/store/userpref-x", "store": "s3://b", "build": False},
+                    "script": "echo",
+                    "resources": {"cpus_per_node": "1", "mem_per_node": "1Gi", "ephemeral_storage_per_node": "1Gi"},
+                },
+            ],
+        )
+        job_info = get_job_info("ab1234", datastore_root="s3://b/")
+        _, context = build_jobset_context(
+            workflow_config=cfg,
+            step_index=0,
+            job_info=job_info,
+            workflow_name="ab1234",
+            workflow_secrets=[],
+            interactive=False,
+            assets_path=tmp_path / "assets",
+        )
+        manifest = yaml.safe_load(render.render("jobset.yaml.j2", context))
+        pod = manifest["spec"]["replicatedJobs"][0]["template"]["spec"]["template"]
+        preferred = pod["spec"]["affinity"]["podAffinity"][
+            "preferredDuringSchedulingIgnoredDuringExecution"
+        ]
+
+        # Pack term: user's group label.
+        pack_terms = [
+            p for p in preferred
+            if "seekr-chain/pg.pack-it" in p["podAffinityTerm"]["labelSelector"].get("matchLabels", {})
+        ]
+        assert len(pack_terms) == 1
+
+        # Closure term: still present alongside the user's term.
+        closure_terms = [
+            p for p in preferred
+            if p["podAffinityTerm"]["labelSelector"].get("matchLabels", {}).get(
+                "seekr-chain.nix/closure"
+            ) == "userpref"
+        ]
+        assert len(closure_terms) == 1
