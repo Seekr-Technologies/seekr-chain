@@ -239,8 +239,6 @@ def resolve_nix_steps(config: WorkflowConfig) -> WorkflowConfig:
     if not nix_roles_by_step:
         return config
 
-    # Cross-field check: nix.expression must point inside code.path. Without
-    # code.path, the flake never reaches the build pod.
     if config.code is None or not config.code.path:
         raise ValueError(
             "nix-mode workflows require `code: {path: ...}` so the flake is "
@@ -248,33 +246,47 @@ def resolve_nix_steps(config: WorkflowConfig) -> WorkflowConfig:
             "/seekr-chain/workspace, which is populated from code.path."
         )
 
-    # Resolve closure paths for every nix role (eval if needed) and group
-    # missing-but-needed-to-build closures by their path.
-    needed_builds: dict[str, NixConfig] = {}  # closure_path -> representative NixConfig
-    # role identity -> resolved closure path. id() is fine here: each role is a
-    # distinct pydantic instance and we use this dict only within this call.
+    role_to_closure, needed_builds = _collect_needed_builds(nix_roles_by_step, config.code.path)
+    if not needed_builds:
+        return config
+
+    return _inject_build_steps(config, nix_roles_by_step, role_to_closure, needed_builds)
+
+
+def _collect_needed_builds(
+    nix_roles_by_step: list[tuple],
+    code_path: str,
+) -> tuple[dict[int, str], dict[str, NixConfig]]:
+    """Walk the nix-mode roles, eval each closure, and return:
+
+    - ``role_to_closure``: id(role) -> resolved /nix/store path
+    - ``needed_builds``: closure_path -> representative NixConfig for roles
+      whose closure is missing from the store and need an auto-build
+
+    Raises if any role has ``build=False`` but the closure isn't in the store.
+    """
     role_to_closure: dict[int, str] = {}
+    needed_builds: dict[str, NixConfig] = {}
 
     for step, nix_roles in nix_roles_by_step:
         for role in nix_roles:
             role_name = role.name or step.name
             resolved_expression = _validate_expression_under_code_path(
-                role.nix.expression, config.code.path, role_name,
+                role.nix.expression, code_path, role_name,
             )
             closure = nix_utils.eval_closure_path(
                 resolved_expression, attr=role.nix.attr, system=role.nix.system,
             )
             role_to_closure[id(role)] = closure
-            store_uri = _resolve_store_uri(role.nix, role.name or step.name)
+            store_uri = _resolve_store_uri(role.nix, role_name)
 
             if nix_utils.closure_exists(store_uri, closure):
                 logger.debug("nix closure %s already in %s", closure, store_uri)
                 continue
 
-            # Missing.
             if not role.nix.build:
                 raise ValueError(
-                    f"role {role.name or step.name!r}: closure {closure} is not in "
+                    f"role {role_name!r}: closure {closure} is not in "
                     f"store {store_uri}, and nix.build=False. Either pre-build/push "
                     "it, set nix.build=True, or check the store URI."
                 )
@@ -287,10 +299,19 @@ def resolve_nix_steps(config: WorkflowConfig) -> WorkflowConfig:
                     closure, store_uri,
                 )
 
-    if not needed_builds:
-        return config
+    return role_to_closure, needed_builds
 
-    # Synthesize the build steps.
+
+def _inject_build_steps(
+    config: WorkflowConfig,
+    nix_roles_by_step: list[tuple],
+    role_to_closure: dict[int, str],
+    needed_builds: dict[str, NixConfig],
+) -> WorkflowConfig:
+    """Synthesize build steps for every entry in ``needed_builds``, then wire
+    each affected user step's ``depends_on`` to the matching build step.
+    Build steps are prepended to ``config.steps``.
+    """
     build_steps: list[SingleRoleStepConfig] = []
     closure_to_build_step_name: dict[str, str] = {}
     existing_step_names = {step.name for step in config.steps}
@@ -329,7 +350,6 @@ def resolve_nix_steps(config: WorkflowConfig) -> WorkflowConfig:
         if added_deps:
             step.depends_on = (step.depends_on or []) + added_deps
 
-    # Insert build steps at the front of the workflow. The DAG ordering is
-    # driven by depends_on, but front-of-list reads more naturally.
+    # Build steps go at the front for readability — depends_on drives execution.
     config.steps = build_steps + list(config.steps)
     return config
