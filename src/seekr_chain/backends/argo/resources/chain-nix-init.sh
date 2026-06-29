@@ -169,3 +169,9 @@ cat <<EOF
   Effective speed:         $SPEED
 ===================================================================
 EOF
+
+# Size-bounded GC of the hostPath warm cache. No-op when under budget.
+# `|| true`: GC failures shouldn't fail the pod — pulling the closure
+# succeeded, the user's pod should run. Worst case is the store stays
+# oversize until the next pod cleans it.
+sh /seekr-chain/resources/nix-gc.sh || true

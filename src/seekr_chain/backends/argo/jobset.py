@@ -30,6 +30,25 @@ _INIT_IMAGE = _user_config.init_image or _DEFAULT_INIT_IMAGE
 
 _DEFAULT_NIX_STORE_VOLUME_KIND = "hostPath"
 _DEFAULT_NIX_STORE_HOSTPATH = "/var/lib/seekr-chain/nix"
+_DEFAULT_NIX_STORE_MAX_BYTES = 50 * 1024**3  # 50 GiB
+
+
+def _parse_size_to_bytes(s: str) -> int:
+    """Parse "50G" / "50GiB" / "1024" → integer bytes. Case-insensitive.
+
+    Accepts both SI (1000-based) and IEC (1024-based) suffixes; for v1 we
+    treat both as 1024-based — it's a soft limit on disk and the difference
+    isn't material.
+    """
+    s = s.strip().upper().rstrip("B").rstrip("I")
+    multipliers = {"": 1, "K": 1024, "M": 1024**2, "G": 1024**3, "T": 1024**4}
+    suffix = ""
+    for k in multipliers:
+        if k and s.endswith(k):
+            suffix = k
+            s = s[: -len(k)]
+            break
+    return int(float(s) * multipliers[suffix])
 
 
 # Script source for the chain-nix-init init container lives at
@@ -144,6 +163,14 @@ def _resolve_nix_role(role_config, code_path: str | None = None) -> dict:
         "init_env": [
             {"name": "SEEKR_CHAIN_NIX_STORE", "value": store_uri},
             {"name": "SEEKR_CHAIN_NIX_CLOSURE", "value": closure},
+            {
+                "name": "SEEKR_CHAIN_NIX_STORE_MAX_BYTES",
+                "value": str(
+                    _parse_size_to_bytes(_user_config.nix_store_max_size)
+                    if _user_config.nix_store_max_size
+                    else _DEFAULT_NIX_STORE_MAX_BYTES
+                ),
+            },
         ],
         "main_env": [
             {"name": "SEEKR_CHAIN_NIX_STORE", "value": store_uri},

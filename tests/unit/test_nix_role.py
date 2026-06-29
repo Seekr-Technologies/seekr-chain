@@ -432,10 +432,21 @@ class TestNixRendering:
         # (containing the nix binary) stays usable for the duration.
         mounts = {m["name"]: m["mountPath"] for m in nix_init["volumeMounts"]}
         assert mounts["nix-store"] == "/nix-shared"
-        # Env carries store + closure for the script to read.
+        # Env carries store + closure + GC size budget for the script to read.
         env_dict = {e["name"]: e.get("value") for e in nix_init["env"] if "value" in e}
         assert env_dict["SEEKR_CHAIN_NIX_STORE"] == "s3://bucket"
         assert env_dict["SEEKR_CHAIN_NIX_CLOSURE"] == "/nix/store/abc12345def-train"
+        # Default size budget: 50 GiB. Used by nix-gc.sh.
+        assert env_dict["SEEKR_CHAIN_NIX_STORE_MAX_BYTES"] == str(50 * 1024**3)
+
+    def test_size_parser_handles_iec_suffixes(self):
+        from seekr_chain.backends.argo.jobset import _parse_size_to_bytes
+        assert _parse_size_to_bytes("50G") == 50 * 1024**3
+        assert _parse_size_to_bytes("50GiB") == 50 * 1024**3
+        assert _parse_size_to_bytes("50 G") == 50 * 1024**3
+        assert _parse_size_to_bytes("100M") == 100 * 1024**2
+        assert _parse_size_to_bytes("1024") == 1024
+        assert _parse_size_to_bytes("1T") == 1024**4
 
     def test_main_uses_image_sh_in_nix_mode(self, tmp_path, monkeypatch):
         """Nix-mode main runs under /bin/sh (the nix-runner provides it).

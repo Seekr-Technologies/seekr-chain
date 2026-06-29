@@ -36,6 +36,7 @@ _ENV_VAR_MAP: dict[str, str] = {
     "SEEKRCHAIN_NIX_RUNNER_IMAGE": "nix_runner_image",
     "SEEKRCHAIN_NIX_STORE_VOLUME_KIND": "nix_store_volume_kind",
     "SEEKRCHAIN_NIX_STORE_HOSTPATH": "nix_store_hostpath",
+    "SEEKRCHAIN_NIX_STORE_MAX_SIZE": "nix_store_max_size",
     "SEEKRCHAIN_NIX_COMPRESSION": "nix_compression",
 }
 
@@ -69,6 +70,13 @@ class UserConfig:
         Host filesystem path when ``nix_store_volume_kind == "hostPath"``.
         Defaults to ``/var/lib/seekr-chain/nix``; created on demand
         (DirectoryOrCreate), so no pre-provisioning DaemonSet is required.
+    nix_store_max_size :
+        Size budget for the hostPath store, parsed as bytes with optional
+        IEC suffix (``"50GiB"``, ``"100G"``, etc.). When chain-nix-init
+        finishes a pull, it checks store size; if above this limit, it
+        deletes oldest closures (by atime) until under. Skips the closure
+        we just fetched. Default: ``"50GiB"``. Set to a huge value (e.g.
+        ``"1TiB"``) to effectively disable GC.
     nix_compression :
         Compression scheme for NARs the build step uploads. Affects only
         new uploads — existing paths keep whichever scheme they were written
@@ -87,6 +95,7 @@ class UserConfig:
     nix_runner_image: str | None = None
     nix_store_volume_kind: str | None = None
     nix_store_hostpath: str | None = None
+    nix_store_max_size: str | None = None
     nix_compression: NixCompression | None = None
 
 
@@ -138,6 +147,7 @@ def _load_config() -> UserConfig:
         nix_runner_image=values.get("nix_runner_image"),
         nix_store_volume_kind=values.get("nix_store_volume_kind"),
         nix_store_hostpath=values.get("nix_store_hostpath"),
+        nix_store_max_size=values.get("nix_store_max_size"),
         nix_compression=values.get("nix_compression"),
     )
 
