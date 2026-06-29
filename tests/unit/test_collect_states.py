@@ -9,7 +9,7 @@ from types import SimpleNamespace
 import pytest
 from kubernetes.client.rest import ApiException
 
-from seekr_chain.backends.argo.argo_workflow import (
+from seekr_chain.backends.k8s.k8s_workflow import (
     _collect_container_states,
     _collect_pod_state,
     _is_jobset_suspended,
@@ -103,10 +103,13 @@ class TestCollectContainerStatesMain:
     def test_none_list(self):
         assert _collect_container_states(None, is_init=False) == []
 
-    def test_unknown_state_raises(self):
+    def test_unknown_state_returns_unknown(self):
+        # K8s guarantees one of waiting/running/terminated is always set (protobuf oneof),
+        # so this path should never be reached in practice. We degrade to UNKNOWN rather
+        # than crashing chain status.
         bad = SimpleNamespace(name="c", state=SimpleNamespace(waiting=None, terminated=None, running=None))
-        with pytest.raises(NotImplementedError):
-            _collect_container_states([bad], is_init=False)
+        states = _collect_container_states([bad], is_init=False)
+        assert states[0].status == ContainerStatus.UNKNOWN
 
 
 # ---------------------------------------------------------------------------

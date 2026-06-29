@@ -7,8 +7,8 @@ into the assets.tar.gz bundle.  No Kubernetes or S3 access is required.
 import json
 from pathlib import Path
 
-import seekr_chain.backends.argo.jobset as _jobset_mod
-from seekr_chain.backends.argo.jobset import (
+import seekr_chain.backends.k8s.jobset as _jobset_mod
+from seekr_chain.backends.k8s.jobset import (
     _compute_peermap,
     _construct_hostfile,
     _write_peermaps_and_scripts,

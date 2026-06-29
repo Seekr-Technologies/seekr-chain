@@ -14,7 +14,8 @@ import time
 from pathlib import Path
 from urllib.parse import urlparse
 
-from seekr_chain.backends.argo.jobset import _DEFAULT_INIT_IMAGE
+from seekr_chain.backends.k8s.jobset import _DEFAULT_INIT_IMAGE
+from seekr_chain.backends.k8s.launch_k8s_workflow import _DEFAULT_CONTROLLER_IMAGE
 
 # When running inside GitLab CI, each job gets a unique cluster so concurrent
 # pipelines on the same runner don't collide.  Locally we keep a fixed name so
@@ -24,12 +25,9 @@ _CLUSTER_SUFFIX = f"-{_CI_JOB_ID}" if _CI_JOB_ID else ""
 
 CLUSTER_NAME = f"seekr-hermetic{_CLUSTER_SUFFIX}"
 CLUSTER_LOCK_PATH = Path(tempfile.gettempdir()) / f"{CLUSTER_NAME}-cluster.lock"
-ARGO_VERSION = "v3.6.7"
 JOBSET_VERSION = "v0.7.2"
-# Argo's install.yaml hardcodes namespace: argo for its own components.
-ARGO_CONTROLLER_NAMESPACE = "argo"
 # Namespace where test workflows are submitted (matches WorkflowConfig.namespace in tests).
-ARGO_WORKFLOW_NAMESPACE = "argo-workflows"
+WORKFLOW_NAMESPACE = "argo-workflows"
 KUBECONFIG_PATH = Path(tempfile.gettempdir()) / f"{CLUSTER_NAME}-kubeconfig.yaml"
 
 # Images pre-pulled and imported into the k3d cluster before tests run.
@@ -43,74 +41,12 @@ KUBECONFIG_PATH = Path(tempfile.gettempdir()) / f"{CLUSTER_NAME}-kubeconfig.yaml
 # registry auth configured in registries.yaml.
 HERMETIC_IMAGES = [
     _DEFAULT_INIT_IMAGE,
+    _DEFAULT_CONTROLLER_IMAGE,
     "fluent/fluent-bit:2.2-debug",
     "ubuntu:24.04",
     "python:3.12-alpine",
     "python:3.13-alpine",
 ]
-
-
-# Grant the Argo workflow-controller SA permission to manage JobSet resources.
-# The SA is named 'argo' and lives in the 'argo' namespace (install.yaml default).
-_JOBSET_RBAC = """\
-apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRole
-metadata:
-  name: argo-jobset-role
-rules:
-- apiGroups: ["jobset.x-k8s.io"]
-  resources: ["jobsets", "jobsets/status"]
-  verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRoleBinding
-metadata:
-  name: argo-jobset-rolebinding
-roleRef:
-  apiGroup: rbac.authorization.k8s.io
-  kind: ClusterRole
-  name: argo-jobset-role
-subjects:
-- kind: ServiceAccount
-  name: argo
-  namespace: argo
-"""
-
-# Grant the Argo executor pods running in argo-workflows the permissions they
-# need to operate. Argo uses the 'default' SA in the workflow namespace unless
-# overridden, so we bind it here.
-#
-# Two bindings are needed:
-#   1. argo-cluster-role  — WorkflowTaskResult (report back to controller),
-#                           pods/log, configmaps, secrets, etc.
-#   2. argo-jobset-role   — create/watch JobSet resources (our step backend)
-_WORKFLOW_EXECUTOR_RBAC = """\
-apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRoleBinding
-metadata:
-  name: argo-workflows-executor-binding
-roleRef:
-  apiGroup: rbac.authorization.k8s.io
-  kind: ClusterRole
-  name: argo-cluster-role
-subjects:
-- kind: ServiceAccount
-  name: default
-  namespace: argo-workflows
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRoleBinding
-metadata:
-  name: argo-workflows-jobset-binding
-roleRef:
-  apiGroup: rbac.authorization.k8s.io
-  kind: ClusterRole
-  name: argo-jobset-role
-subjects:
-- kind: ServiceAccount
-  name: default
-  namespace: argo-workflows
-"""
 
 
 def _run(cmd, env=None, input=None, **kwargs):
@@ -136,7 +72,7 @@ class HermeticCluster:
         # Accept either docker or podman as the container runtime (podman-docker
         # provides a 'docker' shim, but check both in case it's not installed).
         has_runtime = shutil.which("docker") is not None or shutil.which("podman") is not None
-        missing = [t for t in ("k3d", "kubectl", "argo") if shutil.which(t) is None]
+        missing = [t for t in ("k3d", "kubectl") if shutil.which(t) is None]
         if not has_runtime:
             missing.insert(0, "docker or podman")
         if missing:
@@ -145,7 +81,6 @@ class HermeticCluster:
                 "Please install them before running hermetic tests.\n"
                 "  k3d:    https://k3d.io/#installation\n"
                 "  kubectl: https://kubernetes.io/docs/tasks/tools/\n"
-                "  argo:   bash scripts/install-argo.sh"
             )
 
     def _write_registry_config(self) -> Path | None:
@@ -177,31 +112,25 @@ class HermeticCluster:
         return CLUSTER_NAME in result.stdout
 
     def _cluster_is_healthy(self, kubeconfig_path: Path) -> bool:
-        """Return True if both Argo and JobSet controllers are Available (not just present)."""
+        """Return True if the JobSet controller is Available (not just present)."""
         kenv = {**os.environ, "KUBECONFIG": str(kubeconfig_path)}
-        for deployment, ns in [
-            ("workflow-controller", ARGO_CONTROLLER_NAMESPACE),
-            ("jobset-controller-manager", "jobset-system"),
-        ]:
-            r = subprocess.run(
-                [
-                    "kubectl",
-                    "wait",
-                    f"deployment/{deployment}",
-                    "-n",
-                    ns,
-                    "--for=condition=Available",
-                    "--timeout=15s",
-                ],
-                env=kenv,
-                capture_output=True,
-            )
-            if r.returncode != 0:
-                return False
-        return True
+        r = subprocess.run(
+            [
+                "kubectl",
+                "wait",
+                "deployment/jobset-controller-manager",
+                "-n",
+                "jobset-system",
+                "--for=condition=Available",
+                "--timeout=15s",
+            ],
+            env=kenv,
+            capture_output=True,
+        )
+        return r.returncode == 0
 
     def create(self, retries: int = 3) -> Path:
-        """Create k3d cluster, install Argo + JobSet. Returns kubeconfig Path.
+        """Create k3d cluster, install JobSet + seekr-chain RBAC. Returns kubeconfig Path.
 
         Uses a file lock so that parallel pytest-xdist workers don't race to
         create the same cluster simultaneously. Retries on transient failures
@@ -309,46 +238,6 @@ class HermeticCluster:
         else:
             raise RuntimeError(f"API server not reachable after cluster creation.\n{r.stdout}\n{r.stderr}")
 
-        # install.yaml references namespace: argo but doesn't create it.
-        print(f"[hermetic] Creating namespace {ARGO_CONTROLLER_NAMESPACE}...", file=sys.stderr)
-        subprocess.run(["kubectl", "create", "namespace", ARGO_CONTROLLER_NAMESPACE], env=kenv)
-
-        # install.yaml creates its own resources in the 'argo' namespace — do not pass -n.
-        print(
-            f"[hermetic] Installing Argo Workflows {ARGO_VERSION} (namespace: {ARGO_CONTROLLER_NAMESPACE})...",
-            file=sys.stderr,
-        )
-        _run(
-            [
-                "kubectl",
-                "apply",
-                "-f",
-                f"https://github.com/argoproj/argo-workflows/releases/download/{ARGO_VERSION}/install.yaml",
-            ],
-            env=kenv,
-        )
-
-        # Create the namespace where test workflows will be submitted.
-        print(f"[hermetic] Creating workflow namespace {ARGO_WORKFLOW_NAMESPACE}...", file=sys.stderr)
-        subprocess.run(
-            ["kubectl", "create", "namespace", ARGO_WORKFLOW_NAMESPACE],
-            env=kenv,
-        )  # Ignore failure — namespace may already exist
-
-        print("[hermetic] Applying JobSet RBAC for argo SA...", file=sys.stderr)
-        _run(
-            ["kubectl", "apply", "-f", "-"],
-            env=kenv,
-            input=_JOBSET_RBAC.encode(),
-        )
-
-        print("[hermetic] Applying executor RBAC for default SA in argo-workflows...", file=sys.stderr)
-        _run(
-            ["kubectl", "apply", "-f", "-"],
-            env=kenv,
-            input=_WORKFLOW_EXECUTOR_RBAC.encode(),
-        )
-
         print(f"[hermetic] Installing JobSet {JOBSET_VERSION}...", file=sys.stderr)
         _run(
             [
@@ -378,18 +267,26 @@ class HermeticCluster:
             env=kenv,
         )
 
-        print("[hermetic] Waiting for workflow-controller...", file=sys.stderr)
-        _run(
-            [
-                "kubectl",
-                "wait",
-                "deployment/workflow-controller",
-                "-n",
-                ARGO_CONTROLLER_NAMESPACE,
-                "--for=condition=Available",
-                "--timeout=300s",
-            ],
+        # Create the namespace where test workflows will be submitted.
+        print(f"[hermetic] Creating workflow namespace {WORKFLOW_NAMESPACE}...", file=sys.stderr)
+        subprocess.run(
+            ["kubectl", "create", "namespace", WORKFLOW_NAMESPACE],
             env=kenv,
+        )  # Ignore failure — namespace may already exist
+
+        # Install seekr-chain RBAC (ServiceAccount + Role + RoleBinding for the
+        # controller pod). `chain install-sa` prints the manifest to stdout.
+        print(f"[hermetic] Installing seekr-chain RBAC in {WORKFLOW_NAMESPACE}...", file=sys.stderr)
+        rbac_proc = subprocess.run(
+            ["chain", "install-sa"],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        _run(
+            ["kubectl", "apply", "-n", WORKFLOW_NAMESPACE, "-f", "-"],
+            env=kenv,
+            input=rbac_proc.stdout.encode(),
         )
 
         print("[hermetic] Waiting for jobset-controller-manager...", file=sys.stderr)
@@ -423,11 +320,6 @@ class HermeticCluster:
             )
             raise
 
-        # Note: Argo v3 uses the 'emissary' executor by default, which communicates
-        # via the k8s API and does not need containerd socket access. The old
-        # 'containerRuntimeExecutor' configmap field was removed in v3 — patching
-        # it crashes the controller. No configmap patch is needed for k3d.
-
         self._preload_images()
 
         print(f"[hermetic] Cluster ready. Kubeconfig: {KUBECONFIG_PATH}", file=sys.stderr)
@@ -439,8 +331,12 @@ class HermeticCluster:
         Pulling upfront means rate limit failures are visible immediately at
         cluster setup time rather than appearing as silent hangs mid-test.
 
-        Each image is pulled, imported, then pruned before moving to the next
-        so that only one image's tarball is on disk at a time.
+        Each image is pulled, saved to a tarball, imported, then pruned before
+        moving to the next so that only one image's tarball is on disk at a time.
+
+        Failures are warnings, not errors — preloading is an optimisation to avoid
+        Docker Hub rate limits. Tests can still run without it (images will be pulled
+        through the registry auth configured in registries.yaml).
         """
         for image in HERMETIC_IMAGES:
             print(f"[hermetic] Pre-pulling {image}...", file=sys.stderr)
@@ -451,7 +347,33 @@ class HermeticCluster:
                     file=sys.stderr,
                 )
                 continue
-            _run(["k3d", "image", "import", image, "--cluster", CLUSTER_NAME])
+
+            # k3d image import can't resolve digest-pinned refs (image:tag@sha256:...)
+            # by name in the Docker daemon — save to a tarball and import the file
+            # instead. This also avoids any tag-registration quirks from digest pulls.
+            with tempfile.NamedTemporaryFile(suffix=".tar") as tf:
+                save = subprocess.run(
+                    ["docker", "save", image, "-o", tf.name],
+                    capture_output=True,
+                    text=True,
+                )
+                if save.returncode != 0:
+                    print(
+                        f"[hermetic] WARNING: failed to save {image}:\n{save.stderr.strip()}",
+                        file=sys.stderr,
+                    )
+                    continue
+                imp = subprocess.run(
+                    ["k3d", "image", "import", tf.name, "--cluster", CLUSTER_NAME],
+                    capture_output=True,
+                    text=True,
+                )
+                if imp.returncode != 0:
+                    print(
+                        f"[hermetic] WARNING: failed to import {image} into cluster:\n{imp.stderr.strip()}",
+                        file=sys.stderr,
+                    )
+
             subprocess.run(["docker", "image", "rm", image], capture_output=True)
 
     def destroy(self):

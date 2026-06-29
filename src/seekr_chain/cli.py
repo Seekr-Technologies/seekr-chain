@@ -42,9 +42,9 @@ def main():
 @click.option(
     "-b",
     "--backend",
-    default="argo",
+    default="k8s",
     type=click.Choice([b.value.lower() for b in Backend], case_sensitive=False),
-    help="Execution backend (default: argo)",
+    help="Execution backend (default: k8s)",
 )
 def submit(config, follow, interactive, namespace, backend):
     """
@@ -88,7 +88,7 @@ def logs(job_id, step, role, pod_index, attempt, timestamps, follow, all_replica
     if follow:
         import seekr_chain
 
-        workflow = seekr_chain.ArgoWorkflow(id=job_id)
+        workflow = seekr_chain.K8sWorkflow(id=job_id)
         if workflow.get_status().is_finished():
             from seekr_chain.print_logs import print_logs
 
@@ -107,7 +107,7 @@ def status(job_id):
     """Show the status of a workflow."""
     import seekr_chain
 
-    workflow = seekr_chain.ArgoWorkflow(id=job_id)
+    workflow = seekr_chain.K8sWorkflow(id=job_id)
     click.echo(f"{workflow.get_status().value} : {job_id}")
     click.echo(workflow.format_state(workflow.get_detailed_state()))
 
@@ -121,7 +121,7 @@ def wait(job_id, poll_interval):
 
     import seekr_chain
 
-    workflow = seekr_chain.ArgoWorkflow(id=job_id)
+    workflow = seekr_chain.K8sWorkflow(id=job_id)
     status = seekr_chain.wait(workflow, poll_interval=poll_interval)
     click.echo(f"{status.value} : {job_id}")
     if status.is_failed():
@@ -134,7 +134,7 @@ def attach(job_id):
     """Attach to an interactive workflow."""
     import seekr_chain
 
-    workflow = seekr_chain.ArgoWorkflow(id=job_id)
+    workflow = seekr_chain.K8sWorkflow(id=job_id)
     workflow.attach()
 
 
@@ -205,7 +205,7 @@ def delete(job_ids):
     import seekr_chain
 
     for job_id in job_ids:
-        workflow = seekr_chain.ArgoWorkflow(id=job_id)
+        workflow = seekr_chain.K8sWorkflow(id=job_id)
         workflow.delete()
         click.echo(f"Deleted: {job_id}")
 
@@ -217,9 +217,29 @@ def cancel(job_ids):
     import seekr_chain
 
     for job_id in job_ids:
-        workflow = seekr_chain.ArgoWorkflow(id=job_id)
+        workflow = seekr_chain.K8sWorkflow(id=job_id)
         workflow.cancel()
         click.echo(f"Cancelled: {job_id}")
+
+
+@main.command(name="install-sa")
+def install_sa():
+    """Print the one-time install manifest to stdout.
+
+    Pipe it to kubectl to create the seekr-chain ServiceAccount and RBAC
+    in every namespace where jobs will run:
+
+    \b
+        chain install-sa | kubectl apply -n <namespace> -f -
+
+    Save it for GitOps / ArgoCD:
+
+    \b
+        chain install-sa > seekr-chain-rbac.yaml
+    """
+    from seekr_chain.backends.k8s.rbac import rbac_yaml
+
+    click.echo(rbac_yaml(), nl=False)
 
 
 if __name__ == "__main__":
