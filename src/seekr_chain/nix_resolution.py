@@ -368,14 +368,15 @@ def _build_step_name(closure_path: str) -> str:
     return f"nix-build-{nix_utils.closure_hash_from_path(closure_path)[:12]}"
 
 
-# Default runtime image for nix-mode roles. Built from `nix_poc/Dockerfile.nix-runner`.
-# Bump the tag whenever the Dockerfile changes — k8s caches non-:latest tags
-# per-node forever otherwise.
+# Default runtime image for nix-mode roles. Built from
+# `docker/Dockerfile.nix-runner` via the `Build Nix Runner Image`
+# GitHub Actions workflow; the version pinned here must match the
+# value in `docker/nix-runner.version`.
 #
-# Currently points at the Seekr-internal harbor mirror; we'll switch to a
-# `ghcr.io/seekr-technologies/seekr-chain-nix-runner:...` image (analogous to
-# the init image's ghcr.io default) before going public.
-_DEFAULT_NIX_RUNNER_IMAGE = "harbor.ops-01.oci.int.seekr.com/k8-nexus/ntent/seekr-chain/nix-runner:v0.1.5"
+# Bump both files together whenever the Dockerfile changes — k8s
+# caches non-:latest tags per-node forever otherwise, and the workflow
+# refuses to overwrite an existing tag.
+_DEFAULT_NIX_RUNNER_IMAGE = "ghcr.io/seekr-technologies/seekr-chain-nix-runner:0.1.5"
 
 
 def _get_nix_runner_image() -> str:

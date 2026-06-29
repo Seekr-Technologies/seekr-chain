@@ -49,7 +49,7 @@ class UserConfig:
     nix_store: str | None = None
     # OCI image for nix-mode roles. Must contain `nix` + `s5cmd` and have
     # experimental-features + sandbox + filter-syscalls configured (see
-    # nix_poc/Dockerfile.nix-runner for the reference build).
+    # docker/Dockerfile.nix-runner for the reference build).
     nix_runner_image: str | None = None
     # Volume kind for the in-pod /nix store:
     #   "hostPath"  — share across pods on the same node. Closures fetched by

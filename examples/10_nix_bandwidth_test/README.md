@@ -98,7 +98,7 @@ doesn't contain the exact same store paths the image was built against.
 `/bin/bash`, etc. — real binaries that don't traverse `/nix` at all.
 The runner image becomes self-sufficient for the shell/POSIX-tools
 surface area regardless of what the closure volume contains. (Lives in
-`nix_poc/Dockerfile.nix-runner`.)
+`docker/Dockerfile.nix-runner`.)
 
 ### 2. RCCL falls back to TCP — `Failed to open libibverbs.so`
 
