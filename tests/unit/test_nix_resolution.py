@@ -136,19 +136,20 @@ class TestBuildStepInjection:
         # Build step uses nix-runner image and is a plain (non-nix) step.
         assert build.image == "registry.example.com/nix-runner:test"
         assert build.nix is None
-        # Build script does nix build (default store) + two copies: one to
-        # the node's hostPath via local?root=/nix-shared (warm cache for
-        # consumer pods scheduled here via closure-hash podAffinity), one
-        # to the durable s3 cache with zstd compression for speed.
-        assert "nix build --print-out-paths" in build.script
-        assert 'nix copy --to "local?root=/nix-shared"' in build.script
-        assert 'nix copy --to "$COPY_URI"' in build.script
-        assert "compression=zstd" in build.script
-        # Store + closure are injected via env (so _detect_closure_hash can
-        # tag the build pod with the same closure label that consumers use).
+        # Build step invokes the resource script (chain-init downloads it to
+        # /seekr-chain/resources before this step runs).
+        assert build.script == "sh /seekr-chain/resources/nix-build.sh"
+        # Store + closure + flake-ref pieces are injected via env. Storing
+        # SEEKR_CHAIN_NIX_CLOSURE on the env (not just the script) lets
+        # _detect_closure_hash tag the build pod with the same closure label
+        # consumers use.
         assert build.env == {
             "SEEKR_CHAIN_NIX_STORE": "s3://test-bucket",
             "SEEKR_CHAIN_NIX_CLOSURE": train.nix.closure,
+            "SEEKR_CHAIN_NIX_EXPRESSION": "./",
+            "SEEKR_CHAIN_NIX_SYSTEM": "x86_64-linux",
+            "SEEKR_CHAIN_NIX_ATTR": "default",
+            "SEEKR_CHAIN_NIX_COMPRESSION": "zstd",
         }
 
     def test_compression_override(self, monkeypatch, _no_eval_needed):
@@ -173,9 +174,9 @@ class TestBuildStepInjection:
         )
         out = resolve_nix_steps(c)
         build = next(s for s in out.steps if s.name.startswith("nix-build-"))
-        # Uppercase NONE → lowercase none for nix's URI syntax.
-        assert "compression=none" in build.script
-        assert "compression=zstd" not in build.script
+        # Uppercase NONE → lowercase none for nix's URI syntax. The script
+        # reads SEEKR_CHAIN_NIX_COMPRESSION at runtime.
+        assert build.env["SEEKR_CHAIN_NIX_COMPRESSION"] == "none"
 
     def test_dedup_when_two_steps_share_closure(
         self, monkeypatch, _nix_user_config, _no_eval_needed,
