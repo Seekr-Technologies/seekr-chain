@@ -84,12 +84,11 @@ def _resolve_nix_role(role_config) -> dict:
     from seekr_chain import nix_utils
 
     nix = role_config.nix
-    if nix.closure is not None:
-        closure = nix.closure
-    else:
-        # Eval requires nix on the local PATH; the error from nix_utils is
-        # actionable enough — surface it directly.
-        closure = nix_utils.eval_closure_path(nix.expression, attr=nix.attr, system=nix.system)
+    # Eval requires nix on the local PATH; the error from nix_utils is
+    # actionable enough — surface it directly. resolve_nix_steps (called
+    # earlier in the submit path) will already have run eval once; nix's
+    # internal eval store makes the repeat call cheap.
+    closure = nix_utils.eval_closure_path(nix.expression, attr=nix.attr, system=nix.system)
     closure_hash = nix_utils.closure_hash_from_path(closure)
 
     store_uri = nix.store or _user_config.nix_store
@@ -287,10 +286,12 @@ def _detect_closure_hash(role_config) -> str | None:
     """Return the closure hash this role is associated with, or None.
 
     Two sources:
-    - Nix-mode roles have it via ``role.nix.closure`` (or evaluated from
-      ``role.nix.expression``, which ``_resolve_nix_role`` handles).
-    - Auto-injected build steps carry it via the ``SEEKR_CHAIN_NIX_CLOSURE``
-      env var (set by ``nix_resolution`` when synthesizing the build step).
+    - Nix-mode roles: evaluated from ``role.nix.expression``. nix's internal
+      eval store makes this cheap on repeat (resolve_nix_steps already eval'd
+      it once during submit-time validation).
+    - Auto-injected build steps carry the closure via the
+      ``SEEKR_CHAIN_NIX_CLOSURE`` env var (set by ``nix_resolution`` when
+      synthesizing the build step).
 
     The hash drives two things on the rendered pod:
     - ``seekr-chain.nix/closure`` label, so other pods needing the same
@@ -299,15 +300,13 @@ def _detect_closure_hash(role_config) -> str | None:
       same label, so consumers prefer nodes where producers ran.
     """
     if role_config.nix is not None:
-        # _resolve_nix_role does the eval-if-needed dance and caches the
-        # closure back into role.nix.closure. Re-evaluate here for safety:
-        # if resolve_nix_steps ran in the submit path the cache is already
-        # populated; if it didn't (e.g. unit-test render path), we may need
-        # to eval. Cheap to do an attribute read here.
-        if role_config.nix.closure is not None:
-            from seekr_chain import nix_utils
-            return nix_utils.closure_hash_from_path(role_config.nix.closure)
-        return None
+        from seekr_chain import nix_utils
+        closure = nix_utils.eval_closure_path(
+            role_config.nix.expression,
+            attr=role_config.nix.attr,
+            system=role_config.nix.system,
+        )
+        return nix_utils.closure_hash_from_path(closure)
     env = role_config.env or {}
     closure_path = env.get("SEEKR_CHAIN_NIX_CLOSURE")
     if closure_path:

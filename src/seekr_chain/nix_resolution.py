@@ -4,9 +4,9 @@ Called from ``launch_argo_workflow`` after config validation, before manifest
 rendering. Responsibilities:
 
 1. For every role with ``nix.expression``, evaluate locally to compute the
-   ``/nix/store/<hash>-<name>`` closure path and cache it back into
-   ``role.nix.closure``. Eval requires ``nix`` on PATH; if it isn't, the
-   error from :mod:`seekr_chain.nix_utils` is surfaced verbatim.
+   ``/nix/store/<hash>-<name>`` closure path. Eval requires ``nix`` on PATH;
+   if it isn't, the error from :mod:`seekr_chain.nix_utils` is surfaced
+   verbatim.
 
 2. For every nix-mode role, check whether its closure is already in the
    configured binary cache. Closures that aren't there *and* have
@@ -101,30 +101,6 @@ def _validate_store_uri(uri: str, role_name: str) -> None:
         )
 
 
-def _resolve_closure_path(nix_cfg: NixConfig, role_name: str) -> str:
-    """Return the closure path, evaluating from `expression` if needed.
-
-    Caches the result back into ``nix_cfg.closure`` so downstream code
-    (jobset rendering) doesn't have to re-evaluate. Eval is pure but it's
-    a subprocess; doing it once at the workflow level keeps things fast.
-    """
-    if nix_cfg.closure is not None:
-        return nix_cfg.closure
-
-    if nix_cfg.expression is None:
-        # NixConfig's validator should have caught this, but defend in depth.
-        raise ValueError(
-            f"role {role_name!r}: nix has neither `expression` nor `closure`"
-        )
-
-    closure = nix_utils.eval_closure_path(
-        nix_cfg.expression, attr=nix_cfg.attr, system=nix_cfg.system,
-    )
-    # Cache for downstream consumers (jobset rendering).
-    nix_cfg.closure = closure
-    return closure
-
-
 # Build step's script source lives at resources/nix-build.sh and gets
 # uploaded with every job. The step invokes it via chain-entrypoint.sh
 # (image-mode wrapper), and reads its config from these env vars set on
@@ -162,17 +138,6 @@ def _make_build_step(
     that this step *creates* the closure, so closure-fetch semantics don't
     apply.
     """
-    if nix_cfg.expression is None:
-        # Only Mode-B steps reach here (Mode A has closure: explicit).
-        # If a user provides only `closure:` and the closure is missing,
-        # we can't build it — they have to pre-build manually.
-        raise ValueError(
-            f"closure {closure_path} is missing from store {store_uri} and "
-            "only `nix.closure:` was provided (no `nix.expression:`). "
-            "Auto-build needs the expression. Either pre-build and push "
-            "manually, or specify `nix.expression`."
-        )
-
     # nix's URI parameter is lowercase; user_config exposes the Literal
     # in uppercase per the seekr-chain convention for one-of options.
     compression = (
@@ -256,10 +221,16 @@ def resolve_nix_steps(config: WorkflowConfig) -> WorkflowConfig:
     # missing-but-needed-to-build closures by their path.
     nix_runner_image: Optional[str] = None
     needed_builds: dict[str, NixConfig] = {}  # closure_path -> representative NixConfig
+    # role identity -> resolved closure path. id() is fine here: each role is a
+    # distinct pydantic instance and we use this dict only within this call.
+    role_to_closure: dict[int, str] = {}
 
     for step, nix_roles in nix_roles_by_step:
         for role in nix_roles:
-            closure = _resolve_closure_path(role.nix, role.name or step.name)
+            closure = nix_utils.eval_closure_path(
+                role.nix.expression, attr=role.nix.attr, system=role.nix.system,
+            )
+            role_to_closure[id(role)] = closure
             store_uri = _resolve_store_uri(role.nix, role.name or step.name)
 
             # Lazy-resolve the runner image only when we actually have a nix role.
@@ -278,7 +249,7 @@ def resolve_nix_steps(config: WorkflowConfig) -> WorkflowConfig:
                     "it, set nix.build=True, or check the store URI."
                 )
 
-            # Mode B with auto-build: schedule one build step per unique closure.
+            # Schedule one build step per unique closure.
             if closure not in needed_builds:
                 needed_builds[closure] = role.nix
                 logger.info(
@@ -320,7 +291,7 @@ def resolve_nix_steps(config: WorkflowConfig) -> WorkflowConfig:
     for step, nix_roles in nix_roles_by_step:
         added_deps: list[str] = []
         for role in nix_roles:
-            closure = role.nix.closure  # already cached by _resolve_closure_path
+            closure = role_to_closure[id(role)]
             if closure in closure_to_build_step_name:
                 build_name = closure_to_build_step_name[closure]
                 if build_name not in (step.depends_on or []) and build_name not in added_deps:

@@ -27,9 +27,7 @@ logger = logging.getLogger(__name__)
 class NixNotInstalledError(RuntimeError):
     """Raised when ``nix`` is required on the submit machine but isn't on PATH.
 
-    Users hitting this either need to install nix locally
-    (https://nixos.org/download), or set ``nix.build = false`` AND supply
-    ``nix.closure`` explicitly so seekr-chain never has to evaluate.
+    Install from https://nixos.org/download.
     """
 
 
@@ -90,8 +88,7 @@ def eval_closure_path(expression: str, attr: str = "default", system: str = "x86
     if not is_nix_installed():
         raise NixNotInstalledError(
             "nix is required on the submit machine to evaluate `nix.expression`. "
-            "Install from https://nixos.org/download, or skip eval by setting "
-            "`nix.closure` explicitly + `nix.build = false`."
+            "Install from https://nixos.org/download."
         )
 
     expr_path = Path(expression).resolve()

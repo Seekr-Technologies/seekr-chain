@@ -101,8 +101,6 @@ class TestClosureExists:
         )
         out = resolve_nix_steps(c)
         assert [s.name for s in out.steps] == ["a"]
-        # nix.closure should be cached after eval.
-        assert out.steps[0].nix.closure is not None
 
 
 # ---------------------------------------------------------------------------
@@ -143,9 +141,12 @@ class TestBuildStepInjection:
         # SEEKR_CHAIN_NIX_CLOSURE on the env (not just the script) lets
         # _detect_closure_hash tag the build pod with the same closure label
         # consumers use.
+        # _no_eval_needed's fake_eval is deterministic per (expr, attr, system).
+        from seekr_chain import nix_utils
+        expected_closure = nix_utils.eval_closure_path("./")
         assert build.env == {
             "SEEKR_CHAIN_NIX_STORE": "s3://test-bucket",
-            "SEEKR_CHAIN_NIX_CLOSURE": train.nix.closure,
+            "SEEKR_CHAIN_NIX_CLOSURE": expected_closure,
             "SEEKR_CHAIN_NIX_EXPRESSION": "./",
             "SEEKR_CHAIN_NIX_SYSTEM": "x86_64-linux",
             "SEEKR_CHAIN_NIX_ATTR": "default",
@@ -232,13 +233,9 @@ class TestBuildStepInjection:
         _missing(monkeypatch)
 
         # Figure out what name our build step would get for this expression.
-        # Build a quick config to make the eval cache the closure path.
-        probe = WorkflowConfig(
-            name="probe",
-            steps=[{"name": "x", "nix": {"expression": "./"}, "script": "echo"}],
-        )
-        resolve_nix_steps(probe)
-        existing_name = _build_step_name(probe.steps[1].nix.closure)
+        from seekr_chain import nix_utils
+        closure = nix_utils.eval_closure_path("./")
+        existing_name = _build_step_name(closure)
 
         # Now build a workflow where the user already has a step with that name.
         c = WorkflowConfig(
@@ -340,27 +337,6 @@ class TestErrorPaths:
         out = resolve_nix_steps(c)
         build = next(s for s in out.steps if s.name.startswith("nix-build-"))
         assert build.image == _DEFAULT_NIX_RUNNER_IMAGE
-
-    def test_closure_only_with_missing_errors(self, monkeypatch, _nix_user_config):
-        """nix.closure: set (no expression), and the closure is missing -> can't
-        auto-build because we have no expression to evaluate."""
-        from seekr_chain.nix_resolution import resolve_nix_steps
-
-        _missing(monkeypatch)
-
-        c = WorkflowConfig(
-            name="t",
-            steps=[
-                {
-                    "name": "a",
-                    "nix": {"closure": "/nix/store/abc-x"},
-                    "script": "echo",
-                },
-            ],
-        )
-        with pytest.raises(ValueError, match="no `nix.expression"):
-            resolve_nix_steps(c)
-
 
 class TestStoreUriValidation:
     def test_s3_with_prefix_rejected(self, monkeypatch, _no_eval_needed):

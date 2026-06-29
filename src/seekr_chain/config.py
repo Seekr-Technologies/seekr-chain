@@ -236,62 +236,45 @@ class NixConfig(BaseModel):
     """Use a nix closure as the runtime instead of a Docker image.
 
     The role's container runs a minimal "nix-runner" OCI image that holds nix
-    + s5cmd. At pod startup it pulls the closure from the configured
-    seekr-fs store into ``/nix/store`` and runs the user script with the
-    closure's ``bin/`` on PATH. Image distribution shifts from
-    ``docker pull`` (sequential layer extract) to ``nix copy --from``
-    (per-path parallel fetches with cross-image deduplication).
+    + s5cmd. At pod startup it pulls the closure from the configured binary
+    cache into ``/nix/store`` and runs the user script with the closure's
+    ``bin/`` on PATH. Image distribution shifts from ``docker pull``
+    (sequential layer extract) to ``nix copy --from`` (per-path parallel
+    fetches with cross-image deduplication).
 
-    The runtime accepts either:
-
-    - **expression**: a path to a ``.nix`` file or a flake directory. At
-      submit time seekr-chain evaluates ``<expression>#<attr>.outPath``
-      locally (requires ``nix`` on the submit machine) to compute the
-      content-addressed closure path. If the closure is missing from the
-      store and ``build=True`` (default), seekr-chain injects a build step
-      into the DAG that runs ``nix build`` + ``nix copy --to`` against the
-      store.
-    - **closure**: an absolute ``/nix/store/<hash>-<name>`` path provided
-      explicitly by the user. No eval, no build. The pod pulls and runs as
-      long as the closure exists in the store.
+    At submit time seekr-chain evaluates ``<expression>#<attr>.outPath``
+    locally (requires ``nix`` on the submit machine) to compute the
+    content-addressed closure path. If the closure is missing from the
+    store and ``build=True`` (default), seekr-chain injects a build step
+    into the DAG that runs ``nix build`` + ``nix copy --to`` against the
+    store.
 
     Parameters
     ----------
-    expression : Path to a .nix file or flake directory (mutually exclusive with closure).
+    expression : Path to a flake directory or ``.nix`` file, relative to
+        ``code.path``. Same string is used at submit time (for eval) and
+        inside the build pod (for ``nix build``).
     attr : Attribute path within the expression to materialize (default: ``"default"``).
     system : Target system for the closure (default: ``"x86_64-linux"``).
-    closure : Pre-computed /nix/store path (mutually exclusive with expression).
-    store : Seekr-fs URI for the binary cache (e.g. ``s3://bucket/nix-cache``).
-        Defaults to ``~/.seekrchain.toml``'s ``nix_store``.
+    store : URI for the binary cache (e.g. ``s3://bucket``). Any nix store
+        type works; see https://nix.dev/manual/nix/2.26/store/types/. Defaults
+        to ``~/.seekrchain.toml``'s ``nix_store``.
     build : Whether to auto-build a missing closure by injecting a build step
         into the DAG. Set ``False`` to fail at submit time if the closure
-        isn't already in the store — useful when the submit machine doesn't
-        have ``nix`` and you want to enforce "must be pre-built" semantics.
+        isn't already in the store — useful to enforce "must be pre-built"
+        semantics for some workflows.
+    build_resources : Resources for the auto-injected build step. Defaults are
+        modest (4 CPU / 16 GiB RAM / 0 GPU) — fine for small python closures;
+        large native builds (pytorch from source, flash-attn) want much more
+        and should set this explicitly.
     """
 
-    expression: Optional[str] = None
+    expression: str
     attr: str = "default"
     system: str = "x86_64-linux"
-    closure: Optional[str] = None
     store: Optional[str] = None
     build: bool = True
-    # Resources for the auto-injected in-cluster build step. Defaults are
-    # modest (4 CPU / 16 GiB RAM / 0 GPU) — fine for small python closures;
-    # large native builds (pytorch from source, flash-attn) want much more
-    # and should set this explicitly.
     build_resources: Optional[ResourceConfig] = None
-
-    @pydantic.model_validator(mode="after")
-    def _check_expr_or_closure(self) -> Self:
-        if (self.expression is None) == (self.closure is None):
-            raise ValueError(
-                "nix: must specify exactly one of `expression` or `closure`"
-            )
-        if self.closure is not None and not self.closure.startswith("/nix/store/"):
-            raise ValueError(
-                f"nix.closure must be an absolute /nix/store/... path; got {self.closure!r}"
-            )
-        return self
 
 
 class RoleSpecConfig(BaseModel):

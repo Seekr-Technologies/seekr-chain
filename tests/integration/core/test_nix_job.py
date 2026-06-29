@@ -1,16 +1,11 @@
 """Integration tests for nix-mode workflows.
 
-Covers two paths:
-- ``test_build_then_warm`` — closure missing → in-cluster build + s3 push,
-  then a second submit hits the cache and skips the build step. Verifies
-  the cache-hit contract end-to-end against the hermetic minio store.
-- ``test_build_false_missing_closure_fails_at_submit`` — submit-time
-  validation: ``build=False`` plus a closure that isn't in the store
-  raises before any pod is created.
+``test_build_then_warm`` — closure missing → in-cluster build + s3 push,
+then a second submit hits the cache and skips the build step. Verifies
+the cache-hit contract end-to-end against the hermetic minio store.
 
-The first test needs ``nix`` locally to evaluate the closure hash at
-submit time; we skip when nix is absent. The second uses an explicit
-``nix.closure`` path so it doesn't need nix on PATH.
+Needs ``nix`` locally to evaluate the closure hash at submit time; we
+skip when nix is absent.
 """
 
 import platform
@@ -134,27 +129,3 @@ class TestNixMode:
         assert_nested_match(logs2["step=step"], {
             "index=0": {"attempt=0": ["Hello, world!", ""]},
         })
-
-    def test_build_false_missing_closure_fails_at_submit(self):
-        """``build=False`` + closure absent → submit-time ValueError, no pods.
-
-        Doesn't need nix on the runner: nix.closure is explicit so no eval
-        runs; the validation is a single s3 HEAD against the empty cache.
-        """
-        config = seekr_chain.WorkflowConfig.model_validate({
-            "name": "test-nix-missing",  # overridden by patch_configs_for_testing
-            "namespace": "argo-workflows",
-            "steps": [{
-                "name": "step",
-                "nix": {
-                    # 32-char hash that won't be in the cache.
-                    "closure": "/nix/store/" + "z" * 32 + "-fake",
-                    "store": "s3://seekr-chain-test",
-                    "build": False,
-                },
-                "script": "echo unreachable",
-            }],
-        })
-
-        with pytest.raises(ValueError, match="not in store"):
-            seekr_chain.launch_argo_workflow(config)

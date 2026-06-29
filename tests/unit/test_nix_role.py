@@ -3,8 +3,8 @@
 Validates:
 - WorkflowConfig parsing accepts a step with ``nix:`` (and rejects when
   both/neither of {image, nix} are set).
-- _build_role_context produces the right image / step_args / env when a
-  role has nix.closure set (no eval needed).
+- _build_role_context produces the right image / step_args / env for a
+  nix-mode role.
 - nix.build=False + missing closure raises at submit-time.
 """
 
@@ -16,34 +16,35 @@ from pydantic import ValidationError
 from seekr_chain.config import NixConfig, WorkflowConfig
 
 
+def _mock_eval(monkeypatch, closure_path: str):
+    """Stub eval_closure_path to return a fixed closure path.
+
+    Lets rendering tests run without nix on PATH while still asserting on
+    a specific hash via the returned /nix/store/<hash>-<name>.
+    """
+    monkeypatch.setattr(
+        "seekr_chain.nix_utils.eval_closure_path",
+        lambda *_a, **_k: closure_path,
+    )
+
+
 # ---------------------------------------------------------------------------
 # Schema validation
 # ---------------------------------------------------------------------------
 
 
 class TestNixConfigSchema:
-    def test_expression_alone_ok(self):
-        n = NixConfig(expression="./train.nix")
-        assert n.expression == "./train.nix"
+    def test_expression_required(self):
+        # expression is a required str (no default) — pydantic raises.
+        with pytest.raises(ValidationError, match="expression"):
+            NixConfig()
+
+    def test_expression_ok(self):
+        n = NixConfig(expression="./")
+        assert n.expression == "./"
         assert n.attr == "default"
         assert n.system == "x86_64-linux"
         assert n.build is True
-
-    def test_closure_alone_ok(self):
-        n = NixConfig(closure="/nix/store/abc-x")
-        assert n.closure == "/nix/store/abc-x"
-
-    def test_both_expression_and_closure_rejected(self):
-        with pytest.raises(ValidationError, match="exactly one"):
-            NixConfig(expression="./train.nix", closure="/nix/store/abc-x")
-
-    def test_neither_expression_nor_closure_rejected(self):
-        with pytest.raises(ValidationError, match="exactly one"):
-            NixConfig()
-
-    def test_closure_must_be_store_path(self):
-        with pytest.raises(ValidationError, match="/nix/store"):
-            NixConfig(closure="./not-a-store-path")
 
 
 class TestRoleSpecImageXorNix:
@@ -59,7 +60,7 @@ class TestRoleSpecImageXorNix:
             steps=[
                 {
                     "name": "a",
-                    "nix": {"closure": "/nix/store/abc-x"},
+                    "nix": {"expression": "./"},
                     "script": "echo",
                 }
             ],
@@ -73,7 +74,7 @@ class TestRoleSpecImageXorNix:
                     {
                         "name": "a",
                         "image": "ubuntu",
-                        "nix": {"closure": "/nix/store/abc-x"},
+                        "nix": {"expression": "./"},
                         "script": "echo",
                     }
                 ],
@@ -135,16 +136,14 @@ def _closure_present(monkeypatch):
 
 
 class TestResolveNixRole:
-    def test_closure_path_used_verbatim(self, _user_config_with_nix_image, _closure_present):
+    def test_expression_evaluated_into_env(self, monkeypatch, _user_config_with_nix_image, _closure_present):
         from seekr_chain.backends.argo.jobset import _resolve_nix_role
         from seekr_chain.config import RoleSpecConfig
 
+        _mock_eval(monkeypatch, "/nix/store/jppn-foo")
         role = RoleSpecConfig(
             name="train",
-            nix=NixConfig(
-                closure="/nix/store/jppn-foo",
-                store="s3://bucket/nix-cache",
-            ),
+            nix=NixConfig(expression="./", store="s3://bucket/nix-cache"),
             script="echo",
         )
         result = _resolve_nix_role(role)
@@ -182,9 +181,10 @@ class TestResolveNixRole:
                 nix_runner_image="img:tag",
             ),
         )
+        _mock_eval(monkeypatch, "/nix/store/abc-x")
         role = RoleSpecConfig(
             name="train",
-            nix=NixConfig(closure="/nix/store/abc-x"),  # no store= override
+            nix=NixConfig(expression="./"),  # no store= override
             script="echo",
         )
         assert _resolve_nix_role(role)["store_uri"] == "s3://default-bucket/cache"
@@ -195,9 +195,10 @@ class TestResolveNixRole:
         from seekr_chain.user_config import UserConfig
 
         _patch_user_config(monkeypatch, UserConfig(nix_runner_image="img"))
+        _mock_eval(monkeypatch, "/nix/store/abc-x")
         role = RoleSpecConfig(
             name="train",
-            nix=NixConfig(closure="/nix/store/abc-x"),
+            nix=NixConfig(expression="./"),
             script="echo",
         )
         with pytest.raises(ValueError, match="nix.store"):
@@ -212,9 +213,10 @@ class TestResolveNixRole:
         from seekr_chain.user_config import UserConfig
 
         _patch_user_config(monkeypatch, UserConfig(nix_store="s3://x"))
+        _mock_eval(monkeypatch, "/nix/store/abc-x")
         role = RoleSpecConfig(
             name="train",
-            nix=NixConfig(closure="/nix/store/abc-x"),
+            nix=NixConfig(expression="./"),
             script="echo",
         )
         assert _resolve_nix_role(role)["image"] == _DEFAULT_NIX_RUNNER_IMAGE
@@ -224,10 +226,10 @@ class TestResolveNixRole:
     ):
         """build=True + missing closure: _resolve_nix_role doesn't error.
 
-        With slice C, resolve_nix_steps runs before rendering and either
-        confirms the closure exists or schedules a build step that will
-        create it. By the time _resolve_nix_role runs, the closure-presence
-        contract is the caller's responsibility, not this function's.
+        resolve_nix_steps runs before rendering and either confirms the
+        closure exists or schedules a build step that will create it. By
+        the time _resolve_nix_role runs, the closure-presence contract is
+        the caller's responsibility.
         """
         from seekr_chain.backends.argo.jobset import _resolve_nix_role
         from seekr_chain.config import RoleSpecConfig
@@ -235,10 +237,11 @@ class TestResolveNixRole:
         # Even with closure_exists returning False, no error — render-time
         # is no longer the right place to check.
         monkeypatch.setattr("seekr_chain.nix_utils.closure_exists", lambda *_a, **_k: False)
+        _mock_eval(monkeypatch, "/nix/store/abc-x")
 
         role = RoleSpecConfig(
             name="train",
-            nix=NixConfig(closure="/nix/store/abc-x", store="s3://bucket", build=True),
+            nix=NixConfig(expression="./", store="s3://bucket", build=True),
             script="echo",
         )
         # Should NOT raise.
@@ -249,16 +252,12 @@ class TestResolveNixRole:
         from seekr_chain.backends.argo.jobset import _resolve_nix_role
         from seekr_chain.config import RoleSpecConfig
 
-        # Pretend the store has nothing.
         monkeypatch.setattr("seekr_chain.nix_utils.closure_exists", lambda *_a, **_k: False)
+        _mock_eval(monkeypatch, "/nix/store/abc-x")
 
         role = RoleSpecConfig(
             name="train",
-            nix=NixConfig(
-                closure="/nix/store/abc-x",
-                store="s3://bucket",
-                build=False,
-            ),
+            nix=NixConfig(expression="./", store="s3://bucket", build=False),
             script="echo",
         )
         with pytest.raises(ValueError, match="not in store"):
@@ -269,22 +268,24 @@ class TestResolveNixRole:
         from seekr_chain.config import RoleSpecConfig
 
         monkeypatch.setattr("seekr_chain.nix_utils.closure_exists", lambda *_a, **_k: True)
+        _mock_eval(monkeypatch, "/nix/store/abc-x")
 
         role = RoleSpecConfig(
             name="train",
-            nix=NixConfig(closure="/nix/store/abc-x", store="s3://bucket", build=False),
+            nix=NixConfig(expression="./", store="s3://bucket", build=False),
             script="echo",
         )
         # Should not raise.
         assert _resolve_nix_role(role)["closure"] == "/nix/store/abc-x"
 
-    def test_returns_closure_hash_for_label(self, _user_config_with_nix_image, _closure_present):
+    def test_returns_closure_hash_for_label(self, monkeypatch, _user_config_with_nix_image, _closure_present):
         from seekr_chain.backends.argo.jobset import _resolve_nix_role
         from seekr_chain.config import RoleSpecConfig
 
+        _mock_eval(monkeypatch, "/nix/store/abc12345-foo")
         role = RoleSpecConfig(
             name="train",
-            nix=NixConfig(closure="/nix/store/abc12345-foo", store="s3://b"),
+            nix=NixConfig(expression="./", store="s3://b"),
             script="echo",
         )
         result = _resolve_nix_role(role)
@@ -292,13 +293,14 @@ class TestResolveNixRole:
         # for the pod's closure label + the closure-affinity term.
         assert result["closure_hash"] == "abc12345"
 
-    def test_default_volume_kind_is_hostpath(self, _user_config_with_nix_image, _closure_present):
+    def test_default_volume_kind_is_hostpath(self, monkeypatch, _user_config_with_nix_image, _closure_present):
         from seekr_chain.backends.argo.jobset import _resolve_nix_role
         from seekr_chain.config import RoleSpecConfig
 
+        _mock_eval(monkeypatch, "/nix/store/abc-x")
         role = RoleSpecConfig(
             name="train",
-            nix=NixConfig(closure="/nix/store/abc-x", store="s3://b"),
+            nix=NixConfig(expression="./", store="s3://b"),
             script="echo",
         )
         result = _resolve_nix_role(role)
@@ -319,9 +321,10 @@ class TestResolveNixRole:
                 nix_store_volume_kind="emptyDir",
             ),
         )
+        _mock_eval(monkeypatch, "/nix/store/abc-x")
         role = RoleSpecConfig(
             name="train",
-            nix=NixConfig(closure="/nix/store/abc-x"),
+            nix=NixConfig(expression="./"),
             script="echo",
         )
         assert _resolve_nix_role(role)["volume_kind"] == "emptyDir"
@@ -340,9 +343,10 @@ class TestResolveNixRole:
                 nix_store_volume_kind="nfs",
             ),
         )
+        _mock_eval(monkeypatch, "/nix/store/abc-x")
         role = RoleSpecConfig(
             name="train",
-            nix=NixConfig(closure="/nix/store/abc-x"),
+            nix=NixConfig(expression="./"),
             script="echo",
         )
         with pytest.raises(ValueError, match="nix_store_volume_kind"):
@@ -374,13 +378,15 @@ def _render_nix_jobset(
         overrides.update(user_config_overrides)
     _patch_user_config(monkeypatch, UserConfig(**overrides))
     monkeypatch.setattr("seekr_chain.nix_utils.closure_exists", lambda *_a, **_k: True)
+    # Stub eval to return the desired closure path so we don't need real nix.
+    _mock_eval(monkeypatch, closure)
 
     cfg = WorkflowConfig(
         name="test-job",
         steps=[
             {
                 "name": "train",
-                "nix": {"closure": closure, "store": store, "build": False},
+                "nix": {"expression": "./", "store": store, "build": False},
                 "script": "echo hi",
                 "resources": {
                     "cpus_per_node": "4",
@@ -635,19 +641,26 @@ class TestNixRendering:
 
         _patch_user_config(monkeypatch, UserConfig(nix_runner_image="img:tag"))
         monkeypatch.setattr("seekr_chain.nix_utils.closure_exists", lambda *_a, **_k: True)
+        # Different expressions resolve to different closures.
+        monkeypatch.setattr(
+            "seekr_chain.nix_utils.eval_closure_path",
+            lambda expression, **_k: (
+                "/nix/store/aaaa1111-a" if expression == "./a" else "/nix/store/bbbb2222-b"
+            ),
+        )
 
         cfg = WorkflowConfig(
             name="t",
             steps=[
                 {
                     "name": "a",
-                    "nix": {"closure": "/nix/store/aaaa1111-a", "store": "s3://b", "build": False},
+                    "nix": {"expression": "./a", "store": "s3://b", "build": False},
                     "script": "echo",
                     "resources": {"cpus_per_node": "1", "mem_per_node": "1Gi", "ephemeral_storage_per_node": "1Gi"},
                 },
                 {
                     "name": "b",
-                    "nix": {"closure": "/nix/store/bbbb2222-b", "store": "s3://b", "build": False},
+                    "nix": {"expression": "./b", "store": "s3://b", "build": False},
                     "script": "echo",
                     "resources": {"cpus_per_node": "1", "mem_per_node": "1Gi", "ephemeral_storage_per_node": "1Gi"},
                 },
@@ -702,14 +715,14 @@ class TestNixRendering:
 
         _patch_user_config(monkeypatch, UserConfig(nix_runner_image="img:tag"))
         monkeypatch.setattr("seekr_chain.nix_utils.closure_exists", lambda *_a, **_k: True)
+        _mock_eval(monkeypatch, "/nix/store/sharedhash-z")
 
-        same = "/nix/store/sharedhash-z"
         cfg = WorkflowConfig(
             name="t",
             steps=[
                 {
                     "name": s,
-                    "nix": {"closure": same, "store": "s3://b", "build": False},
+                    "nix": {"expression": "./", "store": "s3://b", "build": False},
                     "script": "echo",
                     "resources": {"cpus_per_node": "1", "mem_per_node": "1Gi", "ephemeral_storage_per_node": "1Gi"},
                 }
@@ -763,6 +776,7 @@ class TestNixRendering:
 
         _patch_user_config(monkeypatch, UserConfig(nix_runner_image="img:tag"))
         monkeypatch.setattr("seekr_chain.nix_utils.closure_exists", lambda *_a, **_k: True)
+        _mock_eval(monkeypatch, "/nix/store/userpref-x")
 
         cfg = WorkflowConfig(
             name="t",
@@ -770,7 +784,7 @@ class TestNixRendering:
             steps=[
                 {
                     "name": "a",
-                    "nix": {"closure": "/nix/store/userpref-x", "store": "s3://b", "build": False},
+                    "nix": {"expression": "./", "store": "s3://b", "build": False},
                     "script": "echo",
                     "resources": {"cpus_per_node": "1", "mem_per_node": "1Gi", "ephemeral_storage_per_node": "1Gi"},
                 },
