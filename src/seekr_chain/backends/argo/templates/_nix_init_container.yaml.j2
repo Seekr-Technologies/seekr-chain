@@ -1,0 +1,58 @@
+{# chain-nix-init init container: fetch the nix closure into the shared
+   /nix volume before main starts. Mounts at /nix-shared so the image's
+   own /nix (with the nix binary) stays usable. Script source lives at
+   src/seekr_chain/backends/argo/resources/chain-nix-init.sh and is
+   uploaded with the job (chain-init downloads it to /seekr-chain/resources
+   before this container runs — initContainers execute sequentially).
+
+   Rendered into jobset.yaml.j2 under spec.initContainers when role.nix_init
+   is truthy. Expects `role` and `workflow_name` in scope.
+#}
+- name: chain-nix-init
+  image: {{ role.nix_init.image }}
+  command: ["/bin/sh"]
+  args: ["/seekr-chain/resources/chain-nix-init.sh"]
+  env:
+  - name: AWS_ACCESS_KEY_ID
+    valueFrom:
+      secretKeyRef:
+        name: {{ workflow_name }}
+        key: AWS_ACCESS_KEY_ID
+  - name: AWS_SECRET_ACCESS_KEY
+    valueFrom:
+      secretKeyRef:
+        name: {{ workflow_name }}
+        key: AWS_SECRET_ACCESS_KEY
+  - name: AWS_REGION
+    valueFrom:
+      secretKeyRef:
+        name: {{ workflow_name }}
+        key: AWS_REGION
+        optional: true
+  - name: S3_ENDPOINT_URL
+    valueFrom:
+      secretKeyRef:
+        name: {{ workflow_name }}
+        key: S3_ENDPOINT_URL
+        optional: true
+  {% for e in role.nix_init.env %}
+  - name: {{ e.name }}
+    {% if e.kind == 'value' %}
+    value: {{ e.value | tojson }}
+    {% elif e.kind == 'fieldRef' %}
+    valueFrom:
+      fieldRef:
+        fieldPath: {{ e.fieldPath | tojson }}
+    {% elif e.kind == 'secretKeyRef' %}
+    valueFrom:
+      secretKeyRef:
+        name: {{ e.secret_name }}
+        key: {{ e.key }}
+        {% if e.optional %}
+        optional: true
+        {% endif %}
+    {% endif %}
+  {% endfor %}
+  volumeMounts:
+  - name: nix-store
+    mountPath: /nix-shared
