@@ -45,6 +45,9 @@ spec:
               {% for group in pack_groups %}
               seekr-chain/pg.{{ group }}: "true"
               {% endfor %}
+              {% if role.closure_hash %}
+              seekr-chain.nix/closure: {{ role.closure_hash }}
+              {% endif %}
           spec:
             restartPolicy: Never
             hostNetwork: {{ role.host_network | to_yaml_bool }}
@@ -66,6 +69,11 @@ spec:
                 tar -xzf /seekr-chain/assets.tar.gz -C /seekr-chain
                 rm -f /seekr-chain/assets.tar.gz
                 ln -s {{ role.role_asset_path }}/* ./
+                {% if not role.nix_init %}
+                # Image-mode only: user images may be stripped down (no shell,
+                # no POSIX tools), so inject busybox into the workspace. Nix-mode
+                # runs in the seekr-chain-owned nix-runner image which is required
+                # to provide /bin/sh + standard tools, so this injection is skipped.
                 echo "Injecting shell..."
                 cp /bin/busybox /seekr-chain/busybox
                 mkdir /seekr-chain/bin
@@ -76,6 +84,7 @@ spec:
                 ln -sf /seekr-chain/busybox /seekr-chain/bin/head
                 ln -sf /seekr-chain/busybox /seekr-chain/bin/awk
                 ln -sf /seekr-chain/busybox /seekr-chain/bin/cat
+                {% endif %}
                 echo "Relaxing permissions for non-root main container..."
                 # /seekr-chain itself: entrypoint writes logs.txt, .hb, .shutdown, .last_rc here
                 chmod a+rwx /seekr-chain
@@ -121,12 +130,74 @@ spec:
                 valueFrom:
                   fieldRef:
                     fieldPath: "metadata.annotations['jobset.sigs.k8s.io/restart-attempt']"
+            {% if role.nix_init %}
+            # chain-nix-init: fetch the nix closure into the shared /nix volume
+            # before main starts. Mounts the volume at /nix-shared (NOT /nix)
+            # so the image's own /nix (containing the nix binary) stays intact
+            # for this script. The bootstrap-if-empty step seeds the shared
+            # volume with image's nix tooling on first use (per-node for
+            # hostPath; per-pod for emptyDir); afterwards `nix copy --from`
+            # adds just the missing paths.
+            - name: chain-nix-init
+              image: {{ role.nix_init.image }}
+              command: ["/bin/sh", "-c"]
+              args:
+              - |
+                {{ role.nix_init.script | indent(16) }}
+              env:
+              - name: AWS_ACCESS_KEY_ID
+                valueFrom:
+                  secretKeyRef:
+                    name: {{ workflow_name }}
+                    key: AWS_ACCESS_KEY_ID
+              - name: AWS_SECRET_ACCESS_KEY
+                valueFrom:
+                  secretKeyRef:
+                    name: {{ workflow_name }}
+                    key: AWS_SECRET_ACCESS_KEY
+              - name: AWS_REGION
+                valueFrom:
+                  secretKeyRef:
+                    name: {{ workflow_name }}
+                    key: AWS_REGION
+                    optional: true
+              - name: S3_ENDPOINT_URL
+                valueFrom:
+                  secretKeyRef:
+                    name: {{ workflow_name }}
+                    key: S3_ENDPOINT_URL
+                    optional: true
+              {% for e in role.nix_init.env %}
+              - name: {{ e.name }}
+                {% if e.kind == 'value' %}
+                value: {{ e.value | tojson }}
+                {% elif e.kind == 'fieldRef' %}
+                valueFrom:
+                  fieldRef:
+                    fieldPath: {{ e.fieldPath | tojson }}
+                {% elif e.kind == 'secretKeyRef' %}
+                valueFrom:
+                  secretKeyRef:
+                    name: {{ e.secret_name }}
+                    key: {{ e.key }}
+                    {% if e.optional %}
+                    optional: true
+                    {% endif %}
+                {% endif %}
+              {% endfor %}
+              volumeMounts:
+              - name: nix-store
+                mountPath: /nix-shared
+            {% endif %}
             containers:
             - name: main
               image: {{ role.image }}
               securityContext:
                 privileged: {{ role.privileged | to_yaml_bool }}
-              command: ["/seekr-chain/bin/sh", "-c"]
+              # Nix-mode uses the image's /bin/sh (nix-runner provides it).
+              # Image-mode uses the busybox we just injected at /seekr-chain/bin/sh
+              # — so we don't depend on the user's image providing a shell.
+              command: ["{% if role.nix_init %}/bin/sh{% else %}/seekr-chain/bin/sh{% endif %}", "-c"]
               args:
               - {{ role.step_args }}
               workingDir: /seekr-chain/workspace
@@ -165,6 +236,23 @@ spec:
                 mountPath: /dev/shm
               - name: tmp
                 mountPath: /tmp
+              {% if role.nix_volume %}
+              # Shared nix-store volume. Two shapes:
+              #   - Consumer (nix-mode role): mount at /nix with subPath=nix.
+              #     subPath is critical — `nix --store local?root=/nix-shared`
+              #     writes to /nix-shared/nix/store/<hash> on disk, so we surface
+              #     the `nix` subdir at /nix here. Without subPath, main would
+              #     see /nix/nix/store/<hash> and the closure's RPATHs
+              #     (referencing /nix/store/<hash>) would dangle.
+              #   - Builder (auto-injected build step): mount at /nix-shared,
+              #     no subPath. Build script uses --store local?root=/nix-shared
+              #     so writes land at the same on-disk location consumers read.
+              - name: nix-store
+                mountPath: {{ role.nix_volume.mount_path }}
+                {% if role.nix_volume.sub_path %}
+                subPath: {{ role.nix_volume.sub_path }}
+                {% endif %}
+              {% endif %}
               {% for mount in role.pvc_mounts %}
               - name: {{ mount.name }}
                 mountPath: {{ mount.mountPath }}
@@ -242,19 +330,32 @@ spec:
                 {% if not role.shm_unlimited %}
                 sizeLimit: {{ role.shm_size }}
                 {% endif %}
+            {% if role.nix_volume %}
+            # /nix store, shared between chain-nix-init (populates) and main
+            # (consumes). hostPath gives per-node caching across pods; emptyDir
+            # is per-pod (use when cluster blocks hostPath).
+            - name: nix-store
+              {% if role.nix_volume.kind == 'hostPath' %}
+              hostPath:
+                path: {{ role.nix_volume.hostpath }}
+                type: DirectoryOrCreate
+              {% else %}
+              emptyDir: {}
+              {% endif %}
+            {% endif %}
             {% for pvc in role.pvcs %}
             - name: {{ pvc.name }}
               persistentVolumeClaim:
                 claimName: {{ pvc.name }}
             {% endfor %}
-            {% if affinity %}
+            {% if role.affinity %}
             affinity:
-              {% if 'nodeAffinity' in affinity %}
+              {% if 'nodeAffinity' in role.affinity %}
               nodeAffinity:
-                {% if 'requiredDuringSchedulingIgnoredDuringExecution' in affinity['nodeAffinity'] %}
+                {% if 'requiredDuringSchedulingIgnoredDuringExecution' in role.affinity['nodeAffinity'] %}
                 requiredDuringSchedulingIgnoredDuringExecution:
                   nodeSelectorTerms:
-                  {% for term in affinity['nodeAffinity']['requiredDuringSchedulingIgnoredDuringExecution']['nodeSelectorTerms'] %}
+                  {% for term in role.affinity['nodeAffinity']['requiredDuringSchedulingIgnoredDuringExecution']['nodeSelectorTerms'] %}
                   - matchExpressions:
                     {% for expr in term['matchExpressions'] %}
                     - key: {{ expr['key'] }}
@@ -266,9 +367,9 @@ spec:
                     {% endfor %}
                   {% endfor %}
                 {% endif %}
-                {% if 'preferredDuringSchedulingIgnoredDuringExecution' in affinity['nodeAffinity'] %}
+                {% if 'preferredDuringSchedulingIgnoredDuringExecution' in role.affinity['nodeAffinity'] %}
                 preferredDuringSchedulingIgnoredDuringExecution:
-                {% for item in affinity['nodeAffinity']['preferredDuringSchedulingIgnoredDuringExecution'] %}
+                {% for item in role.affinity['nodeAffinity']['preferredDuringSchedulingIgnoredDuringExecution'] %}
                 - weight: {{ item['weight'] }}
                   preference:
                     matchExpressions:
@@ -283,11 +384,11 @@ spec:
                 {% endfor %}
                 {% endif %}
               {% endif %}
-              {% if 'podAffinity' in affinity %}
+              {% if 'podAffinity' in role.affinity %}
               podAffinity:
-                {% if 'preferredDuringSchedulingIgnoredDuringExecution' in affinity['podAffinity'] %}
+                {% if 'preferredDuringSchedulingIgnoredDuringExecution' in role.affinity['podAffinity'] %}
                 preferredDuringSchedulingIgnoredDuringExecution:
-                {% for item in affinity['podAffinity']['preferredDuringSchedulingIgnoredDuringExecution'] %}
+                {% for item in role.affinity['podAffinity']['preferredDuringSchedulingIgnoredDuringExecution'] %}
                 - weight: {{ item['weight'] }}
                   podAffinityTerm:
                     labelSelector:
@@ -298,9 +399,9 @@ spec:
                     topologyKey: {{ item['podAffinityTerm']['topologyKey'] }}
                 {% endfor %}
                 {% endif %}
-                {% if 'requiredDuringSchedulingIgnoredDuringExecution' in affinity['podAffinity'] %}
+                {% if 'requiredDuringSchedulingIgnoredDuringExecution' in role.affinity['podAffinity'] %}
                 requiredDuringSchedulingIgnoredDuringExecution:
-                {% for term in affinity['podAffinity']['requiredDuringSchedulingIgnoredDuringExecution'] %}
+                {% for term in role.affinity['podAffinity']['requiredDuringSchedulingIgnoredDuringExecution'] %}
                 - labelSelector:
                     matchLabels:
                       {% for k, v in term['labelSelector']['matchLabels'].items() %}
@@ -310,11 +411,11 @@ spec:
                 {% endfor %}
                 {% endif %}
               {% endif %}
-              {% if 'podAntiAffinity' in affinity %}
+              {% if 'podAntiAffinity' in role.affinity %}
               podAntiAffinity:
-                {% if 'preferredDuringSchedulingIgnoredDuringExecution' in affinity['podAntiAffinity'] %}
+                {% if 'preferredDuringSchedulingIgnoredDuringExecution' in role.affinity['podAntiAffinity'] %}
                 preferredDuringSchedulingIgnoredDuringExecution:
-                {% for item in affinity['podAntiAffinity']['preferredDuringSchedulingIgnoredDuringExecution'] %}
+                {% for item in role.affinity['podAntiAffinity']['preferredDuringSchedulingIgnoredDuringExecution'] %}
                 - weight: {{ item['weight'] }}
                   podAffinityTerm:
                     labelSelector:
@@ -325,9 +426,9 @@ spec:
                     topologyKey: {{ item['podAffinityTerm']['topologyKey'] }}
                 {% endfor %}
                 {% endif %}
-                {% if 'requiredDuringSchedulingIgnoredDuringExecution' in affinity['podAntiAffinity'] %}
+                {% if 'requiredDuringSchedulingIgnoredDuringExecution' in role.affinity['podAntiAffinity'] %}
                 requiredDuringSchedulingIgnoredDuringExecution:
-                {% for term in affinity['podAntiAffinity']['requiredDuringSchedulingIgnoredDuringExecution'] %}
+                {% for term in role.affinity['podAntiAffinity']['requiredDuringSchedulingIgnoredDuringExecution'] %}
                 - labelSelector:
                     matchLabels:
                       {% for k, v in term['labelSelector']['matchLabels'].items() %}

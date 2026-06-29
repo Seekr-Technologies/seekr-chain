@@ -21,6 +21,7 @@ from seekr_chain.backends.argo.job_info import JobInfo, _resolve_datastore_root,
 from seekr_chain.backends.argo.jobset import _build_jobset_labels, create_jobset_manifest
 from seekr_chain.backends.argo.parse_logs import DATA_SCHEMA_VERSION
 from seekr_chain.config import EnvSource, SecretRefSource, StepConfig
+from seekr_chain.nix_resolution import resolve_nix_steps
 from seekr_chain.symlink import symlink
 from seekr_chain.tar_directory import tar_directory
 
@@ -389,6 +390,11 @@ def launch_argo_workflow(
     """
     if isinstance(config, dict):
         config = WorkflowConfig.model_validate(config)
+
+    # Walk nix-mode roles, evaluate expressions, check the store, and inject
+    # in-cluster build steps for any missing closures. No-op when there are
+    # no nix-mode roles, so this is safe to call unconditionally.
+    config = resolve_nix_steps(config)
 
     s3_client, s3_creds = _get_s3_client_and_creds()
 

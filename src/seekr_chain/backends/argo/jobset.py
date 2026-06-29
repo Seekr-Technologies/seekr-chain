@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 
+import copy
 import json
 import logging
 import textwrap
@@ -17,8 +18,320 @@ from seekr_chain.utils import format_bytes, resolve_image
 
 logger = logging.getLogger(__name__)
 
+from seekr_chain.nix_resolution import (
+    _DEFAULT_NIX_RUNNER_IMAGE,
+    _get_nix_runner_image,
+)
+
 _DEFAULT_INIT_IMAGE = "ghcr.io/seekr-technologies/seekr-chain-init:latest@sha256:f1fc456cffae92eab86c18814f3668c766ab12b69231308083ff128a8d4d0a9c"
 _INIT_IMAGE = _user_config.init_image or _DEFAULT_INIT_IMAGE
+
+
+_DEFAULT_NIX_STORE_VOLUME_KIND = "hostPath"
+_DEFAULT_NIX_STORE_HOSTPATH = "/var/lib/seekr-chain/nix"
+
+
+# Script for the chain-nix-init init container. Reads SEEKR_CHAIN_NIX_STORE +
+# SEEKR_CHAIN_NIX_CLOSURE from its env (set by _resolve_nix_role).
+#
+# Mount layout: this container mounts the shared volume at /nix-shared (NOT
+# /nix), so the image's own /nix — which contains the nix binary plus its
+# transitive deps — stays usable for the duration of this script.
+#
+# `nix --store local?root=/nix-shared` treats /nix-shared as a chroot prefix:
+# a logical store path /nix/store/<hash> is physically written to
+# /nix-shared/nix/store/<hash>. Main mounts the same volume at /nix with
+# subPath="nix", so /nix-shared/nix/store/<hash> surfaces in main as
+# /nix/store/<hash> — exactly where the closure's binaries' RPATHs expect.
+#
+# We deliberately do NOT seed the volume with the image's /nix. nix
+# initializes the local store's schema (db, var/nix/...) on first use, and
+# the main container doesn't need the image's nix tooling — its shell + POSIX
+# utilities are baked in via busybox at /bin/, not via the volume. Skipping
+# the bootstrap means image upgrades can't leave the volume out of sync with
+# the new image's symlink chain, and pod startup pays only the per-node
+# closure pull (one-shot for warm hostPath nodes).
+#
+# `--no-check-sigs` is a v1 shortcut; production should configure signing.
+_NIX_INIT_SCRIPT = """\
+set -e
+{
+  echo 'experimental-features = nix-command flakes'
+  echo 'sandbox = false'
+  echo 'filter-syscalls = false'
+  echo 'download-attempts = 8'
+  # stalled-download-timeout only applies to HTTP/libcurl, not to s3
+  # transport. Set it anyway in case the store URI is changed to http.
+  echo 'stalled-download-timeout = 60'
+} >> /etc/nix/nix.conf
+
+# aws-sdk-cpp timeouts. These ARE honored on s3:// substituters (where
+# nix's internal stalled-download-timeout doesn't reach). 10 min per
+# request gives ~3 MB/s threshold for a 1.65 GB NAR — anything slower
+# is "stuck", not "slow". 10s on connect catches DNS / TCP setup
+# failures fast.
+export AWS_REQUEST_TIMEOUT=600000
+export AWS_CONNECT_TIMEOUT=10000
+
+LOG=/tmp/nix-init.log
+SIZE_BEFORE=$(du -sk /nix-shared 2>/dev/null | awk 'BEGIN{kb=0} {kb=$1+0} END{print kb*1024}')
+START_TIME=$(date +%s)
+
+# Watchdog: monitors /nix-shared size growth. If size doesn't change
+# for STALL_S consecutive seconds, kill the nix process. This is the
+# primary mechanism for detecting hung downloads — measures actual
+# progress, not elapsed wall time, so it doesn't false-alarm on slow-
+# but-progressing pulls.
+#
+# Also enforces an overall MAX_S budget per attempt as a final
+# backstop in case nix gets into a state where it keeps writing but
+# never finishes (unlikely but bounded).
+WATCHDOG_STALL_S=120   # 2 min without growth → kill
+WATCHDOG_MAX_S=1800    # 30 min per attempt regardless → kill
+COPY_ATTEMPTS=3
+
+run_copy() {
+  nix --store "local?root=/nix-shared" copy \\
+      --from "$SEEKR_CHAIN_NIX_STORE" \\
+      --no-check-sigs \\
+      "$SEEKR_CHAIN_NIX_CLOSURE" 2> >(tee -a "$LOG" >&2) &
+  local nix_pid=$!
+
+  (
+    local start=$(date +%s)
+    local last_size=$(du -sk /nix-shared 2>/dev/null | awk 'BEGIN{kb=0} {kb=$1+0} END{print kb*1024}')
+    local stall_at=$start
+    while kill -0 $nix_pid 2>/dev/null; do
+      sleep 30
+      local now=$(date +%s)
+      local cur_size=$(du -sk /nix-shared 2>/dev/null | awk 'BEGIN{kb=0} {kb=$1+0} END{print kb*1024}')
+      if [ "$cur_size" != "$last_size" ]; then
+        stall_at=$now
+        last_size=$cur_size
+      fi
+      local stall_dur=$((now - stall_at))
+      local elapsed=$((now - start))
+      if [ "$stall_dur" -ge "$WATCHDOG_STALL_S" ]; then
+        echo "[watchdog] no progress for ${stall_dur}s, killing nix (pid=$nix_pid)" >&2
+        kill -KILL $nix_pid 2>/dev/null
+        return
+      fi
+      if [ "$elapsed" -ge "$WATCHDOG_MAX_S" ]; then
+        echo "[watchdog] ${elapsed}s exceeded ${WATCHDOG_MAX_S}s budget, killing nix" >&2
+        kill -KILL $nix_pid 2>/dev/null
+        return
+      fi
+    done
+  ) &
+  local watch_pid=$!
+
+  wait $nix_pid
+  local rc=$?
+  kill $watch_pid 2>/dev/null
+  wait $watch_pid 2>/dev/null
+  return $rc
+}
+
+i=0
+while [ $i -lt $COPY_ATTEMPTS ]; do
+  i=$((i + 1))
+  echo "Attempt $i/$COPY_ATTEMPTS: pulling closure $SEEKR_CHAIN_NIX_CLOSURE from $SEEKR_CHAIN_NIX_STORE..."
+  if run_copy; then
+    break
+  fi
+  if [ $i -ge $COPY_ATTEMPTS ]; then
+    echo "Closure pull failed after $COPY_ATTEMPTS attempts. Exiting so k8s can reschedule."
+    exit 1
+  fi
+  echo "Attempt $i failed (stall, timeout, or nix error). Retrying..."
+  sleep 5
+done
+
+# ─────────────────────────────────────────────────────────────────────
+# Pull summary. Distinguishes "had it already" (hostPath warm cache)
+# from "pulled fresh from s3" so the wow moment of "5 GB closure, 0.4s
+# startup" is visible directly in the log.
+# ─────────────────────────────────────────────────────────────────────
+END_TIME=$(date +%s)
+DURATION=$((END_TIME - START_TIME))
+SIZE_AFTER=$(du -sk /nix-shared 2>/dev/null | awk 'BEGIN{kb=0} {kb=$1+0} END{print kb*1024}')
+BYTES_PULLED=$((SIZE_AFTER - SIZE_BEFORE))
+if [ "$BYTES_PULLED" -lt 0 ]; then BYTES_PULLED=0; fi  # paranoia
+
+# Paths copied this run (nix logs one per fetch). Use `|| true` (not
+# `|| echo 0`) because grep -c outputs "0" *and* exits 1 when there are
+# no matches — `|| echo 0` would append a second "0", giving multi-line
+# output and arithmetic syntax errors on busybox ash later.
+PATHS_PULLED=$(grep -c "^copying path '/nix/store/" "$LOG" 2>/dev/null || true)
+PATHS_PULLED=${PATHS_PULLED:-0}
+
+# Closure totals: walk the destination store (where the closure now
+# fully lives) to count paths + sum on-disk sizes.
+CLOSURE_PATHS=$(nix --store "local?root=/nix-shared" path-info \\
+                  --recursive "$SEEKR_CHAIN_NIX_CLOSURE" 2>/dev/null | wc -l)
+CLOSURE_PATHS=${CLOSURE_PATHS:-0}
+CLOSURE_SIZE=$(nix --store "local?root=/nix-shared" path-info \\
+                 --closure-size "$SEEKR_CHAIN_NIX_CLOSURE" 2>/dev/null \\
+                 | awk '{print $2+0}')
+CLOSURE_SIZE=${CLOSURE_SIZE:-0}
+
+PATHS_HIT=$((CLOSURE_PATHS - PATHS_PULLED))
+if [ "$PATHS_HIT" -lt 0 ]; then PATHS_HIT=0; fi
+BYTES_SAVED=$((CLOSURE_SIZE - BYTES_PULLED))
+if [ "$BYTES_SAVED" -lt 0 ]; then BYTES_SAVED=0; fi
+
+if [ "$CLOSURE_PATHS" -gt 0 ]; then
+  HIT_PCT=$(awk "BEGIN { printf \\"%.1f\\", 100 * $PATHS_HIT / $CLOSURE_PATHS }")
+else
+  HIT_PCT="n/a"
+fi
+if [ "$DURATION" -gt 0 ] && [ "$BYTES_PULLED" -gt 0 ]; then
+  SPEED=$(awk "BEGIN { printf \\"%.2f MB/s\\", $BYTES_PULLED / $DURATION / 1048576 }")
+else
+  SPEED="—"
+fi
+
+fmt_bytes() {
+  awk -v b="$1" 'BEGIN {
+    if (b >= 1073741824) printf "%.2f GB", b/1073741824
+    else if (b >= 1048576) printf "%.2f MB", b/1048576
+    else if (b >= 1024) printf "%.2f KB", b/1024
+    else printf "%d B", b
+  }'
+}
+
+cat <<EOF
+
+===================================================================
+  chain-nix-init summary
+===================================================================
+  Closure:                 $SEEKR_CHAIN_NIX_CLOSURE
+  Total closure size:      $(fmt_bytes "$CLOSURE_SIZE")  ($CLOSURE_PATHS paths)
+
+  Already on node:         $PATHS_HIT paths  ($HIT_PCT% hit) — saved $(fmt_bytes "$BYTES_SAVED")
+  Pulled from cache:       $PATHS_PULLED paths,  $(fmt_bytes "$BYTES_PULLED")
+  Duration:                ${DURATION}s
+  Effective speed:         $SPEED
+===================================================================
+EOF
+"""
+
+
+# main container's step_args for nix-mode roles. The closure-fetch happened
+# in chain-nix-init; main exports the closure on PATH + LD_LIBRARY_PATH and
+# runs the normal entrypoint.
+#
+# Why LD_LIBRARY_PATH: nixpkgs-built libraries often dlopen each other
+# without sufficient RUNPATH (e.g. RCCL dlopens `libibverbs.so.1` and
+# `libamdhip64.so`). When the RUNPATH doesn't include the closure's lib
+# dir, dlopen falls back to the system search path and fails. The
+# buildEnv merges all input pkgs' /lib into <closure>/lib, so prepending
+# that dir to LD_LIBRARY_PATH makes the runtime dlopens succeed —
+# unlocking RDMA in multi-node training, among other things.
+_NIX_MAIN_STEP_ARGS = (
+    'export PATH="$SEEKR_CHAIN_NIX_CLOSURE/bin:$PATH"; '
+    'export LD_LIBRARY_PATH="$SEEKR_CHAIN_NIX_CLOSURE/lib:${{LD_LIBRARY_PATH:-}}"; '
+    "exec {entrypoint}"
+)
+
+
+def _resolve_nix_role(role_config) -> dict:
+    """For a role with ``nix:`` set, compute everything the template needs to
+    render the chain-nix-init init container + the simplified main container.
+
+    Returns a dict with these keys:
+
+    ``image``
+        nix-runner OCI image reference (also used for chain-nix-init).
+    ``closure``
+        ``/nix/store/<hash>-<name>`` path.
+    ``closure_hash``
+        32-char hash, used for the pod label + the closure-affinity term.
+    ``store_uri``
+        seekr-fs URI for the binary cache (s3://bucket, oci://..., etc.).
+    ``init_script``
+        Shell script for chain-nix-init (bootstrap + nix copy --from).
+    ``init_env``
+        Env entries (name+value) for chain-nix-init. Just the nix-mode pair;
+        the template adds AWS creds and other secret refs from the workflow.
+    ``main_env``
+        Env entries (name+value) for the main container so user scripts can
+        introspect what closure they're running.
+    ``volume_kind``
+        ``"hostPath"`` or ``"emptyDir"``. Controls the nix-store volume shape.
+    ``hostpath``
+        Host filesystem path used when ``volume_kind == "hostPath"``.
+    """
+    from seekr_chain import nix_utils
+
+    nix = role_config.nix
+    if nix.closure is not None:
+        closure = nix.closure
+    else:
+        # Eval requires nix on the local PATH; the error from nix_utils is
+        # actionable enough — surface it directly.
+        closure = nix_utils.eval_closure_path(nix.expression, attr=nix.attr, system=nix.system)
+    closure_hash = nix_utils.closure_hash_from_path(closure)
+
+    store_uri = nix.store or _user_config.nix_store
+    if not store_uri:
+        raise ValueError(
+            f"role {role_config.name!r}: nix.store is not set and ~/.seekrchain.toml's "
+            "`nix_store` is not configured. Set one or the other (e.g. "
+            "nix_store = \"s3://bucket\")."
+        )
+
+    # build=False sanity check at render time. resolve_nix_steps (called
+    # earlier in the submit path) is the canonical authority for "this
+    # closure is in the store, or we've scheduled a build step that will
+    # produce it." With build=True we trust that scheduling; with
+    # build=False there's no build step, so re-confirm here as a fast
+    # failure rather than waiting for the pod's nix copy --from to 404.
+    if not nix.build and not nix_utils.closure_exists(store_uri, closure):
+        raise ValueError(
+            f"role {role_config.name!r}: closure {closure} is not in store "
+            f"{store_uri}, and nix.build=False. Either pre-build/push it, "
+            "set nix.build=True, or check the store URI."
+        )
+
+    volume_kind = _user_config.nix_store_volume_kind or _DEFAULT_NIX_STORE_VOLUME_KIND
+    if volume_kind not in ("hostPath", "emptyDir"):
+        raise ValueError(
+            f"nix_store_volume_kind must be 'hostPath' or 'emptyDir'; got "
+            f"{volume_kind!r}. Set ~/.seekrchain.toml's nix_store_volume_kind."
+        )
+    hostpath = _user_config.nix_store_hostpath or _DEFAULT_NIX_STORE_HOSTPATH
+
+    return {
+        "image": _get_nix_runner_image(),
+        "closure": closure,
+        "closure_hash": closure_hash,
+        "store_uri": store_uri,
+        "init_script": _NIX_INIT_SCRIPT,
+        "init_env": [
+            {"name": "SEEKR_CHAIN_NIX_STORE", "value": store_uri},
+            {"name": "SEEKR_CHAIN_NIX_CLOSURE", "value": closure},
+        ],
+        "main_env": [
+            {"name": "SEEKR_CHAIN_NIX_STORE", "value": store_uri},
+            {"name": "SEEKR_CHAIN_NIX_CLOSURE", "value": closure},
+            # Point common TLS clients at the closure's CA bundle. nss-cacert
+            # is a transitive dep of anything that does HTTPS (Python requests,
+            # urllib, pip, curl, wget, ...), so this path exists in essentially
+            # any non-trivial closure. We set three env vars to cover the
+            # mainstream lookup paths:
+            #   SSL_CERT_FILE        — Python's stdlib `ssl` module
+            #   REQUESTS_CA_BUNDLE   — requests' Session.merge_environment_settings
+            #   NIX_SSL_CERT_FILE    — nixpkgs-patched curl / openssl / nss
+            # Users with closures missing cacert can override via their step's env:.
+            *[
+                {"name": k, "value": f"{closure}/etc/ssl/certs/ca-bundle.crt"}
+                for k in ("SSL_CERT_FILE", "REQUESTS_CA_BUNDLE", "NIX_SSL_CERT_FILE")
+            ],
+        ],
+        "volume_kind": volume_kind,
+        "hostpath": hostpath,
+    }
 
 
 def _get_pvcs(config) -> tuple[list, list]:
@@ -152,6 +465,70 @@ def _normalize_env(env_list: list[dict]) -> list[dict]:
     return result
 
 
+def _detect_closure_hash(role_config) -> str | None:
+    """Return the closure hash this role is associated with, or None.
+
+    Two sources:
+    - Nix-mode roles have it via ``role.nix.closure`` (or evaluated from
+      ``role.nix.expression``, which ``_resolve_nix_role`` handles).
+    - Auto-injected build steps carry it via the ``SEEKR_CHAIN_NIX_CLOSURE``
+      env var (set by ``nix_resolution`` when synthesizing the build step).
+
+    The hash drives two things on the rendered pod:
+    - ``seekr-chain.nix/closure`` label, so other pods needing the same
+      closure can target this pod's node.
+    - A ``podAffinity`` preference (in :func:`_build_role_context`) on that
+      same label, so consumers prefer nodes where producers ran.
+    """
+    if role_config.nix is not None:
+        # _resolve_nix_role does the eval-if-needed dance and caches the
+        # closure back into role.nix.closure. Re-evaluate here for safety:
+        # if resolve_nix_steps ran in the submit path the cache is already
+        # populated; if it didn't (e.g. unit-test render path), we may need
+        # to eval. Cheap to do an attribute read here.
+        if role_config.nix.closure is not None:
+            from seekr_chain import nix_utils
+            return nix_utils.closure_hash_from_path(role_config.nix.closure)
+        return None
+    env = role_config.env or {}
+    closure_path = env.get("SEEKR_CHAIN_NIX_CLOSURE")
+    if closure_path:
+        from seekr_chain import nix_utils
+        return nix_utils.closure_hash_from_path(closure_path)
+    return None
+
+
+def _merge_affinity_with_closure(base_affinity: dict | None, closure_hash: str | None) -> dict | None:
+    """Combine the workflow-level affinity with a per-role closure-hash term.
+
+    Adds a soft (``preferredDuringSchedulingIgnoredDuringExecution``, weight 50)
+    podAffinity for ``seekr-chain.nix/closure: <hash>`` so the scheduler
+    prefers nodes where another pod with the same closure has run — the
+    "warm node" property. Soft (not required) so that under capacity
+    pressure pods can spread to cold nodes without blocking.
+
+    A deep copy keeps the workflow-level affinity dict (shared across all
+    roles in a step) from being mutated.
+    """
+    if closure_hash is None:
+        return base_affinity
+    affinity = copy.deepcopy(base_affinity) if base_affinity else {}
+    pa = affinity.setdefault("podAffinity", {})
+    pref = pa.setdefault("preferredDuringSchedulingIgnoredDuringExecution", [])
+    pref.append(
+        {
+            "weight": 50,
+            "podAffinityTerm": {
+                "labelSelector": {
+                    "matchLabels": {"seekr-chain.nix/closure": closure_hash}
+                },
+                "topologyKey": "kubernetes.io/hostname",
+            },
+        }
+    )
+    return affinity
+
+
 def _build_role_context(
     role_config,
     workflow_config,
@@ -162,6 +539,7 @@ def _build_role_context(
     interactive: bool,
     step_name: str,
     assets_path: Path,
+    workflow_affinity: dict | None = None,
 ) -> dict:
     """Build the Jinja2 template context dict for a single replicated job (role)."""
     js_pod_name = role_config.name
@@ -195,11 +573,69 @@ def _build_role_context(
     s3_bucket, s3_step_data_prefix = s3_utils.parse_s3_uri(remote_step_data_path)
     upload_timeout = int(workflow_config.logging.upload_timeout.total_seconds())
 
+    # Determine the main container's image + command + nix-mode init + volume.
+    #
+    # Two cases reach into the nix-store volume:
+    #
+    # 1. Consumer (nix-mode role, `role.nix` set): main runs the user's
+    #    script with the closure on PATH. chain-nix-init pulls the closure
+    #    into the volume before main starts. Volume mounts at /nix with
+    #    subPath=nix on main; chain-nix-init writes via --store local?root=
+    #    so files land at /nix-shared/nix/store/<hash> on disk (which surfaces
+    #    in main as /nix/store/<hash>).
+    #
+    # 2. Builder (auto-injected build step from nix_resolution, image-mode
+    #    with SEEKR_CHAIN_NIX_CLOSURE in env): main runs `nix build` +
+    #    `nix copy --to s3`. We mount the same hostPath volume here too, so
+    #    the build's outputs (and substituted build-time deps like gcc /
+    #    stdenv) land on the node. A subsequent consumer pod scheduled to
+    #    the same node by closure-hash podAffinity will then find the
+    #    closure already present and `nix copy --from` will be a no-op.
+    #    Volume mounts at /nix-shared (no subPath) — the build script uses
+    #    --store local?root=/nix-shared to direct writes into the chroot,
+    #    matching the consumer's layout on disk.
+    nix_main_env: list[dict] = []
+    nix_init_ctx: dict | None = None
+    nix_volume_ctx: dict | None = None
+    if role_config.nix is not None:
+        nix_ctx = _resolve_nix_role(role_config)
+        main_image = nix_ctx["image"]
+        nix_main_env = nix_ctx["main_env"]
+        nix_init_ctx = {
+            "image": resolve_image(nix_ctx["image"]),
+            "script": nix_ctx["init_script"],
+            "env": _normalize_env(nix_ctx["init_env"]),
+        }
+        nix_volume_ctx = {
+            "kind": nix_ctx["volume_kind"],
+            "hostpath": nix_ctx["hostpath"],
+            "mount_path": "/nix",
+            "sub_path": "nix",
+        }
+    else:
+        main_image = role_config.image
+        # Builder case: role doesn't have nix: but does set SEEKR_CHAIN_NIX_CLOSURE
+        # in its env (set by nix_resolution._make_build_step). Give it the
+        # hostPath volume at /nix-shared so the build's writes persist on
+        # the node for future consumers.
+        if (role_config.env or {}).get("SEEKR_CHAIN_NIX_CLOSURE"):
+            volume_kind = _user_config.nix_store_volume_kind or _DEFAULT_NIX_STORE_VOLUME_KIND
+            nix_volume_ctx = {
+                "kind": volume_kind,
+                "hostpath": _user_config.nix_store_hostpath or _DEFAULT_NIX_STORE_HOSTPATH,
+                "mount_path": "/nix-shared",
+                "sub_path": None,
+            }
+
     # Main container command
     if interactive:
         timeout = 1 * 60 * 60  # auto-timeout of 1 hour
         logger.warning("Setting auto-timeout of 1 hour")
         step_args = f"sleep {timeout}"
+    elif role_config.nix is not None:
+        step_args = _NIX_MAIN_STEP_ARGS.format(
+            entrypoint=f"{constants.JOB_RESOURCES_PATH}/chain-entrypoint.sh",
+        )
     else:
         step_args = f"{constants.JOB_RESOURCES_PATH}/chain-entrypoint.sh"
 
@@ -227,10 +663,22 @@ def _build_role_context(
         step_name=step_name,
     )
 
+    # Nix-mode env additions appended after the standard env so they don't
+    # override (and so they're visible to chain-entrypoint via env inheritance).
+    if nix_main_env:
+        raw_env = raw_env + nix_main_env
+
+    # Closure-hash label + closure-hash podAffinity term. Applies to both
+    # nix-mode user steps (which CONSUME the closure) and auto-injected
+    # build steps (which PRODUCE it via env-var marker) — same label, so
+    # a user step naturally prefers the node where the build step ran.
+    closure_hash = _detect_closure_hash(role_config)
+    role_affinity = _merge_affinity_with_closure(workflow_affinity, closure_hash)
+
     return {
         "name": js_pod_name,
         "replicas": role_config.resources.num_nodes,
-        "image": resolve_image(role_config.image),
+        "image": resolve_image(main_image),
         "privileged": role_config.resources.security.privileged,
         "resources": _get_step_resources(role_config),
         "env": _normalize_env(raw_env),
@@ -248,6 +696,16 @@ def _build_role_context(
             f'printf \'{{"pod_name":"%s"}}\' $SEEKR_CHAIN_POD_INSTANCE_ID > /tmp/metadata.json'
             f" && s5cmd cp /tmp/metadata.json {remote_md_path}"
         ),
+        # Nix integration — populated only for nix-mode roles, None otherwise.
+        # The template checks `role.nix_init` / `role.nix_volume` and renders
+        # the chain-nix-init init container + nix-store volume conditionally.
+        "nix_init": nix_init_ctx,
+        "nix_volume": nix_volume_ctx,
+        # Closure-hash label + per-role affinity (workflow base + closure term).
+        # Template uses `role.affinity` instead of the top-level `affinity` so
+        # different roles in the same step can have different closure terms.
+        "closure_hash": closure_hash,
+        "affinity": role_affinity,
         # Log sidecar
         "log_sidecar_image": resolve_image("fluent/fluent-bit:2.2-debug"),
         "log_sidecar_s3_bucket": s3_bucket,
@@ -541,6 +999,7 @@ def build_jobset_context(
                 interactive=interactive,
                 step_name=step_name,
                 assets_path=assets_path,
+                workflow_affinity=affinity,
             )
             for role_config in role_configs
         ],

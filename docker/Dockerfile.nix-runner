@@ -1,0 +1,64 @@
+# Bootstrap image for the seekr-chain nix POC.
+#
+# Goal: smallest possible image that can `nix copy --from <cache> <closure>`
+# and then exec into a path under /nix/store. The real environment is fetched
+# from the binary cache at runtime, not baked into the image.
+#
+# In production this image (or a moral equivalent) becomes the only docker
+# image the cluster ever needs to pull for nix-backed jobs.
+
+# Stage 1: extract a static busybox so we can bake it into the final image
+# at /bin/sh + friends. We can't rely on /nix-resident bash for the main
+# container's shell because the chain-nix-init init container mounts a
+# different /nix into the volume — the symlink chain from /bin/sh through
+# /root/.nix-profile into /nix/store/<bash> would dangle in main if the
+# volume's /nix doesn't have the exact same store paths the image does.
+# Static busybox sidesteps the whole problem: /bin/sh is a real, self-
+# contained binary that doesn't traverse /nix at all.
+FROM busybox:1.36-musl AS busybox
+
+FROM nixos/nix:2.21.1
+
+# Enable the modern nix CLI (`nix copy`, `nix run`) and disable build sandboxing.
+# `filter-syscalls = false` is NOT baked into the image: the in-pod init/build
+# scripts rewrite /etc/nix/nix.conf at startup with it (and with sandbox=false)
+# anyway. We don't run any build-graph operations in this Dockerfile, so the
+# default-true filter-syscalls is fine here.
+RUN { \
+        echo 'experimental-features = nix-command flakes'; \
+        echo 'sandbox = false'; \
+    } >> /etc/nix/nix.conf
+
+# Bake a static busybox in for the standard POSIX tools seekr-chain expects
+# in the runtime image (chain-entrypoint.sh's #!/bin/sh shebang plus awk /
+# head / cat / tee / touch / sleep for its built-in logic). Image-mode
+# workflows get these from the user's image; nix-mode workflows get them
+# from us since seekr-chain effectively owns this image.
+COPY --from=busybox /bin/busybox /bin/busybox
+# POSIX tools chain-entrypoint.sh + user scripts expect at /bin. Diagnostic
+# tools (ps, ls, find, grep, ...) are baked in too so `kubectl exec` into a
+# stuck pod has something to work with — debugging nix builds without
+# `ps` is needlessly painful.
+RUN for tool in \
+        sh head awk cat tee touch sleep time \
+        ps ls find grep sed kill df du wc tail less more env which; \
+    do \
+        ln -sf /bin/busybox /bin/$tool; \
+    done
+
+# bash gets a dedicated symlink to the real bash from the nix profile
+# (the nixos/nix base image already has bashInteractive installed there).
+# busybox:1.36-musl does NOT include a `bash` applet — invoking busybox
+# as "bash" gives "applet not found", which breaks any script with a
+# #!/bin/bash shebang (autoconf-generated scripts during nix builds, in
+# particular).
+RUN ln -sf /root/.nix-profile/bin/bash /bin/bash
+
+# nixos/nix sets PATH to /root/.nix-profile/bin + /nix/var/nix/profiles/default/bin
+# only — no /bin. Without /bin in PATH, sh's name-based lookups for the
+# busybox tools above fail (e.g. `time nix copy` reports "time: not found"
+# even though /bin/time exists). chain-entrypoint.sh + user scripts also
+# use awk/head/cat/tee by bare name; ensure they resolve too.
+ENV PATH=/bin:/root/.nix-profile/bin:/nix/var/nix/profiles/default/bin:/nix/var/nix/profiles/default/sbin
+
+# No ENTRYPOINT / CMD — the k8s manifest supplies the command.
