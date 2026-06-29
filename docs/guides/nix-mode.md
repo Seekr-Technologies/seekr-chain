@@ -202,59 +202,36 @@ Nothing else. Everything your job actually needs comes from the closure.
 
 ## Configuration reference
 
-### Per-step (`nix:` block)
+Every field on `nix:` is documented in the auto-generated [Configuration
+Reference → NixConfig](../reference/configuration.md#nixconfig). Global
+defaults (the `nix_store`, `nix_runner_image`, etc. you'd set in
+`~/.seekrchain.toml` or via `SEEKRCHAIN_*` env vars) are documented on
+the same page under **UserConfig**.
+
+A typical nix-mode step:
 
 ```yaml
 steps:
   - name: train
     nix:
-      expression: ./           # required (default: "./")
-      attr: default            # attribute path inside the flake
-      system: x86_64-linux     # target system for the closure
-      store: s3://my-cache     # optional; falls back to user config
-      build: true              # auto-inject build step if closure missing
-      build_resources:         # resources for the auto-injected build step
-        num_nodes: 1
-        cpus_per_node: 8
-        mem_per_node: 32G
-        ephemeral_storage_per_node: 100G
+      expression: ./
+      # attr: default            # default
+      # system: x86_64-linux     # default
+      # store: s3://my-cache     # optional; falls back to user config
+      # build: true              # default — auto-inject build step if missing
+      # build_resources:         # optional — bump for heavy native builds
+      #   cpus_per_node: 32
+      #   mem_per_node: 256G
     script: python train.py
 ```
 
-| Field | Required | Default | Notes |
-|---|---|---|---|
-| `expression` | yes | `"./"` | Path to flake dir (or `.nix` file), **relative to `code.path`**. Absolute paths and `../escape` are rejected at submit. |
-| `attr` | no | `"default"` | Resolves to `packages.<system>.<attr>`. |
-| `system` | no | `"x86_64-linux"` | Override for ARM clusters (`aarch64-linux`). |
-| `store` | no | from user config | URI of the binary cache. Any nix store type works (see <https://nix.dev/manual/nix/2.26/store/types/>). |
-| `build` | no | `true` | When `false`, submit fails if the closure isn't already in the cache. Use to enforce "must be pre-built." |
-| `build_resources` | no | `{cpus: 4, mem: 16G, gpus: 0}` | Override only for builds that need more than the modest defaults (FA, ROCm packages, pytorch from source). |
-
-### Global (`~/.seekrchain.toml` or env vars)
+A typical `~/.seekrchain.toml`:
 
 ```toml
-# Required: where to push/pull closures
 nix_store = "s3://my-cache"
-
-# Optional overrides
-nix_runner_image      = "ghcr.io/me/my-nix-runner:1.0"  # custom runtime image
-nix_compression       = "ZSTD"                           # NAR compression
-nix_store_volume_kind = "hostPath"                       # or "emptyDir"
-nix_store_hostpath    = "/var/lib/seekr-chain/nix"       # node path for warm cache
-nix_store_max_size    = "128GiB"                         # GC trigger
+# nix_store_max_size = "128GiB"   # default
+# nix_compression    = "ZSTD"     # default
 ```
-
-Every field is also settable via `SEEKRCHAIN_*` env vars (e.g.
-`SEEKRCHAIN_NIX_STORE`).
-
-| Setting | Default | Notes |
-|---|---|---|
-| `nix_store` | unset | Required for any nix-mode step. Bare s3 buckets only (`s3://bucket?region=...`); nix's s3 store rejects path prefixes. |
-| `nix_runner_image` | pinned default | OCI image for nix-mode pods. Must contain `nix` + `s5cmd` + the seccomp config. |
-| `nix_compression` | `"ZSTD"` | Per-upload NAR compression. `"NONE"` is faster end-to-end on high-bandwidth storage; `"XZ"` matches cache.nixos.org. |
-| `nix_store_volume_kind` | `"hostPath"` | `"hostPath"` shares the warm cache across pods on a node (default); `"emptyDir"` is per-pod (use when cluster blocks hostPath). |
-| `nix_store_hostpath` | `/var/lib/seekr-chain/nix` | Node path for the hostPath store. Created on demand. |
-| `nix_store_max_size` | `"128GiB"` | GC trigger. When `du /nix-shared` exceeds this, `nix-gc.sh` runs at the end of `chain-nix-init`. |
 
 ## Architecture details
 
