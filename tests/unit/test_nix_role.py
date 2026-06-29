@@ -415,15 +415,14 @@ class TestNixRendering:
         nix_init = next(c for c in pod["spec"]["initContainers"] if c["name"] == "chain-nix-init")
         # Image is the nix-runner image (same as main).
         assert nix_init["image"] == "registry.example.com/nix-runner:test"
-        # Script runs `nix copy --from` against the configured store.
-        assert "nix" in nix_init["args"][0]
-        assert "copy" in nix_init["args"][0]
-        assert "$SEEKR_CHAIN_NIX_STORE" in nix_init["args"][0]
+        # Invokes the resource script that chain-init downloads to /seekr-chain.
+        assert nix_init["command"] == ["/bin/sh"]
+        assert nix_init["args"] == ["/seekr-chain/resources/chain-nix-init.sh"]
         # Mounts the shared volume at /nix-shared so the image's /nix
         # (containing the nix binary) stays usable for the duration.
         mounts = {m["name"]: m["mountPath"] for m in nix_init["volumeMounts"]}
         assert mounts["nix-store"] == "/nix-shared"
-        # Env carries store + closure.
+        # Env carries store + closure for the script to read.
         env_dict = {e["name"]: e.get("value") for e in nix_init["env"] if "value" in e}
         assert env_dict["SEEKR_CHAIN_NIX_STORE"] == "s3://bucket"
         assert env_dict["SEEKR_CHAIN_NIX_CLOSURE"] == "/nix/store/abc12345def-train"

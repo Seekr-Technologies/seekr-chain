@@ -132,18 +132,15 @@ spec:
                     fieldPath: "metadata.annotations['jobset.sigs.k8s.io/restart-attempt']"
             {% if role.nix_init %}
             # chain-nix-init: fetch the nix closure into the shared /nix volume
-            # before main starts. Mounts the volume at /nix-shared (NOT /nix)
-            # so the image's own /nix (containing the nix binary) stays intact
-            # for this script. The bootstrap-if-empty step seeds the shared
-            # volume with image's nix tooling on first use (per-node for
-            # hostPath; per-pod for emptyDir); afterwards `nix copy --from`
-            # adds just the missing paths.
+            # before main starts. Mounts at /nix-shared so the image's own /nix
+            # (with the nix binary) stays usable. Script source lives in the
+            # repo at resources/chain-nix-init.sh and is uploaded with the job
+            # (chain-init downloads it to /seekr-chain/resources before this
+            # container runs — initContainers execute sequentially).
             - name: chain-nix-init
               image: {{ role.nix_init.image }}
-              command: ["/bin/sh", "-c"]
-              args:
-              - |
-                {{ role.nix_init.script | indent(16) }}
+              command: ["/bin/sh"]
+              args: ["/seekr-chain/resources/chain-nix-init.sh"]
               env:
               - name: AWS_ACCESS_KEY_ID
                 valueFrom:
