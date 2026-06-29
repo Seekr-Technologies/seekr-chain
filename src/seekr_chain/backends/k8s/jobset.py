@@ -2,7 +2,6 @@
 
 import json
 import logging
-import stat
 import textwrap
 from pathlib import Path
 from typing import Optional
@@ -467,21 +466,21 @@ def _write_peermaps_and_scripts(role_configs, js_name, step_config, assets_path)
             if role_config.shell:
                 f.write(f"#!{role_config.shell}\n")
             f.write(textwrap.dedent(role_config.script))
-        script_path.chmod(script_path.stat().st_mode | stat.S_IXUSR)
+        script_path.chmod(0o755)
 
         before_script_path = role_path / "before_script.sh"
         with open(before_script_path, "w") as f:
             if role_config.shell:
                 f.write(f"#!{role_config.shell}\n")
             f.write(textwrap.dedent(role_config.before_script or ""))
-        before_script_path.chmod(before_script_path.stat().st_mode | stat.S_IXUSR)
+        before_script_path.chmod(0o755)
 
         after_script_path = role_path / "after_script.sh"
         with open(after_script_path, "w") as f:
             if role_config.shell:
                 f.write(f"#!{role_config.shell}\n")
             f.write(textwrap.dedent(role_config.after_script or ""))
-        after_script_path.chmod(after_script_path.stat().st_mode | stat.S_IXUSR)
+        after_script_path.chmod(0o755)
 
         peermap_path = role_path / "peermap.json"
         with open(peermap_path, "w") as f:

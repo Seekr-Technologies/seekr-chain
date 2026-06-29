@@ -1,8 +1,13 @@
 """Tests for env secret resolution in launch_k8s_workflow."""
 
+import datetime
+from unittest.mock import MagicMock, patch
+
+import kubernetes
 import pytest
 
 from seekr_chain.backends.k8s.launch_k8s_workflow import (
+    _create_secrets,
     _create_workflow_secrets,
     _resolve_env_secrets,
 )
@@ -159,9 +164,58 @@ class TestCreateWorkflowSecrets:
 
     def test_warning_logged_when_skipping(self):
         """A warning is emitted for each s3_creds key suppressed by user config."""
-        from unittest.mock import patch
-
         config = _config_with_secrets({"AWS_ACCESS_KEY_ID": "user-key"})
         with patch("seekr_chain.backends.k8s.launch_k8s_workflow.logger") as mock_logger:
             _create_workflow_secrets(config, "wf-abc", FAKE_S3_CREDS)
         assert mock_logger.warning.called
+
+
+class TestCreateSecretsCleanup:
+    """Stale-secret cleanup is best-effort: missing RBAC must not abort the launch."""
+
+    def test_list_forbidden_warns_and_does_not_raise(self):
+        """If list_namespaced_secret returns 403, warn and skip cleanup."""
+        config = _config_with_secrets(None)
+        mock_v1 = MagicMock()
+        mock_v1.list_namespaced_secret.side_effect = kubernetes.client.exceptions.ApiException(
+            status=403, reason="Forbidden"
+        )
+
+        with (
+            patch(
+                "seekr_chain.backends.k8s.launch_k8s_workflow.k8s_utils.get_core_v1_api",
+                return_value=mock_v1,
+            ),
+            patch("seekr_chain.backends.k8s.launch_k8s_workflow.logger") as mock_logger,
+        ):
+            _create_secrets("wf-1", {}, config)
+
+        assert mock_logger.warning.called
+        mock_v1.delete_namespaced_secret.assert_not_called()
+        # With no secrets to upload, create should also not have been called
+        mock_v1.create_namespaced_secret.assert_not_called()
+
+    def test_list_success_proceeds_to_delete_loop(self):
+        """When list succeeds and an item is older than the cutoff, delete is called."""
+        config = _config_with_secrets(None)
+
+        old_secret = MagicMock()
+        old_secret.metadata.name = "stale-wf"
+        old_secret.metadata.creation_timestamp = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(
+            days=30
+        )
+
+        mock_v1 = MagicMock()
+        mock_v1.list_namespaced_secret.return_value = MagicMock(items=[old_secret])
+
+        with (
+            patch(
+                "seekr_chain.backends.k8s.launch_k8s_workflow.k8s_utils.get_core_v1_api",
+                return_value=mock_v1,
+            ),
+            patch("seekr_chain.backends.k8s.launch_k8s_workflow.logger") as mock_logger,
+        ):
+            _create_secrets("wf-1", {}, config)
+
+        mock_v1.delete_namespaced_secret.assert_called_once_with(name="stale-wf", namespace=config.namespace)
+        assert not mock_logger.warning.called

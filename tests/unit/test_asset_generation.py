@@ -5,7 +5,6 @@ into the assets.tar.gz bundle.  No Kubernetes or S3 access is required.
 """
 
 import json
-import stat
 from pathlib import Path
 
 import seekr_chain.backends.k8s.jobset as _jobset_mod
@@ -250,7 +249,10 @@ class TestScriptGeneration:
         role_path = tmp_path / "step=train"
         for script_name in ("script.sh", "before_script.sh", "after_script.sh"):
             mode = (role_path / script_name).stat().st_mode
-            assert mode & stat.S_IXUSR, f"{script_name} not user-executable"
+            assert mode & 0o555 == 0o555, (
+                f"{script_name} not world-readable/executable (mode={oct(mode)}); "
+                "needed for non-root main containers when init runs as root"
+            )
 
     def test_script_content_written(self, tmp_path):
         config = _single_role_config(script="echo custom-content")

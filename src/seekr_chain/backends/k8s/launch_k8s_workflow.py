@@ -99,7 +99,18 @@ def _create_secrets(workflow_name: str, s3_creds: dict, config: WorkflowConfig):
     cutoff = now - datetime.timedelta(days=max_age_days)
 
     logger.debug("Cleaning up old secrets")
-    resp = v1.list_namespaced_secret(namespace=config.namespace, label_selector=selector)
+    try:
+        resp = v1.list_namespaced_secret(namespace=config.namespace, label_selector=selector)
+    except kubernetes.client.exceptions.ApiException as e:
+        logger.warning(
+            "Skipping stale-secret cleanup: unable to list secrets in namespace %r "
+            "(typically an RBAC permission issue). status=%s reason=%s",
+            config.namespace,
+            e.status,
+            e.reason,
+        )
+        return
+
     for sec in resp.items:
         created = sec.metadata.creation_timestamp
         if created and created < cutoff:

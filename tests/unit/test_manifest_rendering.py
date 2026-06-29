@@ -118,6 +118,43 @@ class TestJobsetTemplateRendering:
         assert [c["name"] for c in init_containers] == ["chain-init"]
         assert init_containers[0]["image"] == _DEFAULT_INIT_IMAGE
 
+    def test_init_container_relaxes_permissions_for_non_root_main(self, tmp_path):
+        """The init container must make /seekr-chain and /seekr-chain/workspace writable
+        for the main container, which may run as a non-root UID. Without this, the
+        entrypoint can't create logs.txt / .hb / etc. and user scripts can't write to
+        their workingDir.
+        """
+        config = _minimal_config()
+        job_info = _fake_job_info()
+
+        _, context = build_jobset_context(
+            workflow_config=config,
+            step_index=0,
+            job_info=job_info,
+            workflow_name="ab1234",
+            workflow_secrets=[],
+            interactive=False,
+            assets_path=tmp_path / "assets",
+        )
+
+        rendered = render.render("jobset.yaml.j2", context)
+        manifest = yaml.safe_load(rendered)
+
+        pod_spec = manifest["spec"]["replicatedJobs"][0]["template"]["spec"]["template"]["spec"]
+        init_script = "\n".join(pod_spec["initContainers"][0]["args"])
+
+        assert "chmod a+rwx /seekr-chain" in init_script, (
+            "init container must chmod /seekr-chain itself so the entrypoint (running as "
+            "the main container's UID) can create logs.txt and heartbeat/shutdown files"
+        )
+        assert "chmod -R a+rwX /seekr-chain/workspace" in init_script, (
+            "init container must chmod /seekr-chain/workspace so user scripts can write to their workingDir"
+        )
+        assert "mkdir -p /seekr-chain/workspace" in init_script, (
+            "init container must ensure /seekr-chain/workspace exists (assets.tar.gz only "
+            "contains it when config.code is set)"
+        )
+
     def test_init_container_has_required_env(self, tmp_path):
         config = _minimal_config()
         job_info = _fake_job_info()
