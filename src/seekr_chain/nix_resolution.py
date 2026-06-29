@@ -376,7 +376,7 @@ def _build_step_name(closure_path: str) -> str:
 # Bump both files together whenever the Dockerfile changes — k8s
 # caches non-:latest tags per-node forever otherwise, and the workflow
 # refuses to overwrite an existing tag.
-_DEFAULT_NIX_RUNNER_IMAGE = "ghcr.io/seekr-technologies/seekr-chain-nix-runner:0.1.5"
+_DEFAULT_NIX_RUNNER_IMAGE = "ghcr.io/seekr-technologies/seekr-chain-nix-runner:0.1.1@sha256:5058a650ca2f8c4ac5dde4eeb6ed13a4d7cd037ab886c4738e4502ed83490343"
 
 
 def _get_nix_runner_image() -> str:
