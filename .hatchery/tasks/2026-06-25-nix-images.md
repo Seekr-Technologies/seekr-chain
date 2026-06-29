@@ -126,10 +126,14 @@ multi-minute docker-image pull.
   sees the build step's env, attaches the same closure-hash label, and
   the same podAffinity preference applies — so consumer pods naturally
   cluster on the node that ran the build.
-- **No GC yet.** The hostPath store grows unbounded. v1 deliberately
-  ships without a GC policy; the warm cache is the win. Size-based GC
-  (delete oldest store paths until under a configurable limit) is a
-  reasonable next step; see Followups.
+- **Size-bounded GC at end of pull.** `chain-nix-init` runs
+  `resources/nix-gc.sh` after a successful pull. If `du -sk /nix-shared`
+  exceeds `SEEKR_CHAIN_NIX_STORE_MAX_BYTES` (default 128 GiB, configurable
+  via `user_config.nix_store_max_size`), it delegates to `nix store gc
+  --max <overage>`. The just-pulled closure is symlinked at
+  `/nix-shared/nix/var/nix/gcroots/seekr-chain/active` so nix's GC
+  protects it + all its transitive deps; everything else is fair game.
+  Best-effort: GC failures (lock contention, etc.) don't fail the pod.
 
 ### Files added / changed
 
@@ -167,10 +171,11 @@ multi-minute docker-image pull.
   pod NEEDS the image's nix tooling, so it mounts the hostPath at
   `/nix-shared` (not `/nix`) and uses `--store local?root=/nix-shared`
   to direct writes into the chroot while keeping image's `/nix` intact.
-- **No GC.** The hostPath at `/var/lib/seekr-chain/nix` accumulates store
-  paths over time. Watch disk usage on cluster nodes; manual cleanup is
-  `nix-store --delete /var/lib/seekr-chain/nix/nix/store/<old-hash>-*`
-  until a policy lands.
+- **GC is per-pod opportunistic, not periodic.** Cleanup runs at the end
+  of `chain-nix-init` only when a pod pulls a closure that pushes the
+  node over budget. A node with no recent pulls keeps its existing
+  closures indefinitely. Set `nix_store_max_size` tight if disk pressure
+  is a concern; otherwise the natural pod churn handles it.
 - **nix's s3 store rejects path prefixes.** Use `s3://bucket?region=...`,
   not `s3://bucket/some/prefix`. seekr-chain validates this at submit
   with a clear error. If you need a prefix, give the cache its own bucket.
@@ -188,12 +193,7 @@ multi-minute docker-image pull.
 1. **HTTP binary cache daemon backed by Seekr-fs / OCI.** Replaces the
    bare-s3 cache with an HTTP service that nix can talk to natively, on
    top of any object storage backend. URL swap; no other code change.
-2. **hostPath GC.** Size-based: above a configurable threshold (suggest
-   50 GiB default via `nix_store_max_size`), enumerate top-level store
-   entries, sort by atime, delete oldest until under threshold. Runs at
-   the end of `chain-nix-init` post-fetch. Skips the just-fetched
-   closure.
-3. **Build-pod mount layout.** Considered: install nix at a non-`/nix`
+2. **Build-pod mount layout.** Considered: install nix at a non-`/nix`
    path in the runner image (e.g. `/nix-shared`), mount hostPath at
    `/nix` proper, copy bootstrap → `/nix` once per node, build directly
    into the real `/nix` store (no `--store local?root=` chroot, no path-
@@ -208,8 +208,48 @@ multi-minute docker-image pull.
    - The actual cost of the current pattern is bounded by closure size,
      not "all of /nix" — only the user's closure lands in hostPath, and
      only on cache-miss builds. Warm-node hits skip the copy entirely.
-4. **Tighter runtime isolation (deferred per review).** hostPath `/nix`
-   exposes other closures on the node alongside the active one. Real
-   isolation cost is one closure-sized copy at pod startup; on local
-   NVMe this is fast. Add as an opt-in third value of
-   `nix_store_volume_kind` if multi-tenant requirements emerge.
+
+3. **Tighter runtime isolation: per-pod `/nix` containing only the
+   declared closure.** Current architecture mounts the node's full
+   hostPath `/nix` into every pod — so a pod can see (and theoretically
+   execute) other closures present on the same node alongside its
+   declared one. Two architectural approaches were spiked in-cluster on
+   2026-06-29 against example 10's 14 GB closure on warm nodes:
+
+   **A. Hardlink into per-pod emptyDir** (`cp -al` from hostPath
+      `/var/lib/seekr-chain/nix` to an emptyDir `/nix-isolated`).
+      Conceptually free: hardlinks share inodes, no data copy, no extra
+      disk usage. **Blocked on this cluster.** Result: `cp -al` raises
+      `EXDEV` (Invalid cross-device link) on every file — hostPath and
+      emptyDir land on different filesystems on these nodes. 0 paths
+      hardlinked, 87696 failures. Would require per-pod hostPath subPaths
+      (under `/var/lib/seekr-chain/nix-pods/<pod-uid>/`) to share a
+      filesystem with the source, which widens per-node hostPath surface
+      area and needs explicit cleanup on pod exit.
+
+   **B. Full `cp -r` into per-pod emptyDir.** Result: 14.38 GB / 221
+      paths copied in **13 s** at 1.15 GB/s sustained on NVMe nodes.
+      Faster than the rough 60-180s "small-file I/O bound" estimate, but
+      still re-adds ~12 s to chain-nix-init's warm-cache path (which is
+      currently ~1-2 s after the fast-path optimization). Also doubles
+      per-pod disk: 14 GB hostPath + 14 GB emptyDir per running pod.
+
+   **C. Anthropic-style bind-mount sidecar.** Long-running sidecar
+      (k8s 1.29+ native sidecar via `restartPolicy: Always` on an init
+      container) bind-mounts only the active closure's paths into a
+      shared volume that main consumes. Requires `privileged: true` on
+      the sidecar (k8s enforces this for `mountPropagation: Bidirectional`).
+      Not spiked in-cluster.
+
+   **Decision (v1): defer all three.** Internal-trust cluster; no
+   observed isolation violation; no incoming requirement. Approach A is
+   architecturally cleanest but the filesystem layout doesn't support
+   it. Approach B is unprivileged but expensive (re-adds the ~12 s
+   warm-cache cost + 2× per-pod disk). Approach C is the most flexible
+   but adds a privileged container to every nix-mode pod (security
+   surface + admission policy work).
+
+   **Revisit triggers**: multi-tenant cluster, security review demand,
+   observed closure-cross-contamination incident, or a workload pattern
+   that benefits from /nix being a clean view of just the declared
+   closure (debugging, reproducibility audit).
