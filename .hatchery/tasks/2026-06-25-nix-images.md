@@ -39,13 +39,16 @@ multi-minute docker-image pull.
   DAG; the user's nix-mode step `depends_on` it. The build step runs on
   the cluster, builds the closure, pushes it to the cache, and exits.
 - The runtime is the `seekr-chain-nix-runner` OCI image (built from
-  `docker/Dockerfile.nix-runner`). It ships nix + s5cmd + nothing else;
-  the user's actual deps land at runtime from the closure.
+  `docker/Dockerfile.nix-runner`). It ships nix + busybox + bash and
+  nothing else; the user's actual deps land at runtime from the closure.
+  nix does its own s3 fetches via aws-sdk-cpp (no separate s3 client
+  needed).
 - nix-in-unprivileged-container needs **both** `sandbox = false` and
   `filter-syscalls = false` in `/etc/nix/nix.conf`. Either alone trips
   the container runtime's default seccomp profile (which blocks
-  `seccomp(2)`, which both flags use). The runtime image bakes this in;
-  the chain-nix-init script writes the same config at runtime.
+  `seccomp(2)`, which both flags use). The image bakes in `sandbox = false`;
+  `chain-nix-init.sh` writes `filter-syscalls = false` at runtime
+  (must match the image's setting).
 - Cache: native nix `s3://` protocol against a configured bucket
   (`nix_store` in `~/.seekrchain.toml` or per-step `nix.store`). nix
   rejects path prefixes on `s3://` URIs — bucket must be bare

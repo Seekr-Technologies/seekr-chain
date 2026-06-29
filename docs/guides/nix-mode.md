@@ -151,11 +151,19 @@ When the pod starts:
 Nix-mode pods use a minimal "nix-runner" OCI image
 (`docker/Dockerfile.nix-runner`) that ships:
 
-- `nix` (with `experimental-features`, `sandbox=false`,
-  `filter-syscalls=false` baked in — both seccomp flags are required
-  for nix to run in an unprivileged k8s container)
-- `s5cmd` for s3 fetches
-- A static busybox at `/bin/` for POSIX tools
+- `nix` 2.21.1 (from `nixos/nix`) — does its own s3 fetches via the
+  baked-in aws-sdk-cpp, so no separate s3 client is needed
+- `bash` from nix's default profile
+- A static busybox at `/bin/` for the standard POSIX tools
+
+Image config:
+
+- `experimental-features = nix-command flakes` baked into `/etc/nix/nix.conf`
+- `sandbox = false` baked in (k8s container can't nest sandboxes)
+- `filter-syscalls = false` set at runtime by `chain-nix-init.sh`
+  (must match `sandbox = false`; both are needed for nix to operate in
+  an unprivileged k8s container without tripping the runtime's default
+  seccomp profile, which blocks `seccomp(2)`)
 
 Nothing else. Everything your job actually needs comes from the closure.
 
