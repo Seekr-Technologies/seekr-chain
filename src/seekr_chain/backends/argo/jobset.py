@@ -101,13 +101,10 @@ def _resolve_nix_role(role_config, code_path: str | None = None) -> dict:
     """
 
     nix = role_config.nix
-    # Eval requires nix on the local PATH; the error from nix_utils is
-    # actionable enough — surface it directly. resolve_nix_steps (called
-    # earlier in the submit path) will already have run eval once; nix's
-    # internal eval store makes the repeat call cheap.
-    closure = _eval_role_closure(nix, code_path)
-    closure_hash = nix_utils.closure_hash_from_path(closure)
 
+    # Resolve store first: it's a cheap dict lookup and fails the user the
+    # fastest. Eval is a subprocess that takes ~100ms; no point doing it
+    # only to discover the store wasn't configured.
     store_uri = nix.store or _user_config.nix_store
     if not store_uri:
         raise ValueError(
@@ -115,6 +112,13 @@ def _resolve_nix_role(role_config, code_path: str | None = None) -> dict:
             "`nix_store` is not configured. Set one or the other (e.g. "
             "nix_store = \"s3://bucket\")."
         )
+
+    # Eval requires nix on the local PATH; the error from nix_utils is
+    # actionable enough — surface it directly. resolve_nix_steps (called
+    # earlier in the submit path) will already have run eval once; nix's
+    # internal eval store makes the repeat call cheap.
+    closure = _eval_role_closure(nix, code_path)
+    closure_hash = nix_utils.closure_hash_from_path(closure)
 
     # build=False sanity check at render time. resolve_nix_steps (called
     # earlier in the submit path) is the canonical authority for "this
