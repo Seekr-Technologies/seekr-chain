@@ -51,7 +51,29 @@ WATCHDOG_STALL_S=120
 WATCHDOG_MAX_S=1800
 COPY_ATTEMPTS=3
 
+# Set to 1 by run_copy when the closure is already fully present locally
+# (and we skip the s3 fetch). Used by the summary block to short-circuit
+# expensive nix path-info calls that we don't need on a no-op pull.
+FAST_PATH=0
+
 run_copy() {
+  # Fast path: if the closure root + every transitive dep already lives in
+  # /nix-shared, we don't need to call out to s3 at all. `nix path-info
+  # --recursive` is a local-store DB query (no network), and exits non-zero
+  # the moment any path in the closure graph is missing — which means we
+  # can use a successful exit as proof of full presence.
+  #
+  # This matters because nix copy --from, even when nothing needs to copy,
+  # still fetches every narinfo in the closure graph from the remote cache
+  # to compute the dep tree. That's ~50-100ms × N paths of serial s3
+  # roundtrips → ~10s on a 200-path closure even when everything is local.
+  if nix --store "local?root=/nix-shared" path-info --recursive \
+       "$SEEKR_CHAIN_NIX_CLOSURE" >/dev/null 2>&1; then
+    echo "Closure already fully present on node — skipping s3 fetch."
+    FAST_PATH=1
+    return 0
+  fi
+
   nix --store "local?root=/nix-shared" copy \
       --from "$SEEKR_CHAIN_NIX_STORE" \
       --no-check-sigs \
@@ -113,22 +135,41 @@ done
 # is visible directly in the log.
 END_TIME=$(date +%s)
 DURATION=$((END_TIME - START_TIME))
-SIZE_AFTER=$(du -sk /nix-shared 2>/dev/null | awk 'BEGIN{kb=0} {kb=$1+0} END{print kb*1024}')
-BYTES_PULLED=$((SIZE_AFTER - SIZE_BEFORE))
-if [ "$BYTES_PULLED" -lt 0 ]; then BYTES_PULLED=0; fi
 
 # `|| true` not `|| echo 0`: grep -c outputs "0" *and* exits 1 on no matches;
 # `|| echo 0` would give multi-line output and break later arithmetic.
 PATHS_PULLED=$(grep -c "^copying path '/nix/store/" "$LOG" 2>/dev/null || true)
 PATHS_PULLED=${PATHS_PULLED:-0}
 
-CLOSURE_PATHS=$(nix --store "local?root=/nix-shared" path-info \
-                  --recursive "$SEEKR_CHAIN_NIX_CLOSURE" 2>/dev/null | wc -l)
-CLOSURE_PATHS=${CLOSURE_PATHS:-0}
-CLOSURE_SIZE=$(nix --store "local?root=/nix-shared" path-info \
-                 --closure-size "$SEEKR_CHAIN_NIX_CLOSURE" 2>/dev/null \
-                 | awk '{print $2+0}')
-CLOSURE_SIZE=${CLOSURE_SIZE:-0}
+if [ "$FAST_PATH" = "1" ]; then
+  # Closure was fully present: by construction PATHS_PULLED=0, no bytes
+  # transferred, no disk delta. Skip the post-pull du AND the path-info
+  # walk over the closure graph — neither informs the summary in a way
+  # the user can't already see from the "fully present" log line.
+  SIZE_AFTER=$SIZE_BEFORE
+  BYTES_PULLED=0
+  # Track the count for the summary header. path-info --recursive on a
+  # fully-local closure is ~1s; cheap relative to what we just saved.
+  CLOSURE_PATHS=$(nix --store "local?root=/nix-shared" path-info \
+                    --recursive "$SEEKR_CHAIN_NIX_CLOSURE" 2>/dev/null | wc -l)
+  CLOSURE_PATHS=${CLOSURE_PATHS:-0}
+  CLOSURE_SIZE=$(nix --store "local?root=/nix-shared" path-info \
+                   --closure-size "$SEEKR_CHAIN_NIX_CLOSURE" 2>/dev/null \
+                   | awk '{print $2+0}')
+  CLOSURE_SIZE=${CLOSURE_SIZE:-0}
+else
+  SIZE_AFTER=$(du -sk /nix-shared 2>/dev/null | awk 'BEGIN{kb=0} {kb=$1+0} END{print kb*1024}')
+  BYTES_PULLED=$((SIZE_AFTER - SIZE_BEFORE))
+  if [ "$BYTES_PULLED" -lt 0 ]; then BYTES_PULLED=0; fi
+
+  CLOSURE_PATHS=$(nix --store "local?root=/nix-shared" path-info \
+                    --recursive "$SEEKR_CHAIN_NIX_CLOSURE" 2>/dev/null | wc -l)
+  CLOSURE_PATHS=${CLOSURE_PATHS:-0}
+  CLOSURE_SIZE=$(nix --store "local?root=/nix-shared" path-info \
+                   --closure-size "$SEEKR_CHAIN_NIX_CLOSURE" 2>/dev/null \
+                   | awk '{print $2+0}')
+  CLOSURE_SIZE=${CLOSURE_SIZE:-0}
+fi
 
 PATHS_HIT=$((CLOSURE_PATHS - PATHS_PULLED))
 if [ "$PATHS_HIT" -lt 0 ]; then PATHS_HIT=0; fi
@@ -171,7 +212,10 @@ cat <<EOF
 EOF
 
 # Size-bounded GC of the hostPath warm cache. No-op when under budget.
+# Pass SIZE_AFTER through so the GC script skips its own `du -sk`
+# (which would otherwise walk the entire 14+ GB store again).
 # `|| true`: GC failures shouldn't fail the pod — pulling the closure
 # succeeded, the user's pod should run. Worst case is the store stays
 # oversize until the next pod cleans it.
+export SEEKR_CHAIN_NIX_STORE_CURRENT_BYTES=$SIZE_AFTER
 sh /seekr-chain/resources/nix-gc.sh || true

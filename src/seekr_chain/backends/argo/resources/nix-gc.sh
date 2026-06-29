@@ -12,13 +12,20 @@
 # store stays oversize until the next pod runs the script.
 #
 # Env vars consumed:
-#   SEEKR_CHAIN_NIX_CLOSURE           closure we just fetched (gcroot target)
-#   SEEKR_CHAIN_NIX_STORE_MAX_BYTES   size budget in bytes (default 50 GiB)
+#   SEEKR_CHAIN_NIX_CLOSURE             closure we just fetched (gcroot target)
+#   SEEKR_CHAIN_NIX_STORE_MAX_BYTES     size budget in bytes (default 50 GiB)
+#   SEEKR_CHAIN_NIX_STORE_CURRENT_BYTES current store size (optional; chain-nix-init
+#                                       computes this for its own summary and
+#                                       passes it through to avoid a redundant
+#                                       du -sk over the 50+ GB tree).
 set -e
 
 MAX_BYTES="${SEEKR_CHAIN_NIX_STORE_MAX_BYTES:-53687091200}"  # 50 GiB
 
-CURRENT_BYTES=$(du -sk /nix-shared 2>/dev/null | awk '{print $1 * 1024}')
+CURRENT_BYTES="${SEEKR_CHAIN_NIX_STORE_CURRENT_BYTES:-}"
+if [ -z "$CURRENT_BYTES" ]; then
+  CURRENT_BYTES=$(du -sk /nix-shared 2>/dev/null | awk '{print $1 * 1024}')
+fi
 CURRENT_BYTES=${CURRENT_BYTES:-0}
 
 if [ "$CURRENT_BYTES" -le "$MAX_BYTES" ]; then
