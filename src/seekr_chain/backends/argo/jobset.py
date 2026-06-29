@@ -3,6 +3,7 @@
 import copy
 import json
 import logging
+import os
 import textwrap
 from pathlib import Path
 from typing import Optional
@@ -56,7 +57,26 @@ _NIX_MAIN_STEP_ARGS = (
 )
 
 
-def _resolve_nix_role(role_config) -> dict:
+def _eval_role_closure(nix_cfg, code_path: str | None):
+    """Eval the closure path for a nix role, resolving expression vs code.path.
+
+    ``nix.expression`` is interpreted relative to ``code.path``; both submit-
+    time eval and the build pod's ``cd workspace; nix build path:./...`` agree
+    on this contract (see ``_validate_expression_under_code_path``).
+
+    ``code_path`` may be None in unit tests that render in isolation and mock
+    eval_closure_path; in that case we pass the raw expression through.
+    """
+    from seekr_chain import nix_utils
+
+    if code_path:
+        full = os.path.normpath(os.path.join(code_path, nix_cfg.expression))
+    else:
+        full = nix_cfg.expression
+    return nix_utils.eval_closure_path(full, attr=nix_cfg.attr, system=nix_cfg.system)
+
+
+def _resolve_nix_role(role_config, code_path: str | None = None) -> dict:
     """For a role with ``nix:`` set, compute everything the template needs to
     render the chain-nix-init init container + the simplified main container.
 
@@ -88,7 +108,7 @@ def _resolve_nix_role(role_config) -> dict:
     # actionable enough — surface it directly. resolve_nix_steps (called
     # earlier in the submit path) will already have run eval once; nix's
     # internal eval store makes the repeat call cheap.
-    closure = nix_utils.eval_closure_path(nix.expression, attr=nix.attr, system=nix.system)
+    closure = _eval_role_closure(nix, code_path)
     closure_hash = nix_utils.closure_hash_from_path(closure)
 
     store_uri = nix.store or _user_config.nix_store
@@ -282,13 +302,12 @@ def _normalize_env(env_list: list[dict]) -> list[dict]:
     return result
 
 
-def _detect_closure_hash(role_config) -> str | None:
+def _detect_closure_hash(role_config, code_path: str | None = None) -> str | None:
     """Return the closure hash this role is associated with, or None.
 
     Two sources:
-    - Nix-mode roles: evaluated from ``role.nix.expression``. nix's internal
-      eval store makes this cheap on repeat (resolve_nix_steps already eval'd
-      it once during submit-time validation).
+    - Nix-mode roles: evaluated from ``role.nix.expression`` (resolved against
+      ``code_path``). nix's internal eval store makes the repeat call cheap.
     - Auto-injected build steps carry the closure via the
       ``SEEKR_CHAIN_NIX_CLOSURE`` env var (set by ``nix_resolution`` when
       synthesizing the build step).
@@ -301,11 +320,7 @@ def _detect_closure_hash(role_config) -> str | None:
     """
     if role_config.nix is not None:
         from seekr_chain import nix_utils
-        closure = nix_utils.eval_closure_path(
-            role_config.nix.expression,
-            attr=role_config.nix.attr,
-            system=role_config.nix.system,
-        )
+        closure = _eval_role_closure(role_config.nix, code_path)
         return nix_utils.closure_hash_from_path(closure)
     env = role_config.env or {}
     closure_path = env.get("SEEKR_CHAIN_NIX_CLOSURE")
@@ -411,11 +426,12 @@ def _build_role_context(
     #    Volume mounts at /nix-shared (no subPath) — the build script uses
     #    --store local?root=/nix-shared to direct writes into the chroot,
     #    matching the consumer's layout on disk.
+    code_path = workflow_config.code.path if workflow_config.code else None
     nix_main_env: list[dict] = []
     nix_init_ctx: dict | None = None
     nix_volume_ctx: dict | None = None
     if role_config.nix is not None:
-        nix_ctx = _resolve_nix_role(role_config)
+        nix_ctx = _resolve_nix_role(role_config, code_path=code_path)
         main_image = nix_ctx["image"]
         nix_main_env = nix_ctx["main_env"]
         nix_init_ctx = {
@@ -488,7 +504,7 @@ def _build_role_context(
     # nix-mode user steps (which CONSUME the closure) and auto-injected
     # build steps (which PRODUCE it via env-var marker) — same label, so
     # a user step naturally prefers the node where the build step ran.
-    closure_hash = _detect_closure_hash(role_config)
+    closure_hash = _detect_closure_hash(role_config, code_path=code_path)
     role_affinity = _merge_affinity_with_closure(workflow_affinity, closure_hash)
 
     return {

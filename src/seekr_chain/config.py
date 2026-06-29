@@ -269,7 +269,7 @@ class NixConfig(BaseModel):
         and should set this explicitly.
     """
 
-    expression: str
+    expression: str = "./"
     attr: str = "default"
     system: str = "x86_64-linux"
     store: Optional[str] = None

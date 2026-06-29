@@ -73,7 +73,7 @@ class TestNoOp:
         from seekr_chain.nix_resolution import resolve_nix_steps
 
         c = WorkflowConfig(
-            name="t",
+            name="t", code={"path": "/tmp/t"},
             steps=[{"name": "a", "image": "ubuntu", "script": "echo"}],
         )
         out = resolve_nix_steps(c)
@@ -94,7 +94,7 @@ class TestClosureExists:
         _existing(monkeypatch)
 
         c = WorkflowConfig(
-            name="t",
+            name="t", code={"path": "/tmp/t"},
             steps=[
                 {"name": "a", "nix": {"expression": "./"}, "script": "echo"},
             ],
@@ -117,7 +117,7 @@ class TestBuildStepInjection:
         _missing(monkeypatch)
 
         c = WorkflowConfig(
-            name="t",
+            name="t", code={"path": "/tmp/t"},
             steps=[
                 {"name": "train", "nix": {"expression": "./"}, "script": "echo"},
             ],
@@ -141,9 +141,12 @@ class TestBuildStepInjection:
         # SEEKR_CHAIN_NIX_CLOSURE on the env (not just the script) lets
         # _detect_closure_hash tag the build pod with the same closure label
         # consumers use.
-        # _no_eval_needed's fake_eval is deterministic per (expr, attr, system).
+        # resolve_nix_steps joins nix.expression with code.path before eval,
+        # so the mock sees the joined path (not the original "./"). The
+        # build step's env keeps the original "./" — the build pod resolves
+        # it relative to /seekr-chain/workspace.
         from seekr_chain import nix_utils
-        expected_closure = nix_utils.eval_closure_path("./")
+        expected_closure = nix_utils.eval_closure_path("/tmp/t")
         assert build.env == {
             "SEEKR_CHAIN_NIX_STORE": "s3://test-bucket",
             "SEEKR_CHAIN_NIX_CLOSURE": expected_closure,
@@ -170,7 +173,7 @@ class TestBuildStepInjection:
         )
 
         c = WorkflowConfig(
-            name="t",
+            name="t", code={"path": "/tmp/t"},
             steps=[{"name": "a", "nix": {"expression": "./"}, "script": "echo"}],
         )
         out = resolve_nix_steps(c)
@@ -188,7 +191,7 @@ class TestBuildStepInjection:
 
         # Same expression in both steps -> same closure -> one build step.
         c = WorkflowConfig(
-            name="t",
+            name="t", code={"path": "/tmp/t"},
             steps=[
                 {"name": "a", "nix": {"expression": "./train.nix"}, "script": "echo"},
                 {"name": "b", "nix": {"expression": "./train.nix"}, "script": "echo"},
@@ -213,7 +216,7 @@ class TestBuildStepInjection:
         _missing(monkeypatch)
 
         c = WorkflowConfig(
-            name="t",
+            name="t", code={"path": "/tmp/t"},
             steps=[
                 {"name": "a", "nix": {"expression": "./train.nix"}, "script": "echo"},
                 {"name": "b", "nix": {"expression": "./eval.nix"}, "script": "echo"},
@@ -234,12 +237,13 @@ class TestBuildStepInjection:
 
         # Figure out what name our build step would get for this expression.
         from seekr_chain import nix_utils
-        closure = nix_utils.eval_closure_path("./")
+        # resolve_nix_steps joins expression with code.path before eval.
+        closure = nix_utils.eval_closure_path("/tmp/t")
         existing_name = _build_step_name(closure)
 
         # Now build a workflow where the user already has a step with that name.
         c = WorkflowConfig(
-            name="t",
+            name="t", code={"path": "/tmp/t"},
             steps=[
                 {"name": existing_name, "image": "ubuntu", "script": "echo dummy"},
                 {"name": "train", "nix": {"expression": "./"}, "script": "echo"},
@@ -260,7 +264,7 @@ class TestBuildStepInjection:
         _missing(monkeypatch)
 
         c = WorkflowConfig(
-            name="t",
+            name="t", code={"path": "/tmp/t"},
             steps=[
                 {"name": "prep", "image": "ubuntu", "script": "echo"},
                 {
@@ -292,7 +296,7 @@ class TestErrorPaths:
         _missing(monkeypatch)
 
         c = WorkflowConfig(
-            name="t",
+            name="t", code={"path": "/tmp/t"},
             steps=[
                 {
                     "name": "a",
@@ -313,7 +317,7 @@ class TestErrorPaths:
         monkeypatch.setattr(nr_mod, "_user_config", UserConfig(nix_runner_image="img"))
 
         c = WorkflowConfig(
-            name="t",
+            name="t", code={"path": "/tmp/t"},
             steps=[{"name": "a", "nix": {"expression": "./"}, "script": "echo"}],
         )
         with pytest.raises(ValueError, match="nix.store"):
@@ -331,12 +335,96 @@ class TestErrorPaths:
         monkeypatch.setattr(nr_mod, "_user_config", UserConfig(nix_store="s3://x"))
 
         c = WorkflowConfig(
-            name="t",
+            name="t", code={"path": "/tmp/t"},
             steps=[{"name": "a", "nix": {"expression": "./"}, "script": "echo"}],
         )
         out = resolve_nix_steps(c)
         build = next(s for s in out.steps if s.name.startswith("nix-build-"))
         assert build.image == _DEFAULT_NIX_RUNNER_IMAGE
+
+class TestExpressionValidation:
+    """nix.expression must point inside code.path. Lexical containment check
+    so symlinks inside code.path can still escape via dereferencing on upload.
+    """
+
+    def test_code_required(self, _nix_user_config, _no_eval_needed):
+        from seekr_chain.nix_resolution import resolve_nix_steps
+
+        # No code: but a nix-mode step. Rejected — the flake never reaches the pod.
+        c = WorkflowConfig(
+            name="t",
+            steps=[{"name": "a", "nix": {"expression": "./"}, "script": "echo"}],
+        )
+        with pytest.raises(ValueError, match="code"):
+            resolve_nix_steps(c)
+
+    def test_image_only_workflow_doesnt_need_code(self, _no_eval_needed):
+        """Sanity: the code-required check only fires for nix-mode roles."""
+        from seekr_chain.nix_resolution import resolve_nix_steps
+
+        c = WorkflowConfig(
+            name="t",
+            steps=[{"name": "a", "image": "ubuntu", "script": "echo"}],
+        )
+        # No raise — and config returned unchanged.
+        out = resolve_nix_steps(c)
+        assert out is c
+
+    def test_absolute_expression_rejected(self, _nix_user_config, _no_eval_needed):
+        from seekr_chain.nix_resolution import resolve_nix_steps
+
+        c = WorkflowConfig(
+            name="t",
+            code={"path": "/tmp/t"},
+            steps=[
+                {"name": "a", "nix": {"expression": "/abs/path/flake"}, "script": "echo"},
+            ],
+        )
+        with pytest.raises(ValueError, match="absolute"):
+            resolve_nix_steps(c)
+
+    def test_escape_via_dotdot_rejected(self, _nix_user_config, _no_eval_needed):
+        from seekr_chain.nix_resolution import resolve_nix_steps
+
+        c = WorkflowConfig(
+            name="t",
+            code={"path": "/tmp/t"},
+            steps=[
+                {"name": "a", "nix": {"expression": "../outside"}, "script": "echo"},
+            ],
+        )
+        with pytest.raises(ValueError, match="escapes code.path"):
+            resolve_nix_steps(c)
+
+    def test_subdir_expression_ok(self, monkeypatch, _nix_user_config, _no_eval_needed):
+        """Expression pointing at a subdir under code.path is allowed."""
+        from seekr_chain.nix_resolution import resolve_nix_steps
+
+        _existing(monkeypatch)
+        c = WorkflowConfig(
+            name="t",
+            code={"path": "/tmp/t"},
+            steps=[
+                {"name": "a", "nix": {"expression": "./subdir"}, "script": "echo"},
+            ],
+        )
+        # No raise.
+        resolve_nix_steps(c)
+
+    def test_dotdot_resolving_back_inside_is_ok(self, monkeypatch, _nix_user_config, _no_eval_needed):
+        """foo/../bar resolves to bar which is inside code.path — fine."""
+        from seekr_chain.nix_resolution import resolve_nix_steps
+
+        _existing(monkeypatch)
+        c = WorkflowConfig(
+            name="t",
+            code={"path": "/tmp/t"},
+            steps=[
+                {"name": "a", "nix": {"expression": "foo/../bar"}, "script": "echo"},
+            ],
+        )
+        resolve_nix_steps(c)
+
 
 class TestStoreUriValidation:
     def test_s3_with_prefix_rejected(self, monkeypatch, _no_eval_needed):
@@ -349,7 +437,7 @@ class TestStoreUriValidation:
                             UserConfig(nix_store="s3://bucket/prefix",
                                        nix_runner_image="img"))
         c = WorkflowConfig(
-            name="t",
+            name="t", code={"path": "/tmp/t"},
             steps=[{"name": "a", "nix": {"expression": "./"}, "script": "echo"}],
         )
         with pytest.raises(ValueError, match="does not support path prefixes"):
@@ -360,7 +448,7 @@ class TestStoreUriValidation:
         from seekr_chain.nix_resolution import resolve_nix_steps
 
         c = WorkflowConfig(
-            name="t",
+            name="t", code={"path": "/tmp/t"},
             steps=[{
                 "name": "a",
                 "nix": {"expression": "./", "store": "s3://bucket/prefix"},
@@ -376,7 +464,7 @@ class TestStoreUriValidation:
         _existing(monkeypatch)  # so we don't go down the build-step path
 
         c = WorkflowConfig(
-            name="t",
+            name="t", code={"path": "/tmp/t"},
             steps=[{
                 "name": "a",
                 "nix": {"expression": "./", "store": "s3://bucket"},
@@ -392,7 +480,7 @@ class TestStoreUriValidation:
         _existing(monkeypatch)
 
         c = WorkflowConfig(
-            name="t",
+            name="t", code={"path": "/tmp/t"},
             steps=[{
                 "name": "a",
                 "nix": {"expression": "./", "store": "s3://bucket?region=us-east-2"},
@@ -407,7 +495,7 @@ class TestStoreUriValidation:
         _existing(monkeypatch)
 
         c = WorkflowConfig(
-            name="t",
+            name="t", code={"path": "/tmp/t"},
             steps=[{
                 "name": "a",
                 "nix": {"expression": "./", "store": "s3://bucket/"},
@@ -444,7 +532,7 @@ class TestMultiRoleSteps:
         _missing(monkeypatch)
 
         c = WorkflowConfig(
-            name="t",
+            name="t", code={"path": "/tmp/t"},
             steps=[
                 {
                     "name": "training",

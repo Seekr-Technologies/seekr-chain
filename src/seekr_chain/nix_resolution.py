@@ -25,6 +25,7 @@ Mutates the passed ``WorkflowConfig`` in place and returns it.
 from __future__ import annotations
 
 import logging
+import os
 from typing import Optional
 
 from seekr_chain import nix_utils
@@ -199,6 +200,39 @@ def _get_nix_runner_image() -> str:
     return _user_config.nix_runner_image or _DEFAULT_NIX_RUNNER_IMAGE
 
 
+def _validate_expression_under_code_path(expression: str, code_path: str, role_name: str) -> str:
+    """Validate that ``expression`` is a path inside ``code_path`` and return it.
+
+    ``nix.expression`` is interpreted the same way at submit time (for local
+    eval) and inside the build pod (for ``nix build path:./<expression>``
+    from ``/seekr-chain/workspace``). That contract only holds if the
+    expression points to a file that's part of the uploaded code bundle.
+
+    Containment is checked lexically (``os.path.normpath``) so symlinks
+    inside ``code_path`` that point outside the tree still work — they get
+    dereferenced at upload time and land in the pod regardless of where
+    their target lives. We only reject paths that *lexically* escape via
+    ``..`` or absolute path components.
+    """
+    if os.path.isabs(expression):
+        raise ValueError(
+            f"role {role_name!r}: nix.expression must be a path relative to "
+            f"code.path; got an absolute path {expression!r}. The build pod "
+            "interprets the expression relative to /seekr-chain/workspace, so "
+            "absolute submit-host paths don't translate."
+        )
+
+    code_root = os.path.normpath(code_path)
+    joined = os.path.normpath(os.path.join(code_root, expression))
+    if joined != code_root and not joined.startswith(code_root + os.sep):
+        raise ValueError(
+            f"role {role_name!r}: nix.expression={expression!r} escapes code.path "
+            f"({code_path!r}). The flake must live inside the uploaded code "
+            "bundle so the build pod can find it."
+        )
+    return joined
+
+
 def resolve_nix_steps(config: WorkflowConfig) -> WorkflowConfig:
     """Walk a WorkflowConfig and augment it with build steps for missing closures.
 
@@ -217,6 +251,15 @@ def resolve_nix_steps(config: WorkflowConfig) -> WorkflowConfig:
     if not nix_roles_by_step:
         return config
 
+    # Cross-field check: nix.expression must point inside code.path. Without
+    # code.path, the flake never reaches the build pod.
+    if config.code is None or not config.code.path:
+        raise ValueError(
+            "nix-mode workflows require `code: {path: ...}` so the flake is "
+            "uploaded with the job. The build pod runs `nix build` against "
+            "/seekr-chain/workspace, which is populated from code.path."
+        )
+
     # Resolve closure paths for every nix role (eval if needed) and group
     # missing-but-needed-to-build closures by their path.
     nix_runner_image: Optional[str] = None
@@ -227,8 +270,12 @@ def resolve_nix_steps(config: WorkflowConfig) -> WorkflowConfig:
 
     for step, nix_roles in nix_roles_by_step:
         for role in nix_roles:
+            role_name = role.name or step.name
+            resolved_expression = _validate_expression_under_code_path(
+                role.nix.expression, config.code.path, role_name,
+            )
             closure = nix_utils.eval_closure_path(
-                role.nix.expression, attr=role.nix.attr, system=role.nix.system,
+                resolved_expression, attr=role.nix.attr, system=role.nix.system,
             )
             role_to_closure[id(role)] = closure
             store_uri = _resolve_store_uri(role.nix, role.name or step.name)

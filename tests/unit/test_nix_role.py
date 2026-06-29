@@ -34,17 +34,17 @@ def _mock_eval(monkeypatch, closure_path: str):
 
 
 class TestNixConfigSchema:
-    def test_expression_required(self):
-        # expression is a required str (no default) — pydantic raises.
-        with pytest.raises(ValidationError, match="expression"):
-            NixConfig()
-
-    def test_expression_ok(self):
-        n = NixConfig(expression="./")
+    def test_defaults(self):
+        # expression defaults to "./" (the flake at code.path root).
+        n = NixConfig()
         assert n.expression == "./"
         assert n.attr == "default"
         assert n.system == "x86_64-linux"
         assert n.build is True
+
+    def test_expression_set_ok(self):
+        n = NixConfig(expression="./subdir")
+        assert n.expression == "./subdir"
 
 
 class TestRoleSpecImageXorNix:
@@ -577,6 +577,7 @@ class TestNixRendering:
 
         cfg = WorkflowConfig(
             name="test-job",
+            code={"path": "/tmp/test-nix"},
             steps=[
                 {
                     "name": "train",
