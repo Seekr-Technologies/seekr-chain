@@ -355,6 +355,82 @@ def _merge_affinity_with_closure(base_affinity: dict | None, closure_hash: str |
     return affinity
 
 
+def _select_role_runtime(role_config, *, code_path: str | None, interactive: bool):
+    """Decide the main container's image, step_args, env, init-container, and volume.
+
+    Returns a tuple ``(main_image, step_args, nix_main_env, nix_init_ctx,
+    nix_volume_ctx)``. Three cases:
+
+    1. **Nix-mode consumer** (``role.nix`` set). Main container runs the
+       user's script with the closure on PATH. chain-nix-init pulls the
+       closure into the volume before main starts. Volume mounts at ``/nix``
+       with ``subPath=nix`` so chain-nix-init's ``--store local?root=`` writes
+       (which land on disk at ``/nix-shared/nix/store/<hash>``) surface in
+       main as ``/nix/store/<hash>`` — the path that the closure's RPATHs
+       were baked against.
+
+    2. **Auto-injected builder** (image-mode + ``SEEKR_CHAIN_NIX_CLOSURE``
+       in env, produced by ``nix_resolution._make_build_step``). Main runs
+       ``nix build`` + ``nix copy --to s3``. Same hostPath volume mounted
+       at ``/nix-shared`` (no subPath) so the build script's
+       ``--store local?root=/nix-shared`` chroot writes match the consumer's
+       on-disk layout. A consumer pod scheduled to the same node by
+       closure-hash podAffinity will find the closure already on disk and
+       its ``nix copy --from`` becomes a no-op.
+
+    3. **Plain image-mode role**. No nix volume; the standard chain-entrypoint
+       wrapper runs the user's script.
+
+    Interactive mode short-circuits step_args to ``sleep <timeout>``.
+    """
+    nix_main_env: list[dict] = []
+    nix_init_ctx: dict | None = None
+    nix_volume_ctx: dict | None = None
+
+    if role_config.nix is not None:
+        nix_ctx = _resolve_nix_role(role_config, code_path=code_path)
+        main_image = nix_ctx["image"]
+        nix_main_env = nix_ctx["main_env"]
+        nix_init_ctx = {
+            "image": resolve_image(nix_ctx["image"]),
+            "env": _normalize_env(nix_ctx["init_env"]),
+        }
+        nix_volume_ctx = {
+            "kind": nix_ctx["volume_kind"],
+            "hostpath": nix_ctx["hostpath"],
+            "mount_path": "/nix",
+            "sub_path": "nix",
+        }
+    else:
+        main_image = role_config.image
+        # NOTE: hostPath /nix exposes other closures on the node alongside
+        # this build's output. That's intentional for cross-pod cache reuse.
+        # Inter-pod isolation is not a goal of v1 — revisit only if multi-
+        # tenant requirements emerge; the cost is one closure-sized copy
+        # at pod startup, fast on local NVMe.
+        if (role_config.env or {}).get("SEEKR_CHAIN_NIX_CLOSURE"):
+            volume_kind = _user_config.nix_store_volume_kind or _DEFAULT_NIX_STORE_VOLUME_KIND
+            nix_volume_ctx = {
+                "kind": volume_kind,
+                "hostpath": _user_config.nix_store_hostpath or _DEFAULT_NIX_STORE_HOSTPATH,
+                "mount_path": "/nix-shared",
+                "sub_path": None,
+            }
+
+    if interactive:
+        timeout = 1 * 60 * 60  # auto-timeout of 1 hour
+        logger.warning("Setting auto-timeout of 1 hour")
+        step_args = f"sleep {timeout}"
+    elif role_config.nix is not None:
+        step_args = _NIX_MAIN_STEP_ARGS.format(
+            entrypoint=f"{constants.JOB_RESOURCES_PATH}/chain-entrypoint.sh",
+        )
+    else:
+        step_args = f"{constants.JOB_RESOURCES_PATH}/chain-entrypoint.sh"
+
+    return main_image, step_args, nix_main_env, nix_init_ctx, nix_volume_ctx
+
+
 def _build_role_context(
     role_config,
     workflow_config,
@@ -399,71 +475,10 @@ def _build_role_context(
     s3_bucket, s3_step_data_prefix = s3_utils.parse_s3_uri(remote_step_data_path)
     upload_timeout = int(workflow_config.logging.upload_timeout.total_seconds())
 
-    # Determine the main container's image + command + nix-mode init + volume.
-    #
-    # Two cases reach into the nix-store volume:
-    #
-    # 1. Consumer (nix-mode role, `role.nix` set): main runs the user's
-    #    script with the closure on PATH. chain-nix-init pulls the closure
-    #    into the volume before main starts. Volume mounts at /nix with
-    #    subPath=nix on main; chain-nix-init writes via --store local?root=
-    #    so files land at /nix-shared/nix/store/<hash> on disk (which surfaces
-    #    in main as /nix/store/<hash>).
-    #
-    # 2. Builder (auto-injected build step from nix_resolution, image-mode
-    #    with SEEKR_CHAIN_NIX_CLOSURE in env): main runs `nix build` +
-    #    `nix copy --to s3`. We mount the same hostPath volume here too, so
-    #    the build's outputs (and substituted build-time deps like gcc /
-    #    stdenv) land on the node. A subsequent consumer pod scheduled to
-    #    the same node by closure-hash podAffinity will then find the
-    #    closure already present and `nix copy --from` will be a no-op.
-    #    Volume mounts at /nix-shared (no subPath) — the build script uses
-    #    --store local?root=/nix-shared to direct writes into the chroot,
-    #    matching the consumer's layout on disk.
     code_path = workflow_config.code.path if workflow_config.code else None
-    nix_main_env: list[dict] = []
-    nix_init_ctx: dict | None = None
-    nix_volume_ctx: dict | None = None
-    if role_config.nix is not None:
-        nix_ctx = _resolve_nix_role(role_config, code_path=code_path)
-        main_image = nix_ctx["image"]
-        nix_main_env = nix_ctx["main_env"]
-        nix_init_ctx = {
-            "image": resolve_image(nix_ctx["image"]),
-            "env": _normalize_env(nix_ctx["init_env"]),
-        }
-        nix_volume_ctx = {
-            "kind": nix_ctx["volume_kind"],
-            "hostpath": nix_ctx["hostpath"],
-            "mount_path": "/nix",
-            "sub_path": "nix",
-        }
-    else:
-        main_image = role_config.image
-        # Builder case: role doesn't have nix: but does set SEEKR_CHAIN_NIX_CLOSURE
-        # in its env (set by nix_resolution._make_build_step). Give it the
-        # hostPath volume at /nix-shared so the build's writes persist on
-        # the node for future consumers.
-        if (role_config.env or {}).get("SEEKR_CHAIN_NIX_CLOSURE"):
-            volume_kind = _user_config.nix_store_volume_kind or _DEFAULT_NIX_STORE_VOLUME_KIND
-            nix_volume_ctx = {
-                "kind": volume_kind,
-                "hostpath": _user_config.nix_store_hostpath or _DEFAULT_NIX_STORE_HOSTPATH,
-                "mount_path": "/nix-shared",
-                "sub_path": None,
-            }
-
-    # Main container command
-    if interactive:
-        timeout = 1 * 60 * 60  # auto-timeout of 1 hour
-        logger.warning("Setting auto-timeout of 1 hour")
-        step_args = f"sleep {timeout}"
-    elif role_config.nix is not None:
-        step_args = _NIX_MAIN_STEP_ARGS.format(
-            entrypoint=f"{constants.JOB_RESOURCES_PATH}/chain-entrypoint.sh",
-        )
-    else:
-        step_args = f"{constants.JOB_RESOURCES_PATH}/chain-entrypoint.sh"
+    main_image, step_args, nix_main_env, nix_init_ctx, nix_volume_ctx = _select_role_runtime(
+        role_config, code_path=code_path, interactive=interactive,
+    )
 
     pvcs_raw, pvc_mounts = _get_pvcs(role_config)
     # Template only needs the volume name; structure is defined in the template
