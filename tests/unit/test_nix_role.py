@@ -430,8 +430,11 @@ class TestNixRendering:
         assert nix_init["args"] == ["/seekr-chain/resources/chain-nix-init.sh"]
         # Mounts the shared volume at /nix-shared so the image's /nix
         # (containing the nix binary) stays usable for the duration.
+        # Also mounts the workspace volume at /seekr-chain so the script
+        # chain-init downloaded to /seekr-chain/resources/ is visible.
         mounts = {m["name"]: m["mountPath"] for m in nix_init["volumeMounts"]}
         assert mounts["nix-store"] == "/nix-shared"
+        assert mounts["workspace"] == "/seekr-chain"
         # Env carries store + closure + GC size budget for the script to read.
         env_dict = {e["name"]: e.get("value") for e in nix_init["env"] if "value" in e}
         assert env_dict["SEEKR_CHAIN_NIX_STORE"] == "s3://bucket"

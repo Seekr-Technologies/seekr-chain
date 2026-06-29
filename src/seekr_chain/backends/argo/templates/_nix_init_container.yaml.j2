@@ -56,3 +56,8 @@
   volumeMounts:
   - name: nix-store
     mountPath: /nix-shared
+  # chain-init downloads the script bundle into the workspace volume; we
+  # need the same mount here so /seekr-chain/resources/chain-nix-init.sh
+  # is visible to /bin/sh.
+  - name: workspace
+    mountPath: /seekr-chain
