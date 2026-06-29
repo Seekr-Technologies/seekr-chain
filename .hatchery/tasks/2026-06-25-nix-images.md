@@ -193,15 +193,21 @@ multi-minute docker-image pull.
    entries, sort by atime, delete oldest until under threshold. Runs at
    the end of `chain-nix-init` post-fetch. Skips the just-fetched
    closure.
-3. **Build-pod mount layout investigation.** Current build pod builds
-   into image's `/nix`, then `nix copy --to local?root=/nix-shared` to
-   warm the hostPath. The image's `/nix` is duplicate work. Worth
-   investigating: install image's nix at `/opt/nix-bootstrap`, mount
-   hostPath at `/nix` proper, copy bootstrap → hostPath once per node,
-   build directly into hostPath. The known blocker (flake-source path
-   validation with `--store local?root=` in chroot mode) may not apply
-   when nix is operating on its actual `/nix` store. Spike before
-   committing.
+3. **Build-pod mount layout.** Considered: install nix at a non-`/nix`
+   path in the runner image (e.g. `/nix-shared`), mount hostPath at
+   `/nix` proper, copy bootstrap → `/nix` once per node, build directly
+   into the real `/nix` store (no `--store local?root=` chroot, no path-
+   validation issue). **Deferred** — the alternatives all have larger
+   trade-offs than the cost they save:
+   - Building nix with `--with-store-dir=/nix-shared` means losing
+     cache.nixos.org for every transitive dep of nix's tooling layer
+     (multi-hour fresh builds at image-build time).
+   - OverlayFS (image `/nix` as lower, hostPath as upper, merged at
+     mount) sidesteps the path-validation issue cleanly but requires
+     cluster-level OverlayFS support that isn't universal.
+   - The actual cost of the current pattern is bounded by closure size,
+     not "all of /nix" — only the user's closure lands in hostPath, and
+     only on cache-miss builds. Warm-node hits skip the copy entirely.
 4. **Tighter runtime isolation (deferred per review).** hostPath `/nix`
    exposes other closures on the node alongside the active one. Real
    isolation cost is one closure-sized copy at pod startup; on local
