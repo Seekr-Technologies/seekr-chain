@@ -147,18 +147,18 @@ class TestResolveNixRole:
         _mock_eval(monkeypatch, "/nix/store/jppn-foo")
         role = RoleSpecConfig(
             name="train",
-            nix=NixConfig(expression="./", store="s3://bucket/nix-cache"),
+            nix=NixConfig(expression="./", store="s3://bucket"),
             script="echo",
         )
         result = _resolve_nix_role(role)
         assert result["image"] == "registry.example.com/seekr-chain-nix-runner:test"
         assert result["closure"] == "/nix/store/jppn-foo"
-        assert result["store_uri"] == "s3://bucket/nix-cache"
+        assert result["store_uri"] == "s3://bucket"
         # init_env + main_env both carry store + closure for the in-container
         # fetch script + user-visible env.
         for env in (result["init_env"], result["main_env"]):
             env_dict = {e["name"]: e["value"] for e in env}
-            assert env_dict["SEEKR_CHAIN_NIX_STORE"] == "s3://bucket/nix-cache"
+            assert env_dict["SEEKR_CHAIN_NIX_STORE"] == "s3://bucket"
             assert env_dict["SEEKR_CHAIN_NIX_CLOSURE"] == "/nix/store/jppn-foo"
 
         # main_env additionally points TLS clients at the closure's cacert so
@@ -181,7 +181,7 @@ class TestResolveNixRole:
         _patch_user_config(
             monkeypatch,
             UserConfig(
-                nix_store="s3://default-bucket/cache",
+                nix_store="s3://default-bucket",
                 nix_runner_image="img:tag",
             ),
         )
@@ -191,7 +191,7 @@ class TestResolveNixRole:
             nix=NixConfig(expression="./"),  # no store= override
             script="echo",
         )
-        assert _resolve_nix_role(role)["store_uri"] == "s3://default-bucket/cache"
+        assert _resolve_nix_role(role)["store_uri"] == "s3://default-bucket"
 
     def test_no_store_anywhere_errors(self, monkeypatch):
         from seekr_chain.backends.argo.jobset import _resolve_nix_role

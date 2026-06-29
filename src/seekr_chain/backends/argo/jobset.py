@@ -17,6 +17,7 @@ from seekr_chain.config import (
 from seekr_chain.nix_resolution import (
     _DEFAULT_NIX_RUNNER_IMAGE,
     _NIX_RUNNER_IMAGE,
+    _resolve_store_uri,
 )
 from seekr_chain.user_config import config as _user_config
 from seekr_chain.utils import format_bytes, resolve_image
@@ -105,13 +106,7 @@ def _resolve_nix_role(role_config, code_path: str | None = None) -> dict:
     # Resolve store first: it's a cheap dict lookup and fails the user the
     # fastest. Eval is a subprocess that takes ~100ms; no point doing it
     # only to discover the store wasn't configured.
-    store_uri = nix.store or _user_config.nix_store
-    if not store_uri:
-        raise ValueError(
-            f"role {role_config.name!r}: nix.store is not set and ~/.seekrchain.toml's "
-            "`nix_store` is not configured. Set one or the other (e.g. "
-            "nix_store = \"s3://bucket\")."
-        )
+    store_uri = _resolve_store_uri(nix, role_config.name or "")
 
     # Eval requires nix on the local PATH; the error from nix_utils is
     # actionable enough — surface it directly. resolve_nix_steps (called
