@@ -43,13 +43,11 @@ export AWS_CONNECT_TIMEOUT=10000
   echo 'log-lines = 200'
 } >> /etc/nix/nix.conf
 
-# Warm the node's hostPath store with whatever paths landed in the
-# build pod's local /nix even when the build later fails. Without
-# this, the happy-path `nix copy --to local?root=/nix-shared` (further
-# down) is unreachable on failure — so a retry on the same node has
-# to re-pull every dep from s3, even ones we successfully fetched
-# the first time. Idempotent: existing paths at the destination are
-# skipped by nix copy.
+# Without this, the happy-path `nix copy --to local?root=/nix-shared`
+# (further down) is unreachable when nix build fails partway, so a
+# retry on the same node re-pulls every dep from s3 — even ones we
+# successfully fetched the first time. Idempotent: existing paths at
+# /nix-shared are skipped by nix copy.
 warm_hostpath_on_failure() {
   rc=$?
   if [ "$rc" -eq 0 ]; then
