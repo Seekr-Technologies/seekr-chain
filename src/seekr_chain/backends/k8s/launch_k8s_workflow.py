@@ -344,6 +344,7 @@ def _build_controller_job(
             },
             "annotations": {
                 "seekr-chain/datastore-root": datastore_root or "",
+                "seekr-chain/step-count": str(len(config.steps)),
             },
         },
         "spec": {

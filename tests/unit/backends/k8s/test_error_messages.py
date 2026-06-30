@@ -66,8 +66,8 @@ class TestS3CredentialError:
 class TestKubectlPreflight:
     def test_raises_when_kubectl_missing(self):
         """attach() raises RuntimeError when kubectl is not in PATH."""
-        from seekr_chain.backends.k8s.k8s_workflow import K8sWorkflow, PodState
-        from seekr_chain.status import PodStatus
+        from seekr_chain.backends.k8s.k8s_workflow import K8sWorkflow, PodState, WorkflowState
+        from seekr_chain.status import PodStatus, WorkflowStatus
 
         # We need to mock the entire __init__ since it calls K8s APIs
         workflow = object.__new__(K8sWorkflow)
@@ -75,8 +75,12 @@ class TestKubectlPreflight:
         workflow._namespace = "default"
         workflow._k8s_v1 = None
         workflow._k8s_custom = None
+        workflow._k8s_batch = None
         workflow._s3_client = None
         workflow._job_info = {}
+        workflow._job_name = None
+        workflow._total_steps = 0
+        workflow._dt_start = None
 
         # Create a real PodState so isinstance check passes
         pod = PodState(
@@ -91,10 +95,27 @@ class TestKubectlPreflight:
             restart_attempt=0,
         )
 
+        import datetime
+
+        empty_state = WorkflowState(
+            id="test-id",
+            name=None,
+            status=WorkflowStatus.RUNNING,
+            dt_start=None,
+            dt_end=None,
+            total_steps=None,
+            captured_at=datetime.datetime.now(tz=datetime.timezone.utc),
+            steps=[],
+        )
+
         with (
-            patch.object(workflow, "get_detailed_state"),
+            patch.object(workflow, "get_detailed_state", return_value=empty_state),
             patch.object(workflow, "get_status"),
-            patch("seekr_chain.backends.k8s.k8s_workflow._first_running_or_finished_pod", return_value=pod),
+            patch(
+                "seekr_chain.backends.k8s.k8s_workflow.get_workflow_job_status",
+                return_value=(WorkflowStatus.RUNNING, None),
+            ),
+            patch("seekr_chain.backends.k8s.k8s_workflow.first_running_or_finished_pod", return_value=pod),
             patch("seekr_chain.backends.k8s.k8s_workflow.shutil.which", return_value=None),
         ):
             with pytest.raises(RuntimeError, match="kubectl not found"):
