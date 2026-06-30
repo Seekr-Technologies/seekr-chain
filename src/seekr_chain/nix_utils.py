@@ -265,11 +265,16 @@ def find_warm_nodes(
 
     # Pass 2: recency walk. Each node lands in its pre-determined bucket
     # at the timestamp of its most-recent pod (which sorted to the front).
+    # Pods without the closure label are skipped — defensive guard for the
+    # case where the API returns rows the selector should have filtered.
     exact: list[str] = []
     partial: list[str] = []
     seen_exact: set[str] = set()
     seen_partial: set[str] = set()
     for p in pods:
+        labels = p.metadata.labels or {}
+        if NIX_CLOSURE_LABEL not in labels:
+            continue
         node = p.spec.node_name
         if node in exact_nodes:
             if node not in seen_exact and len(exact) < limit:
