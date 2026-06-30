@@ -1,21 +1,25 @@
 """
-Unit tests for _collect_container_states(), _collect_pod_state(), and _is_jobset_suspended().
+Unit tests for _collect_container_states(), _collect_pod_state(), and is_jobset_suspended().
 
 Uses types.SimpleNamespace to build minimal fake K8s objects.
 """
 
+import datetime
 from types import SimpleNamespace
 
 import pytest
 from kubernetes.client.rest import ApiException
 
-from seekr_chain.backends.k8s.k8s_workflow import (
+from seekr_chain.backends.k8s.workflow_state import (
     _collect_container_states,
     _collect_pod_state,
-    _is_jobset_suspended,
+    _resolve_status,
     _trim_pull_message,
+    is_jobset_suspended,
 )
 from seekr_chain.status import ContainerStatus, PodStatus
+
+UTC = datetime.timezone.utc
 
 # ---------------------------------------------------------------------------
 # Builders for fake K8s objects
@@ -50,7 +54,7 @@ def _container(name="c", state=None):
     return SimpleNamespace(name=name, state=state)
 
 
-def _pod(phase="Running", init_containers=None, containers=None, labels=None):
+def _pod(phase="Running", init_containers=None, containers=None, labels=None, start_time=None):
     return SimpleNamespace(
         metadata=SimpleNamespace(
             name="fake-pod-0",
@@ -63,7 +67,7 @@ def _pod(phase="Running", init_containers=None, containers=None, labels=None):
         ),
         status=SimpleNamespace(
             phase=phase,
-            start_time=None,
+            start_time=start_time,
             init_container_statuses=init_containers,
             container_statuses=containers,
         ),
@@ -396,7 +400,7 @@ class TestTrimPullMessage:
 
 
 # ---------------------------------------------------------------------------
-# _is_jobset_suspended
+# is_jobset_suspended
 # ---------------------------------------------------------------------------
 
 
@@ -414,20 +418,189 @@ class _FakeCustomApi:
 class TestIsJobsetSuspended:
     def test_suspended_true(self):
         api = _FakeCustomApi({"spec": {"suspend": True}})
-        assert _is_jobset_suspended(api, "my-jobset", "argo-workflows") is True
+        assert is_jobset_suspended(api, "my-jobset", "argo-workflows") is True
 
     def test_suspended_false(self):
         api = _FakeCustomApi({"spec": {"suspend": False}})
-        assert _is_jobset_suspended(api, "my-jobset", "argo-workflows") is False
+        assert is_jobset_suspended(api, "my-jobset", "argo-workflows") is False
 
     def test_suspend_field_absent(self):
         api = _FakeCustomApi({"spec": {}})
-        assert _is_jobset_suspended(api, "my-jobset", "argo-workflows") is False
+        assert is_jobset_suspended(api, "my-jobset", "argo-workflows") is False
 
     def test_api_exception_returns_false(self):
         api = _FakeCustomApi(exc=ApiException(status=404))
-        assert _is_jobset_suspended(api, "missing-jobset", "argo-workflows") is False
+        assert is_jobset_suspended(api, "missing-jobset", "argo-workflows") is False
 
     def test_unexpected_exception_returns_false(self):
         api = _FakeCustomApi(exc=RuntimeError("unexpected"))
-        assert _is_jobset_suspended(api, "my-jobset", "argo-workflows") is False
+        assert is_jobset_suspended(api, "my-jobset", "argo-workflows") is False
+
+
+# ---------------------------------------------------------------------------
+# _collect_pod_state — time-semantics
+# ---------------------------------------------------------------------------
+
+
+class TestCollectPodStateTimeSemantics:
+    """Lock in the pod time-derivation rules:
+
+    - Before main containers start (INIT:*, PULLING), dt_start = pod.start_time.
+    - Once any main container has started running, dt_start resets to the
+      earliest main-container start time so the duration measures "work
+      runtime", not pod lifetime.
+    - dt_end only finalizes when the pod itself is terminal — never for
+      active pods (regression for the original bug: PULLING pods froze at
+      the init container's finished_at timestamp).
+    """
+
+    POD_START = "2026-01-01T12:00:00Z"
+    INIT_START = "2026-01-01T12:00:01Z"
+    INIT_END = "2026-01-01T12:00:05Z"
+    MAIN_START = "2026-01-01T12:00:10Z"
+    MAIN_END = "2026-01-01T12:00:30Z"
+
+    def _ts(self, s: str) -> datetime.datetime:
+        return datetime.datetime.fromisoformat(s.replace("Z", "+00:00"))
+
+    def test_pulling_pod_dt_end_not_frozen_at_init_finish(self):
+        """Regression: PULLING pod with completed init must NOT inherit init's dt_end."""
+        pod = _pod(
+            start_time=self.POD_START,
+            init_containers=[_container("i", state=_terminated(started_at=self.INIT_START, finished_at=self.INIT_END))],
+            containers=[_container("c", state=_waiting())],
+        )
+        state = _collect_pod_state(pod)
+        assert state.status == PodStatus.PULLING
+        assert state.dt_end is None  # would equal self._ts(INIT_END) without the fix
+
+    def test_pulling_pod_dt_start_is_pod_start_time(self):
+        """Before main starts, duration counts from pod scheduling."""
+        pod = _pod(
+            start_time=self.POD_START,
+            init_containers=[_container("i", state=_terminated(started_at=self.INIT_START, finished_at=self.INIT_END))],
+            containers=[_container("c", state=_waiting())],
+        )
+        state = _collect_pod_state(pod)
+        assert state.dt_start == self._ts(self.POD_START)
+
+    def test_init_running_dt_end_none_dt_start_is_pod(self):
+        pod = _pod(
+            start_time=self.POD_START,
+            init_containers=[_container("i", state=_running(started_at=self.INIT_START))],
+            containers=[_container("c", state=_waiting())],
+        )
+        state = _collect_pod_state(pod)
+        assert state.status == PodStatus.INIT_RUNNING
+        assert state.dt_end is None
+        assert state.dt_start == self._ts(self.POD_START)
+
+    def test_running_pod_resets_dt_start_to_main_container_start(self):
+        """Once main starts, dt_start = min(main container starts), not pod.start_time."""
+        pod = _pod(
+            phase="Running",
+            start_time=self.POD_START,
+            init_containers=[_container("i", state=_terminated(started_at=self.INIT_START, finished_at=self.INIT_END))],
+            containers=[_container("c", state=_running(started_at=self.MAIN_START))],
+        )
+        state = _collect_pod_state(pod)
+        assert state.status == PodStatus.RUNNING
+        assert state.dt_start == self._ts(self.MAIN_START)
+        assert state.dt_end is None  # main still running
+
+    def test_running_pod_uses_earliest_main_start(self):
+        early = "2026-01-01T12:00:10Z"
+        later = "2026-01-01T12:00:15Z"
+        pod = _pod(
+            phase="Running",
+            start_time=self.POD_START,
+            containers=[
+                _container("c0", state=_running(started_at=later)),
+                _container("c1", state=_running(started_at=early)),
+            ],
+        )
+        state = _collect_pod_state(pod)
+        assert state.dt_start == self._ts(early)
+
+    def test_succeeded_pod_dt_end_is_max_main_end(self):
+        """Terminal pod with main containers → dt_end = max(main ends), not init ends."""
+        pod = _pod(
+            phase="Succeeded",
+            start_time=self.POD_START,
+            init_containers=[_container("i", state=_terminated(started_at=self.INIT_START, finished_at=self.INIT_END))],
+            containers=[
+                _container("c", state=_terminated(exit_code=0, started_at=self.MAIN_START, finished_at=self.MAIN_END))
+            ],
+        )
+        state = _collect_pod_state(pod)
+        assert state.status == PodStatus.SUCCEEDED
+        assert state.dt_start == self._ts(self.MAIN_START)
+        assert state.dt_end == self._ts(self.MAIN_END)
+
+    def test_init_error_pod_falls_back_to_all_container_ends(self):
+        """When main never started (init failure), dt_end falls back to all-container max."""
+        pod = _pod(
+            phase="Failed",
+            start_time=self.POD_START,
+            init_containers=[
+                _container("i", state=_terminated(exit_code=1, started_at=self.INIT_START, finished_at=self.INIT_END))
+            ],
+            containers=[_container("c", state=_waiting())],
+        )
+        state = _collect_pod_state(pod)
+        assert state.status == PodStatus.FAILED
+        # main never ran, so dt_start stays at pod.start_time
+        assert state.dt_start == self._ts(self.POD_START)
+        # dt_end falls back to init's finish time
+        assert state.dt_end == self._ts(self.INIT_END)
+
+
+# ---------------------------------------------------------------------------
+# _resolve_status
+# ---------------------------------------------------------------------------
+
+
+class TestResolveStatus:
+    """``_resolve_status`` applies (container_status → pod_status) rules in
+    order. Two-tuple = match if ANY container has the status. Three-tuple
+    with ``"all"`` = match only if ALL containers have the status."""
+
+    def test_any_match_returns_first_hit(self):
+        result = _resolve_status(
+            [ContainerStatus.RUNNING, ContainerStatus.WAITING],
+            [
+                (ContainerStatus.RUNNING, PodStatus.RUNNING),
+                (ContainerStatus.SUCCEEDED, PodStatus.SUCCEEDED),
+            ],
+        )
+        assert result == PodStatus.RUNNING
+
+    def test_rules_evaluated_in_order(self):
+        """First matching rule wins, even when later rules would also match."""
+        result = _resolve_status(
+            [ContainerStatus.FAILED, ContainerStatus.SUCCEEDED],
+            [
+                (ContainerStatus.FAILED, PodStatus.FAILED),
+                (ContainerStatus.SUCCEEDED, PodStatus.SUCCEEDED),
+            ],
+        )
+        assert result == PodStatus.FAILED
+
+    def test_no_match_returns_none(self):
+        result = _resolve_status(
+            [ContainerStatus.WAITING],
+            [(ContainerStatus.RUNNING, PodStatus.RUNNING)],
+        )
+        assert result is None
+
+    def test_empty_statuses_returns_none(self):
+        result = _resolve_status([], [(ContainerStatus.RUNNING, PodStatus.RUNNING)])
+        assert result is None
+
+    def test_all_match_requires_every_container(self):
+        """The ``"all"`` form: rule matches only when EVERY container has the status."""
+        all_succeeded = [ContainerStatus.SUCCEEDED, ContainerStatus.SUCCEEDED]
+        mixed = [ContainerStatus.SUCCEEDED, ContainerStatus.WAITING]
+        rule = [(ContainerStatus.SUCCEEDED, PodStatus.PULLING, "all")]
+        assert _resolve_status(all_succeeded, rule) == PodStatus.PULLING
+        assert _resolve_status(mixed, rule) is None
