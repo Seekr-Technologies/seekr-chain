@@ -290,6 +290,11 @@ class NixConfig(BaseModel):
     # nodes. None = not queried yet (e.g. unit tests that bypass resolution);
     # [] = queried, no warm nodes known (first-ever pull).
     _warm_nodes: Optional[list[str]] = PrivateAttr(default=None)
+    # Partial warm-cache: nodes that have pulled *some other* closure. They
+    # share a chunk of store paths with this one (glibc, gcc, bash, …), so
+    # substituters hit local disk for the overlap. Rendered as a lower-weight
+    # nodeAffinity preference. Disjoint from _warm_nodes by construction.
+    _partial_warm_nodes: Optional[list[str]] = PrivateAttr(default=None)
 
 
 class RoleSpecConfig(BaseModel):
