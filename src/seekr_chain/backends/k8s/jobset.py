@@ -377,14 +377,28 @@ def _detect_warm_nodes(role_config) -> list[str]:
     return []
 
 
+def _detect_partial_warm_nodes(role_config) -> list[str]:
+    """Return the partial warm node names this role should prefer, or [].
+
+    These are nodes that have pulled *some other* closure (any non-matching
+    value of the closure label). Their /nix-shared share a chunk of paths
+    with this closure (glibc, gcc, bash, …); steering toward them yields a
+    weaker but real warm-cache benefit when no exact-match node exists.
+    """
+    if role_config.nix is not None and role_config.nix._partial_warm_nodes:
+        return role_config.nix._partial_warm_nodes
+    return []
+
+
 def _merge_affinity_with_closure(
     base_affinity: dict | None,
     closure_hash: str | None,
     warm_nodes: list[str] | None = None,
+    partial_warm_nodes: list[str] | None = None,
 ) -> dict | None:
     """Combine the workflow-level affinity with closure warm-cache hints.
 
-    Two terms get added, both soft (``preferredDuringSchedulingIgnoredDuringExecution``):
+    Three terms get added, all soft (``preferredDuringSchedulingIgnoredDuringExecution``):
 
     1. **podAffinity** on ``seekr-chain.nix/closure=<hash>`` (weight 50). Helps
        *concurrent* warm-cache: multiple pods in the same submit sharing a
@@ -392,15 +406,22 @@ def _merge_affinity_with_closure(
        pods, so it does not help across workflow boundaries.
 
     2. **nodeAffinity** on ``kubernetes.io/hostname In [warm_nodes]`` (weight 90).
-       Helps *sequential* warm-cache: pods from earlier submits left a record
-       (the closure label on completed pods, queried at submit time by
-       :func:`nix_utils.find_warm_nodes`). nodeAffinity matches against node
-       labels directly so it works regardless of pod liveness.
+       Helps *sequential exact-match* warm-cache: pods from earlier submits
+       left a record (the closure label on completed pods, queried at submit
+       time by :func:`nix_utils.find_warm_nodes`). nodeAffinity matches
+       against node labels directly so it works regardless of pod liveness.
 
-    Both are soft — under capacity pressure pods spread to cold nodes
-    rather than blocking. weight 90 on nodeAffinity is high relative to
-    weight 50 on podAffinity because nodeAffinity is the more authoritative
-    "this closure literally exists on that node's disk" signal.
+    3. **nodeAffinity** on partial-warm nodes (weight 30). Helps *sequential
+       partial-match*: nodes that ran a different closure still share a
+       chunk of store paths with this one (glibc, gcc, bash, …). Weaker
+       signal than 2, but useful when no exact match exists. Disjoint from
+       (2) by construction in ``find_warm_nodes``.
+
+    All are soft — under capacity pressure pods spread to cold nodes rather
+    than blocking. Weights compound when a node matches multiple terms.
+    Ordering: exact (90) > podAffinity (50) > partial (30), so an
+    exact-match node always wins over a partial-only node even when the
+    partial node also has a concurrent producer (which would add 50).
 
     A deep copy keeps the workflow-level affinity dict (shared across all
     roles in a step) from being mutated.
@@ -422,7 +443,7 @@ def _merge_affinity_with_closure(
         }
     )
 
-    # nodeAffinity: sequential warm-cache via known warm node hostnames.
+    # nodeAffinity: sequential exact-match warm-cache via known warm node hostnames.
     if warm_nodes:
         na = affinity.setdefault("nodeAffinity", {})
         na_pref = na.setdefault("preferredDuringSchedulingIgnoredDuringExecution", [])
@@ -435,6 +456,28 @@ def _merge_affinity_with_closure(
                             "key": "kubernetes.io/hostname",
                             "operator": "In",
                             "values": warm_nodes,
+                        }
+                    ]
+                },
+            }
+        )
+
+    # nodeAffinity: sequential partial-match warm-cache. Lower weight (30)
+    # so any exact-match node always outranks a partial-only one. Disjoint
+    # from `warm_nodes` by construction in find_warm_nodes — no node
+    # appears in both lists.
+    if partial_warm_nodes:
+        na = affinity.setdefault("nodeAffinity", {})
+        na_pref = na.setdefault("preferredDuringSchedulingIgnoredDuringExecution", [])
+        na_pref.append(
+            {
+                "weight": 30,
+                "preference": {
+                    "matchExpressions": [
+                        {
+                            "key": "kubernetes.io/hostname",
+                            "operator": "In",
+                            "values": partial_warm_nodes,
                         }
                     ]
                 },
@@ -605,7 +648,10 @@ def _build_role_context(
     # a user step naturally prefers the node where the build step ran.
     closure_hash = _detect_closure_hash(role_config, code_path=code_path)
     warm_nodes = _detect_warm_nodes(role_config)
-    role_affinity = _merge_affinity_with_closure(workflow_affinity, closure_hash, warm_nodes)
+    partial_warm_nodes = _detect_partial_warm_nodes(role_config)
+    role_affinity = _merge_affinity_with_closure(
+        workflow_affinity, closure_hash, warm_nodes, partial_warm_nodes,
+    )
 
     return {
         "name": js_pod_name,
