@@ -55,7 +55,12 @@ cd /seekr-chain/workspace
 # $SEEKR_CHAIN_NIX_STORE (durable cache).
 FLAKE_REF="path:$SEEKR_CHAIN_NIX_EXPRESSION#packages.$SEEKR_CHAIN_NIX_SYSTEM.$SEEKR_CHAIN_NIX_ATTR"
 echo "=== nix build $FLAKE_REF ==="
-BUILT=$(nix build --print-out-paths --no-link "$FLAKE_REF" 2> >(tee -a "$LOG" >&2))
+# -L (--print-build-logs) streams each derivation's stderr into our log,
+# prefixed with the derivation name. Without it, nix suppresses build
+# output when stdout/stderr aren't a TTY — so chain pod logs would show
+# only "building '<drv>'" headers and you'd have no way to tell whether
+# a 10-minute "build" is making progress or stuck.
+BUILT=$(nix build --print-out-paths --no-link -L "$FLAKE_REF" 2> >(tee -a "$LOG" >&2))
 echo "built closure: $BUILT"
 
 if [ "$BUILT" != "$SEEKR_CHAIN_NIX_CLOSURE" ]; then
