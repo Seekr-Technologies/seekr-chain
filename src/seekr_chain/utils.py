@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 
+import datetime
 import os
 import random
 import re
 import string
 from pathlib import Path
+from typing import Optional
 
 
 def resolve_image(image: str) -> str:
@@ -58,6 +60,31 @@ def human_to_int(byte_str: str) -> int:
     result = value * base**exponent
 
     return int(result)
+
+
+def format_duration(
+    dt_start: Optional[datetime.datetime],
+    dt_end: Optional[datetime.datetime] = None,
+) -> str:
+    """Format an elapsed or completed duration as ``H:MM:SS`` or ``M:SS``.
+
+    - Returns ``""`` if ``dt_start`` is ``None``.
+    - Uses ``datetime.datetime.now(tz=UTC)`` for the end when ``dt_end`` is
+      ``None`` (i.e. "still running, count from start until now").
+    - Naive datetimes are treated as UTC.
+    - ``dt_end < dt_start`` clamps to ``0:00``.
+    """
+    if dt_start is None:
+        return ""
+    end = dt_end if dt_end is not None else datetime.datetime.now(tz=datetime.timezone.utc)
+    if dt_start.tzinfo is None:
+        dt_start = dt_start.replace(tzinfo=datetime.timezone.utc)
+    if end.tzinfo is None:
+        end = end.replace(tzinfo=datetime.timezone.utc)
+    total = max(0, int((end - dt_start).total_seconds()))
+    h, rem = divmod(total, 3600)
+    m, s = divmod(rem, 60)
+    return f"{h}:{m:02d}:{s:02d}" if h else f"{m}:{s:02d}"
 
 
 def format_bytes(num_bytes: int) -> str:
