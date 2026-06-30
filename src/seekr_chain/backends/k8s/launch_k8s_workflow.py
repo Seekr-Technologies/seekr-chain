@@ -271,7 +271,8 @@ def _build_controller_job(
     service_account: str,
 ) -> dict:
     """Build the batch/v1 Job manifest for the controller pod."""
-    controller_image = _CONTROLLER_IMAGE
+    # Per-workflow config.controller_image overrides user config and default.
+    controller_image = config.controller_image or _CONTROLLER_IMAGE
     controller_command = ["python", f"{constants.JOB_RESOURCES_PATH}/controller.py"]
 
     # Env vars for the controller's init container (S3 download via s5cmd)
