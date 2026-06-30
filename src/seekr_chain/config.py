@@ -383,6 +383,12 @@ class WorkflowConfig(BaseModel):
     affinity: Optional[list[AffinityRule]] = None
     scheduling: Optional[SchedulingConfig] = None
     logging: LoggingConfig = LoggingConfig()
+    controller_image: Optional[str] = None
+    """Override the controller pod image for this workflow (k8s backend only).
+
+    Resolution order: this field, then ``controller_image`` in user config,
+    then the built-in default. Useful for testing a custom controller image
+    against a single workflow without changing the user-level default."""
 
     @field_validator("affinity", mode="before")
     @classmethod
