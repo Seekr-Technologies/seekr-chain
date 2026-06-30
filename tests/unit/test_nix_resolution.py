@@ -344,8 +344,9 @@ class TestErrorPaths:
         assert build.image == _DEFAULT_NIX_RUNNER_IMAGE
 
 class TestWarmNodesCache:
-    """resolve_nix_steps should populate role.nix._warm_nodes via
-    find_warm_nodes so the renderer can inject nodeAffinity preferences.
+    """resolve_nix_steps should populate role.nix._warm_nodes (exact) and
+    role.nix._partial_warm_nodes (some other closure) via find_warm_nodes
+    so the renderer can inject the two nodeAffinity preferences.
     """
 
     def test_warm_nodes_populated(self, monkeypatch, _nix_user_config, _no_eval_needed):
@@ -354,7 +355,7 @@ class TestWarmNodesCache:
         _existing(monkeypatch)
         monkeypatch.setattr(
             "seekr_chain.nix_utils.find_warm_nodes",
-            lambda h, namespace, **_kw: ["node-a", "node-b"],
+            lambda h, namespace, **_kw: (["node-a", "node-b"], ["node-c"]),
         )
 
         c = WorkflowConfig(
@@ -363,13 +364,14 @@ class TestWarmNodesCache:
         )
         out = resolve_nix_steps(c)
         assert out.steps[0].nix._warm_nodes == ["node-a", "node-b"]
+        assert out.steps[0].nix._partial_warm_nodes == ["node-c"]
 
     def test_warm_nodes_deduped_across_roles_sharing_closure(
         self, monkeypatch, _nix_user_config, _no_eval_needed,
     ):
         """Two steps with the same expression share a closure; find_warm_nodes
         should be called only once per unique closure, with both roles getting
-        the same cached list.
+        the same cached (exact, partial) tuple.
         """
         from seekr_chain.nix_resolution import resolve_nix_steps
 
@@ -377,7 +379,7 @@ class TestWarmNodesCache:
         calls = {"n": 0}
         def fake(_h, **_kw):
             calls["n"] += 1
-            return ["node-a"]
+            return (["node-a"], ["node-z"])
         monkeypatch.setattr("seekr_chain.nix_utils.find_warm_nodes", fake)
 
         c = WorkflowConfig(
@@ -390,7 +392,9 @@ class TestWarmNodesCache:
         out = resolve_nix_steps(c)
         assert calls["n"] == 1  # only one API call across both roles
         assert out.steps[0].nix._warm_nodes == ["node-a"]
+        assert out.steps[0].nix._partial_warm_nodes == ["node-z"]
         assert out.steps[1].nix._warm_nodes == ["node-a"]
+        assert out.steps[1].nix._partial_warm_nodes == ["node-z"]
 
 
 class TestExpressionValidation:

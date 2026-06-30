@@ -592,6 +592,114 @@ class TestNixRendering:
         # nodeAffinity not added — no warm nodes known.
         assert "nodeAffinity" not in pod["spec"]["affinity"]
 
+    def test_partial_warm_nodes_render_lower_weight_affinity(self, tmp_path, monkeypatch):
+        """When _partial_warm_nodes is populated, the renderer adds a soft
+        nodeAffinity preferring those hostnames at the *lower* weight (30).
+        Without exact warm nodes, this is the only nodeAffinity term.
+        """
+        from seekr_chain.backends.k8s import render
+        from seekr_chain.backends.k8s.job_info import get_job_info
+        from seekr_chain.backends.k8s.jobset import build_jobset_context
+        from seekr_chain.user_config import UserConfig
+        import yaml
+
+        _patch_user_config(monkeypatch, UserConfig(nix_runner_image="img:tag"))
+        monkeypatch.setattr("seekr_chain.nix_utils.closure_exists", lambda *_a, **_k: True)
+        _mock_eval(monkeypatch, "/nix/store/warmhash-x")
+
+        cfg = WorkflowConfig(
+            name="t", code={"path": "/tmp/t"},
+            steps=[
+                {
+                    "name": "train",
+                    "nix": {"expression": "./", "store": "s3://b", "build": False},
+                    "script": "echo",
+                    "resources": {"cpus_per_node": "1", "mem_per_node": "1Gi", "ephemeral_storage_per_node": "1Gi"},
+                }
+            ],
+        )
+        cfg.steps[0].nix._partial_warm_nodes = ["node-other-1", "node-other-2"]
+
+        job_info = get_job_info("ab1234", datastore_root="s3://b/")
+        _, context = build_jobset_context(
+            workflow_config=cfg, step_index=0, job_info=job_info,
+            workflow_name="ab1234", workflow_secrets=[], interactive=False,
+            assets_path=tmp_path / "assets",
+        )
+        manifest = yaml.safe_load(render.render("jobset.yaml.j2", context))
+        pod = manifest["spec"]["replicatedJobs"][0]["template"]["spec"]["template"]
+
+        preferred = pod["spec"]["affinity"]["nodeAffinity"][
+            "preferredDuringSchedulingIgnoredDuringExecution"
+        ]
+        partial_terms = [
+            t for t in preferred
+            if any(
+                e.get("key") == "kubernetes.io/hostname" and e.get("operator") == "In"
+                for e in t["preference"].get("matchExpressions", [])
+            )
+        ]
+        assert len(partial_terms) == 1
+        term = partial_terms[0]
+        assert term["weight"] == 30
+        values = term["preference"]["matchExpressions"][0]["values"]
+        assert values == ["node-other-1", "node-other-2"]
+
+    def test_both_warm_and_partial_render_both_terms(self, tmp_path, monkeypatch):
+        """With both exact and partial warm-node lists populated, the renderer
+        emits two distinct nodeAffinity preferred terms — weight 90 for the
+        exact list, weight 30 for the partial list.
+        """
+        from seekr_chain.backends.k8s import render
+        from seekr_chain.backends.k8s.job_info import get_job_info
+        from seekr_chain.backends.k8s.jobset import build_jobset_context
+        from seekr_chain.user_config import UserConfig
+        import yaml
+
+        _patch_user_config(monkeypatch, UserConfig(nix_runner_image="img:tag"))
+        monkeypatch.setattr("seekr_chain.nix_utils.closure_exists", lambda *_a, **_k: True)
+        _mock_eval(monkeypatch, "/nix/store/warmhash-x")
+
+        cfg = WorkflowConfig(
+            name="t", code={"path": "/tmp/t"},
+            steps=[
+                {
+                    "name": "train",
+                    "nix": {"expression": "./", "store": "s3://b", "build": False},
+                    "script": "echo",
+                    "resources": {"cpus_per_node": "1", "mem_per_node": "1Gi", "ephemeral_storage_per_node": "1Gi"},
+                }
+            ],
+        )
+        cfg.steps[0].nix._warm_nodes = ["node-exact-1", "node-exact-2"]
+        cfg.steps[0].nix._partial_warm_nodes = ["node-partial-1"]
+
+        job_info = get_job_info("ab1234", datastore_root="s3://b/")
+        _, context = build_jobset_context(
+            workflow_config=cfg, step_index=0, job_info=job_info,
+            workflow_name="ab1234", workflow_secrets=[], interactive=False,
+            assets_path=tmp_path / "assets",
+        )
+        manifest = yaml.safe_load(render.render("jobset.yaml.j2", context))
+        pod = manifest["spec"]["replicatedJobs"][0]["template"]["spec"]["template"]
+
+        preferred = pod["spec"]["affinity"]["nodeAffinity"][
+            "preferredDuringSchedulingIgnoredDuringExecution"
+        ]
+        hostname_terms = [
+            t for t in preferred
+            if any(
+                e.get("key") == "kubernetes.io/hostname" and e.get("operator") == "In"
+                for e in t["preference"].get("matchExpressions", [])
+            )
+        ]
+        # Two distinct terms.
+        assert len(hostname_terms) == 2
+        by_weight = {t["weight"]: t for t in hostname_terms}
+        assert set(by_weight) == {30, 90}
+        assert by_weight[90]["preference"]["matchExpressions"][0]["values"] == ["node-exact-1", "node-exact-2"]
+        assert by_weight[30]["preference"]["matchExpressions"][0]["values"] == ["node-partial-1"]
+
     def test_non_nix_role_has_no_closure_label_or_affinity(self, tmp_path):
         """Sanity: image-mode roles get neither the label nor the closure affinity."""
         from seekr_chain.backends.k8s import render
