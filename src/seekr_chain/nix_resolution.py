@@ -269,16 +269,19 @@ def _collect_needed_builds(
     Side effects on each role's NixConfig:
 
     - ``_resolved_closure`` cached so the jobset renderer doesn't re-eval.
-    - ``_warm_nodes`` populated via a single k8s API call per unique closure
-      (the renderer injects these as a soft nodeAffinity preference).
+    - ``_warm_nodes`` (exact-closure match) and ``_partial_warm_nodes``
+      (any other closure on the node) populated via a single k8s API call
+      per unique closure. The renderer injects both as soft nodeAffinity
+      preferences (different weights).
 
     Raises if any role has ``build=False`` but the closure isn't in the store.
     """
     role_to_closure: dict[int, str] = {}
     needed_builds: dict[str, NixConfig] = {}
     # Dedup the warm-node query across roles in the same submit. One API
-    # call per unique closure-hash, not per role.
-    warm_nodes_cache: dict[str, list[str]] = {}
+    # call per unique closure-hash, not per role. Each entry is
+    # (exact_nodes, partial_nodes) from find_warm_nodes.
+    warm_nodes_cache: dict[str, tuple[list[str], list[str]]] = {}
 
     for step, nix_roles in nix_roles_by_step:
         for role in nix_roles:
@@ -298,7 +301,9 @@ def _collect_needed_builds(
                 warm_nodes_cache[closure_hash] = nix_utils.find_warm_nodes(
                     closure_hash, namespace=namespace,
                 )
-            role.nix._warm_nodes = warm_nodes_cache[closure_hash]
+            exact_nodes, partial_nodes = warm_nodes_cache[closure_hash]
+            role.nix._warm_nodes = exact_nodes
+            role.nix._partial_warm_nodes = partial_nodes
 
             store_uri = _resolve_store_uri(role.nix, role_name)
 
