@@ -155,6 +155,34 @@ class TestJobsetTemplateRendering:
             "contains it when config.code is set)"
         )
 
+    def test_image_mode_init_container_injects_busybox(self, tmp_path):
+        """Image-mode pods must keep getting busybox injected at /seekr-chain/bin
+        so user images don't need to ship a shell or POSIX tools. Regression
+        guard against the nix-mode shell-injection skip.
+        """
+        config = _minimal_config()
+        job_info = _fake_job_info()
+
+        _, context = build_jobset_context(
+            workflow_config=config,
+            step_index=0,
+            job_info=job_info,
+            workflow_name="ab1234",
+            workflow_secrets=[],
+            interactive=False,
+            assets_path=tmp_path / "assets",
+        )
+        manifest = yaml.safe_load(render.render("jobset.yaml.j2", context))
+        pod = manifest["spec"]["replicatedJobs"][0]["template"]["spec"]["template"]
+        script = "\n".join(pod["spec"]["initContainers"][0]["args"])
+
+        assert "cp /bin/busybox /seekr-chain/busybox" in script
+        assert "ln -sf /seekr-chain/busybox /seekr-chain/bin/sh" in script
+        assert "ln -sf /seekr-chain/busybox /seekr-chain/bin/awk" in script
+        # Main runs under the injected shell (image may have nothing usable).
+        main = next(c for c in pod["spec"]["containers"] if c["name"] == "main")
+        assert main["command"] == ["/seekr-chain/bin/sh", "-c"]
+
     def test_init_container_has_required_env(self, tmp_path):
         config = _minimal_config()
         job_info = _fake_job_info()

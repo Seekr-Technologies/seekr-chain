@@ -1,0 +1,28 @@
+# Bootstrap image for the seekr-chain nix mode.
+#
+# Smallest image that can `nix copy` and then exec. The actual runtime environment
+# is feteched from binary cache at runtime.
+FROM busybox:1.36-musl@sha256:3c6ae8008e2c2eedd141725c30b20d9c36b026eb796688f88205845ef17aa213 AS busybox
+
+FROM nixos/nix:2.21.1@sha256:3f6c77ee4d2c82e472e64e6cd7087241dc391421a0b42c22e6849c586d5398d9
+
+# Enable the modern nix CLI (`nix copy`, `nix run`) and disable build sandboxing.
+RUN { \
+        echo 'experimental-features = nix-command flakes'; \
+        echo 'sandbox = false'; \
+    } >> /etc/nix/nix.conf
+
+# Bake required static busybox in for the standard POSIX tools seekr-chain
+COPY --from=busybox /bin/busybox /bin/busybox
+RUN for tool in \
+        sh head awk cat tee touch sleep time \
+        ps ls find grep sed kill df du wc tail less more env which; \
+    do \
+        ln -sf /bin/busybox /bin/$tool; \
+    done
+
+# /bin/bash is required for many autoconf-generated nix builds
+RUN ln -sf /root/.nix-profile/bin/bash /bin/bash
+
+# add bin to path
+ENV PATH=/bin:/root/.nix-profile/bin:/nix/var/nix/profiles/default/bin:/nix/var/nix/profiles/default/sbin

@@ -6,7 +6,7 @@ from enum import Enum
 from typing import Annotated, Literal, Optional, Self, Union
 
 import pydantic
-from pydantic import Field, field_validator, model_validator
+from pydantic import Field, PrivateAttr, field_validator, model_validator
 
 
 class BaseModel(pydantic.BaseModel):
@@ -232,13 +232,79 @@ class FailurePolicy(BaseModel):
     rules: list[FailureRule] = []
 
 
+class NixConfig(BaseModel):
+    """Use a nix closure as the runtime instead of a Docker image.
+
+    The role's container runs a minimal "nix-runner" OCI image that holds nix
+    + s5cmd. At pod startup it pulls the closure from the configured binary
+    cache into ``/nix/store`` and runs the user script with the closure's
+    ``bin/`` on PATH. Image distribution shifts from ``docker pull``
+    (sequential layer extract) to ``nix copy --from`` (per-path parallel
+    fetches with cross-image deduplication).
+
+    At submit time seekr-chain evaluates ``<expression>#<attr>.outPath``
+    locally (requires ``nix`` on the submit machine) to compute the
+    content-addressed closure path. If the closure is missing from the
+    store and ``build=True`` (default), seekr-chain injects a build step
+    into the DAG that runs ``nix build`` + ``nix copy --to`` against the
+    store.
+
+    Parameters
+    ----------
+    expression : Path to a flake directory or ``.nix`` file, relative to
+        ``code.path``. Same string is used at submit time (for eval) and
+        inside the build pod (for ``nix build``).
+    attr : Attribute path within the expression to materialize (default: ``"default"``).
+    system : Target system for the closure (default: ``"x86_64-linux"``).
+    store : URI for the binary cache (e.g. ``s3://bucket``). Any nix store
+        type works; see https://nix.dev/manual/nix/2.26/store/types/. Defaults
+        to ``~/.seekrchain.toml``'s ``nix_store``.
+    build : Whether to auto-build a missing closure by injecting a build step
+        into the DAG. Set ``False`` to fail at submit time if the closure
+        isn't already in the store — useful to enforce "must be pre-built"
+        semantics for some workflows.
+    build_resources : Resources for the auto-injected build step. Defaults are
+        modest (4 CPU / 16 GiB RAM / 0 GPU) — fine for small python closures;
+        large native builds (pytorch from source, flash-attn) want much more
+        and should set this explicitly.
+    """
+
+    expression: str = "./"
+    attr: str = "default"
+    system: str = "x86_64-linux"
+    store: Optional[str] = None
+    build: bool = True
+    build_resources: Optional[ResourceConfig] = None
+
+    # Submit-time cache: resolve_nix_steps evaluates the closure path once
+    # and stashes it here so downstream callers (jobset's _resolve_nix_role,
+    # _detect_closure_hash) don't re-shell out to `nix eval`. Each call costs
+    # ~1.5s of subprocess + flake-re-eval overhead even with nix's internal
+    # cache hot; running it 3x per submit (which is what happened before this
+    # cache existed) noticeably slowed `chain submit`.
+    _resolved_closure: Optional[str] = PrivateAttr(default=None)
+    # Submit-time cache: resolve_nix_steps queries the k8s API for pods that
+    # have previously pulled this closure (label seekr-chain.nix/closure=<hash>)
+    # and stashes their node names here. The renderer injects them as a soft
+    # nodeAffinity preference so the scheduler steers new pods toward warm
+    # nodes. None = not queried yet (e.g. unit tests that bypass resolution);
+    # [] = queried, no warm nodes known (first-ever pull).
+    _warm_nodes: Optional[list[str]] = PrivateAttr(default=None)
+    # Partial warm-cache: nodes that have pulled *some other* closure. They
+    # share a chunk of store paths with this one (glibc, gcc, bash, …), so
+    # substituters hit local disk for the overlap. Rendered as a lower-weight
+    # nodeAffinity preference. Disjoint from _warm_nodes by construction.
+    _partial_warm_nodes: Optional[list[str]] = PrivateAttr(default=None)
+
+
 class RoleSpecConfig(BaseModel):
     """Specification for a single role (container) within a step.
 
     Parameters
     ----------
     name : Role/step name
-    image : Docker image to run
+    image : Docker image to run (mutually exclusive with ``nix``).
+    nix : Nix closure runtime (mutually exclusive with ``image``).
     shell : Shell used to execute the script
     before_script : Shell commands to run before the main script
     script : Shell script to execute
@@ -249,7 +315,8 @@ class RoleSpecConfig(BaseModel):
     """
 
     name: str
-    image: str
+    image: Optional[str] = None
+    nix: Optional[NixConfig] = None
     shell: str = "/bin/sh"
     before_script: str | None = None
     script: str
@@ -257,6 +324,12 @@ class RoleSpecConfig(BaseModel):
     resources: ResourceConfig = ResourceConfig()
     depends_on: Optional[list[str]] = None
     env: Optional[dict[str, str]] = None
+
+    @pydantic.model_validator(mode="after")
+    def _check_image_xor_nix(self) -> Self:
+        if (self.image is None) == (self.nix is None):
+            raise ValueError(f"role {self.name!r}: must specify exactly one of `image` or `nix`")
+        return self
 
 
 class SingleRoleStepConfig(RoleSpecConfig):

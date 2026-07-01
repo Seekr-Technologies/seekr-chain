@@ -85,6 +85,7 @@ nav:
       - Features: features.md
       - Interactive Jobs: guides/interactive-jobs.md
       - Multi-node Training: guides/multi-node-training.md
+      - Nix-mode Runtime: guides/nix-mode.md
       - Working with PVCs: guides/persistent-volumes.md
       - Secrets Management: guides/secrets.md
   - Reference:
