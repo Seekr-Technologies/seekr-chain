@@ -14,8 +14,10 @@ Public API:
   * ``format_count(statuses, total)`` — small utility, exposed for tests.
 
 The header is built from the workflow-level fields on ``WorkflowState``
-(``id``, ``name``, ``status``, ``dt_start``, ``dt_end``, ``total_steps``,
-``captured_at``) — callers don't pass any extra context.
+(``id``, ``name``, ``status``, ``dt_start``, ``dt_end``, ``total_steps``).
+The bracketed ``[HH:MM:SS]`` prefix is the current local wall-clock time
+at render — it ticks every second alongside the elapsed-duration column,
+regardless of when the underlying state was last fetched.
 
 Layout (see ``.hatchery/tasks/2026-05-10-better-status.md`` for the full
 design rationale)::
@@ -293,7 +295,9 @@ def _append_row(text: Text, row: _StatusRow, w0: int, w_time: int, w_count: int,
 
 def _header_row(workflow_state: WorkflowState) -> _StatusRow:
     """Build the workflow-level header row from the workflow state."""
-    timestamp = workflow_state.captured_at.strftime("%H:%M:%S")
+    # Local wall-clock at render; the display loop re-renders every second
+    # so the user sees a ticking clock in their own timezone.
+    timestamp = datetime.datetime.now().astimezone().strftime("%H:%M:%S")
     elapsed = format_duration(workflow_state.dt_start, workflow_state.dt_end)
     step_statuses = [s.pod.status for s in workflow_state.steps]
     count = format_count(step_statuses, total=workflow_state.total_steps) if step_statuses else ""

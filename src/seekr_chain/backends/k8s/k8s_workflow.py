@@ -16,6 +16,7 @@ from seekr_chain import k8s_utils, s3_utils
 from seekr_chain.backends.k8s.job_info import JobInfo, get_job_info
 from seekr_chain.backends.k8s.parse_logs import LogStore, parse_logs
 from seekr_chain.backends.k8s.render_status import format_plain, render
+from seekr_chain.backends.k8s.state_fetcher import BackgroundStateFetcher
 from seekr_chain.backends.k8s.workflow_state import (
     PodState,
     WorkflowState,
@@ -218,9 +219,12 @@ class K8sWorkflow(Workflow):
         follow_threads = []
         console = Console()
 
-        with maybe_live(plain=plain, console=console, refresh_per_second=4, transient=False) as live:
+        with (
+            BackgroundStateFetcher(self.get_detailed_state) as fetcher,
+            maybe_live(plain=plain, console=console, refresh_per_second=4, transient=False) as live,
+        ):
+            workflow_state = fetcher.wait_for_first()
             while True:
-                workflow_state = self.get_detailed_state()
                 live.update(render(workflow_state))
 
                 if workflow_state.status.is_finished():
@@ -244,6 +248,10 @@ class K8sWorkflow(Workflow):
                                 )
 
                 time.sleep(1)
+                # If a fetch is in flight, `latest()` returns the previous
+                # snapshot; durations still tick because the renderer uses
+                # `datetime.now()` for open-ended intervals.
+                workflow_state = fetcher.latest()
 
             for t_thread in follow_threads:
                 t_thread.join(timeout=2)
@@ -255,9 +263,12 @@ class K8sWorkflow(Workflow):
         console = Console()
         plain = False
         poll_interval = 1
-        with maybe_live(plain=plain, console=console, refresh_per_second=4, transient=False) as live:
+        with (
+            BackgroundStateFetcher(self.get_detailed_state) as fetcher,
+            maybe_live(plain=plain, console=console, refresh_per_second=4, transient=False) as live,
+        ):
+            workflow_state = fetcher.wait_for_first()
             while True:
-                workflow_state = self.get_detailed_state()
                 live.update(render(workflow_state))
 
                 pod = first_running_or_finished_pod(workflow_state)
@@ -266,6 +277,7 @@ class K8sWorkflow(Workflow):
                     break
 
                 time.sleep(poll_interval)
+                workflow_state = fetcher.latest()
 
         assert isinstance(pod, PodState)
 
