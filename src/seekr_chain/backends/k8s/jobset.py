@@ -15,7 +15,6 @@ from seekr_chain.config import (
     WorkflowConfig,
 )
 from seekr_chain.nix_resolution import (
-    _DEFAULT_NIX_RUNNER_IMAGE,
     _NIX_RUNNER_IMAGE,
     _resolve_store_uri,
 )
@@ -650,7 +649,10 @@ def _build_role_context(
     warm_nodes = _detect_warm_nodes(role_config)
     partial_warm_nodes = _detect_partial_warm_nodes(role_config)
     role_affinity = _merge_affinity_with_closure(
-        workflow_affinity, closure_hash, warm_nodes, partial_warm_nodes,
+        workflow_affinity,
+        closure_hash,
+        warm_nodes,
+        partial_warm_nodes,
     )
 
     return {

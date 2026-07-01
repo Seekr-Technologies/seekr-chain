@@ -26,7 +26,6 @@ from __future__ import annotations
 
 import logging
 import os
-from typing import Optional
 from urllib.parse import urlparse
 
 from seekr_chain import nix_utils
@@ -98,7 +97,7 @@ def _resolve_store_uri(nix_cfg: NixConfig, role_name: str) -> str:
         raise ValueError(
             f"role {role_name!r}: nix.store is not set and ~/.seekrchain.toml's "
             "`nix_store` is not configured. Set one or the other (e.g. "
-            "nix_store = \"s3://bucket\")."
+            'nix_store = "s3://bucket").'
         )
     _validate_store_uri(store, role_name)
     return store
@@ -149,9 +148,7 @@ def _make_build_step(
     """
     # nix's URI parameter is lowercase; user_config exposes the Literal
     # in uppercase per the seekr-chain convention for one-of options.
-    compression = (
-        _user_config.nix_compression or _DEFAULT_NIX_COMPRESSION.upper()
-    ).lower()
+    compression = (_user_config.nix_compression or _DEFAULT_NIX_COMPRESSION.upper()).lower()
 
     return SingleRoleStepConfig(
         name=step_name,
@@ -247,7 +244,9 @@ def resolve_nix_steps(config: WorkflowConfig) -> WorkflowConfig:
         )
 
     role_to_closure, needed_builds = _collect_needed_builds(
-        nix_roles_by_step, config.code.path, config.namespace or "argo",
+        nix_roles_by_step,
+        config.code.path,
+        config.namespace or "argo",
     )
     if not needed_builds:
         return config
@@ -287,10 +286,14 @@ def _collect_needed_builds(
         for role in nix_roles:
             role_name = role.name or step.name
             resolved_expression = _validate_expression_under_code_path(
-                role.nix.expression, code_path, role_name,
+                role.nix.expression,
+                code_path,
+                role_name,
             )
             closure = nix_utils.eval_closure_path(
-                resolved_expression, attr=role.nix.attr, system=role.nix.system,
+                resolved_expression,
+                attr=role.nix.attr,
+                system=role.nix.system,
             )
             # Cache for downstream (jobset rendering) so we don't re-eval.
             role.nix._resolved_closure = closure
@@ -299,7 +302,8 @@ def _collect_needed_builds(
             closure_hash = nix_utils.closure_hash_from_path(closure)
             if closure_hash not in warm_nodes_cache:
                 warm_nodes_cache[closure_hash] = nix_utils.find_warm_nodes(
-                    closure_hash, namespace=namespace,
+                    closure_hash,
+                    namespace=namespace,
                 )
             exact_nodes, partial_nodes = warm_nodes_cache[closure_hash]
             role.nix._warm_nodes = exact_nodes
@@ -323,7 +327,8 @@ def _collect_needed_builds(
                 needed_builds[closure] = role.nix
                 logger.info(
                     "nix closure %s missing from %s — scheduling in-cluster build",
-                    closure, store_uri,
+                    closure,
+                    store_uri,
                 )
 
     return role_to_closure, needed_builds

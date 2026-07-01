@@ -48,16 +48,11 @@ def closure_hash_from_path(closure_path: str) -> str:
     in a binary cache, which is what we look up to test existence.
     """
     if not closure_path.startswith("/nix/store/"):
-        raise ValueError(
-            f"expected absolute /nix/store path, got {closure_path!r}"
-        )
+        raise ValueError(f"expected absolute /nix/store path, got {closure_path!r}")
     basename = closure_path.removeprefix("/nix/store/")
     hash_part, _, _ = basename.partition("-")
     if not hash_part:
-        raise ValueError(
-            f"could not extract hash from {closure_path!r} "
-            "(expected /nix/store/<hash>-<name>)"
-        )
+        raise ValueError(f"could not extract hash from {closure_path!r} (expected /nix/store/<hash>-<name>)")
     return hash_part
 
 
@@ -103,15 +98,17 @@ def eval_closure_path(expression: str, attr: str = "default", system: str = "x86
     elif expr_path.suffix == ".nix" and expr_path.is_file():
         # For a classic .nix file, evaluate the attr on the imported expression.
         # We can't use the flake ref syntax; use --expr to wrap.
-        target_expr = f"((import {expr_path}) {{}}).{attr}.outPath" if attr != "default" \
-                      else f"((import {expr_path}) {{}}).outPath"
+        target_expr = (
+            f"((import {expr_path}) {{}}).{attr}.outPath"
+            if attr != "default"
+            else f"((import {expr_path}) {{}}).outPath"
+        )
         # nix eval --raw --impure --expr '...'
         cmd = ["nix", "eval", "--raw", "--impure", "--expr", target_expr]
         return _run_nix_eval(cmd, expression, attr)
     else:
         raise ValueError(
-            f"nix.expression must point to a .nix file or a directory containing "
-            f"flake.nix; got {expr_path}"
+            f"nix.expression must point to a .nix file or a directory containing flake.nix; got {expr_path}"
         )
 
     cmd = ["nix", "eval", "--raw", target]
@@ -154,9 +151,7 @@ def _run_nix_eval(cmd: list[str], expression: str, attr: str) -> str:
 
     out = result.stdout.strip()
     if not out.startswith("/nix/store/"):
-        raise NixEvalError(
-            f"nix eval returned an unexpected output (expected /nix/store/...): {out!r}"
-        )
+        raise NixEvalError(f"nix eval returned an unexpected output (expected /nix/store/...): {out!r}")
     logger.info("Resolved closure path: %s", out)
     return out
 
@@ -245,9 +240,10 @@ def find_warm_nodes(
         )
     except Exception as e:
         logger.warning(
-            "could not query warm nodes for closure %s in %s: %s; "
-            "scheduler will pick without warm-cache hint",
-            closure_hash, namespace, e,
+            "could not query warm nodes for closure %s in %s: %s; scheduler will pick without warm-cache hint",
+            closure_hash,
+            namespace,
+            e,
         )
         return [], []
 

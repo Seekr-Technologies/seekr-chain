@@ -48,7 +48,8 @@ class TestExamples:
             from seekr_chain.user_config import UserConfig
 
             monkeypatch.setattr(
-                jobset_mod, "_user_config",
+                jobset_mod,
+                "_user_config",
                 UserConfig(
                     nix_store="s3://fake-test-bucket/cache",
                     nix_runner_image="registry.example.com/nix-runner:test",

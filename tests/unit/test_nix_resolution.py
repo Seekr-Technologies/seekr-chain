@@ -46,9 +46,11 @@ def _no_eval_needed(monkeypatch):
     roles with the same expression+attr+system will appear to share a
     closure (dedup tests rely on this).
     """
+
     def fake_eval(expression, attr="default", system="x86_64-linux"):
         # Cheap hash-ish so different (expr, attr, system) tuples differ.
         import hashlib
+
         key = f"{expression}|{attr}|{system}".encode()
         h = hashlib.sha256(key).hexdigest()[:32]
         return f"/nix/store/{h}-{attr}"
@@ -74,7 +76,8 @@ class TestNoOp:
         from seekr_chain.nix_resolution import resolve_nix_steps
 
         c = WorkflowConfig(
-            name="t", code={"path": "/tmp/t"},
+            name="t",
+            code={"path": "/tmp/t"},
             steps=[{"name": "a", "image": "ubuntu", "script": "echo"}],
         )
         out = resolve_nix_steps(c)
@@ -95,7 +98,8 @@ class TestClosureExists:
         _existing(monkeypatch)
 
         c = WorkflowConfig(
-            name="t", code={"path": "/tmp/t"},
+            name="t",
+            code={"path": "/tmp/t"},
             steps=[
                 {"name": "a", "nix": {"expression": "./"}, "script": "echo"},
             ],
@@ -111,14 +115,18 @@ class TestClosureExists:
 
 class TestBuildStepInjection:
     def test_single_missing_closure_injects_one_build_step(
-        self, monkeypatch, _nix_user_config, _no_eval_needed,
+        self,
+        monkeypatch,
+        _nix_user_config,
+        _no_eval_needed,
     ):
         from seekr_chain.nix_resolution import resolve_nix_steps
 
         _missing(monkeypatch)
 
         c = WorkflowConfig(
-            name="t", code={"path": "/tmp/t"},
+            name="t",
+            code={"path": "/tmp/t"},
             steps=[
                 {"name": "train", "nix": {"expression": "./"}, "script": "echo"},
             ],
@@ -147,6 +155,7 @@ class TestBuildStepInjection:
         # build step's env keeps the original "./" — the build pod resolves
         # it relative to /seekr-chain/workspace.
         from seekr_chain import nix_utils
+
         expected_closure = nix_utils.eval_closure_path("/tmp/t")
         assert build.env == {
             "SEEKR_CHAIN_NIX_STORE": "s3://test-bucket",
@@ -165,7 +174,8 @@ class TestBuildStepInjection:
 
         _missing(monkeypatch)
         monkeypatch.setattr(
-            nr_mod, "_user_config",
+            nr_mod,
+            "_user_config",
             UserConfig(
                 nix_store="s3://b",
                 nix_runner_image="img:t",
@@ -174,7 +184,8 @@ class TestBuildStepInjection:
         )
 
         c = WorkflowConfig(
-            name="t", code={"path": "/tmp/t"},
+            name="t",
+            code={"path": "/tmp/t"},
             steps=[{"name": "a", "nix": {"expression": "./"}, "script": "echo"}],
         )
         out = resolve_nix_steps(c)
@@ -184,7 +195,10 @@ class TestBuildStepInjection:
         assert build.env["SEEKR_CHAIN_NIX_COMPRESSION"] == "none"
 
     def test_dedup_when_two_steps_share_closure(
-        self, monkeypatch, _nix_user_config, _no_eval_needed,
+        self,
+        monkeypatch,
+        _nix_user_config,
+        _no_eval_needed,
     ):
         from seekr_chain.nix_resolution import resolve_nix_steps
 
@@ -192,7 +206,8 @@ class TestBuildStepInjection:
 
         # Same expression in both steps -> same closure -> one build step.
         c = WorkflowConfig(
-            name="t", code={"path": "/tmp/t"},
+            name="t",
+            code={"path": "/tmp/t"},
             steps=[
                 {"name": "a", "nix": {"expression": "./train.nix"}, "script": "echo"},
                 {"name": "b", "nix": {"expression": "./train.nix"}, "script": "echo"},
@@ -210,14 +225,18 @@ class TestBuildStepInjection:
         assert build_steps[0].name in (train_b.depends_on or [])
 
     def test_two_distinct_closures_get_two_build_steps(
-        self, monkeypatch, _nix_user_config, _no_eval_needed,
+        self,
+        monkeypatch,
+        _nix_user_config,
+        _no_eval_needed,
     ):
         from seekr_chain.nix_resolution import resolve_nix_steps
 
         _missing(monkeypatch)
 
         c = WorkflowConfig(
-            name="t", code={"path": "/tmp/t"},
+            name="t",
+            code={"path": "/tmp/t"},
             steps=[
                 {"name": "a", "nix": {"expression": "./train.nix"}, "script": "echo"},
                 {"name": "b", "nix": {"expression": "./eval.nix"}, "script": "echo"},
@@ -228,7 +247,10 @@ class TestBuildStepInjection:
         assert len(build_steps) == 2
 
     def test_build_step_name_disambiguates_collisions(
-        self, monkeypatch, _nix_user_config, _no_eval_needed,
+        self,
+        monkeypatch,
+        _nix_user_config,
+        _no_eval_needed,
     ):
         """If a user names their step something like our build-step prefix, we
         suffix -1, -2 etc. instead of overwriting it."""
@@ -238,13 +260,15 @@ class TestBuildStepInjection:
 
         # Figure out what name our build step would get for this expression.
         from seekr_chain import nix_utils
+
         # resolve_nix_steps joins expression with code.path before eval.
         closure = nix_utils.eval_closure_path("/tmp/t")
         existing_name = _build_step_name(closure)
 
         # Now build a workflow where the user already has a step with that name.
         c = WorkflowConfig(
-            name="t", code={"path": "/tmp/t"},
+            name="t",
+            code={"path": "/tmp/t"},
             steps=[
                 {"name": existing_name, "image": "ubuntu", "script": "echo dummy"},
                 {"name": "train", "nix": {"expression": "./"}, "script": "echo"},
@@ -258,14 +282,18 @@ class TestBuildStepInjection:
         assert f"{existing_name}-1" in names
 
     def test_preserves_existing_depends_on(
-        self, monkeypatch, _nix_user_config, _no_eval_needed,
+        self,
+        monkeypatch,
+        _nix_user_config,
+        _no_eval_needed,
     ):
         from seekr_chain.nix_resolution import resolve_nix_steps
 
         _missing(monkeypatch)
 
         c = WorkflowConfig(
-            name="t", code={"path": "/tmp/t"},
+            name="t",
+            code={"path": "/tmp/t"},
             steps=[
                 {"name": "prep", "image": "ubuntu", "script": "echo"},
                 {
@@ -290,14 +318,18 @@ class TestBuildStepInjection:
 
 class TestErrorPaths:
     def test_build_false_with_missing_closure_errors(
-        self, monkeypatch, _nix_user_config, _no_eval_needed,
+        self,
+        monkeypatch,
+        _nix_user_config,
+        _no_eval_needed,
     ):
         from seekr_chain.nix_resolution import resolve_nix_steps
 
         _missing(monkeypatch)
 
         c = WorkflowConfig(
-            name="t", code={"path": "/tmp/t"},
+            name="t",
+            code={"path": "/tmp/t"},
             steps=[
                 {
                     "name": "a",
@@ -318,7 +350,8 @@ class TestErrorPaths:
         monkeypatch.setattr(nr_mod, "_user_config", UserConfig(nix_runner_image="img"))
 
         c = WorkflowConfig(
-            name="t", code={"path": "/tmp/t"},
+            name="t",
+            code={"path": "/tmp/t"},
             steps=[{"name": "a", "nix": {"expression": "./"}, "script": "echo"}],
         )
         with pytest.raises(ValueError, match="nix.store"):
@@ -336,12 +369,14 @@ class TestErrorPaths:
         monkeypatch.setattr(nr_mod, "_user_config", UserConfig(nix_store="s3://x"))
 
         c = WorkflowConfig(
-            name="t", code={"path": "/tmp/t"},
+            name="t",
+            code={"path": "/tmp/t"},
             steps=[{"name": "a", "nix": {"expression": "./"}, "script": "echo"}],
         )
         out = resolve_nix_steps(c)
         build = next(s for s in out.steps if s.name.startswith("nix-build-"))
         assert build.image == _DEFAULT_NIX_RUNNER_IMAGE
+
 
 class TestWarmNodesCache:
     """resolve_nix_steps should populate role.nix._warm_nodes (exact) and
@@ -359,7 +394,8 @@ class TestWarmNodesCache:
         )
 
         c = WorkflowConfig(
-            name="t", code={"path": "/tmp/t"},
+            name="t",
+            code={"path": "/tmp/t"},
             steps=[{"name": "a", "nix": {"expression": "./"}, "script": "echo"}],
         )
         out = resolve_nix_steps(c)
@@ -367,7 +403,10 @@ class TestWarmNodesCache:
         assert out.steps[0].nix._partial_warm_nodes == ["node-c"]
 
     def test_warm_nodes_deduped_across_roles_sharing_closure(
-        self, monkeypatch, _nix_user_config, _no_eval_needed,
+        self,
+        monkeypatch,
+        _nix_user_config,
+        _no_eval_needed,
     ):
         """Two steps with the same expression share a closure; find_warm_nodes
         should be called only once per unique closure, with both roles getting
@@ -377,13 +416,16 @@ class TestWarmNodesCache:
 
         _existing(monkeypatch)
         calls = {"n": 0}
+
         def fake(_h, **_kw):
             calls["n"] += 1
             return (["node-a"], ["node-z"])
+
         monkeypatch.setattr("seekr_chain.nix_utils.find_warm_nodes", fake)
 
         c = WorkflowConfig(
-            name="t", code={"path": "/tmp/t"},
+            name="t",
+            code={"path": "/tmp/t"},
             steps=[
                 {"name": "a", "nix": {"expression": "./"}, "script": "echo"},
                 {"name": "b", "nix": {"expression": "./"}, "script": "echo"},
@@ -492,13 +534,16 @@ class TestClosureCache:
         _existing(monkeypatch)
         # Count eval calls — should be exactly one per role.
         calls = {"n": 0}
+
         def fake_eval(*_a, **_k):
             calls["n"] += 1
             return "/nix/store/cachedhash-x"
+
         monkeypatch.setattr("seekr_chain.nix_utils.eval_closure_path", fake_eval)
 
         c = WorkflowConfig(
-            name="t", code={"path": "/tmp/t"},
+            name="t",
+            code={"path": "/tmp/t"},
             steps=[{"name": "a", "nix": {"expression": "./"}, "script": "echo"}],
         )
         out = resolve_nix_steps(c)
@@ -511,12 +556,13 @@ class TestClosureCache:
         must read the cache instead of evaling again.
         """
         from seekr_chain.backends.k8s.jobset import _eval_role_closure
-        from seekr_chain.config import NixConfig
 
         eval_count = {"n": 0}
+
         def fake_eval(*_a, **_k):
             eval_count["n"] += 1
             return "/nix/store/freshhash-x"
+
         monkeypatch.setattr("seekr_chain.nix_utils.eval_closure_path", fake_eval)
 
         nix = NixConfig(expression="./")
@@ -538,11 +584,10 @@ class TestStoreUriValidation:
         from seekr_chain.nix_resolution import resolve_nix_steps
         from seekr_chain.user_config import UserConfig
 
-        monkeypatch.setattr(nr_mod, "_user_config",
-                            UserConfig(nix_store="s3://bucket/prefix",
-                                       nix_runner_image="img"))
+        monkeypatch.setattr(nr_mod, "_user_config", UserConfig(nix_store="s3://bucket/prefix", nix_runner_image="img"))
         c = WorkflowConfig(
-            name="t", code={"path": "/tmp/t"},
+            name="t",
+            code={"path": "/tmp/t"},
             steps=[{"name": "a", "nix": {"expression": "./"}, "script": "echo"}],
         )
         with pytest.raises(ValueError, match="does not support path prefixes"):
@@ -553,12 +598,15 @@ class TestStoreUriValidation:
         from seekr_chain.nix_resolution import resolve_nix_steps
 
         c = WorkflowConfig(
-            name="t", code={"path": "/tmp/t"},
-            steps=[{
-                "name": "a",
-                "nix": {"expression": "./", "store": "s3://bucket/prefix"},
-                "script": "echo",
-            }],
+            name="t",
+            code={"path": "/tmp/t"},
+            steps=[
+                {
+                    "name": "a",
+                    "nix": {"expression": "./", "store": "s3://bucket/prefix"},
+                    "script": "echo",
+                }
+            ],
         )
         with pytest.raises(ValueError, match="does not support path prefixes"):
             resolve_nix_steps(c)
@@ -569,12 +617,15 @@ class TestStoreUriValidation:
         _existing(monkeypatch)  # so we don't go down the build-step path
 
         c = WorkflowConfig(
-            name="t", code={"path": "/tmp/t"},
-            steps=[{
-                "name": "a",
-                "nix": {"expression": "./", "store": "s3://bucket"},
-                "script": "echo",
-            }],
+            name="t",
+            code={"path": "/tmp/t"},
+            steps=[
+                {
+                    "name": "a",
+                    "nix": {"expression": "./", "store": "s3://bucket"},
+                    "script": "echo",
+                }
+            ],
         )
         # Should not raise.
         resolve_nix_steps(c)
@@ -585,12 +636,15 @@ class TestStoreUriValidation:
         _existing(monkeypatch)
 
         c = WorkflowConfig(
-            name="t", code={"path": "/tmp/t"},
-            steps=[{
-                "name": "a",
-                "nix": {"expression": "./", "store": "s3://bucket?region=us-east-2"},
-                "script": "echo",
-            }],
+            name="t",
+            code={"path": "/tmp/t"},
+            steps=[
+                {
+                    "name": "a",
+                    "nix": {"expression": "./", "store": "s3://bucket?region=us-east-2"},
+                    "script": "echo",
+                }
+            ],
         )
         resolve_nix_steps(c)
 
@@ -600,18 +654,20 @@ class TestStoreUriValidation:
         _existing(monkeypatch)
 
         c = WorkflowConfig(
-            name="t", code={"path": "/tmp/t"},
-            steps=[{
-                "name": "a",
-                "nix": {"expression": "./", "store": "s3://bucket/"},
-                "script": "echo",
-            }],
+            name="t",
+            code={"path": "/tmp/t"},
+            steps=[
+                {
+                    "name": "a",
+                    "nix": {"expression": "./", "store": "s3://bucket/"},
+                    "script": "echo",
+                }
+            ],
         )
         resolve_nix_steps(c)
 
     def test_non_s3_paths_not_validated(self, monkeypatch, _no_eval_needed):
         """http://, file://, oci:// all handle paths normally — don't reject those."""
-        from seekr_chain import nix_resolution as nr_mod
         from seekr_chain.nix_resolution import _validate_store_uri
 
         # Should not raise for these. (Other schemes may not work end-to-end
@@ -628,7 +684,10 @@ class TestStoreUriValidation:
 
 class TestMultiRoleSteps:
     def test_multi_role_with_nix_roles_works(
-        self, monkeypatch, _nix_user_config, _no_eval_needed,
+        self,
+        monkeypatch,
+        _nix_user_config,
+        _no_eval_needed,
     ):
         """A multi-role step where one role uses nix gets its build step
         injected and depends_on wired correctly at the step level."""
@@ -637,7 +696,8 @@ class TestMultiRoleSteps:
         _missing(monkeypatch)
 
         c = WorkflowConfig(
-            name="t", code={"path": "/tmp/t"},
+            name="t",
+            code={"path": "/tmp/t"},
             steps=[
                 {
                     "name": "training",

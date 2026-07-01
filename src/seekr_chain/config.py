@@ -328,9 +328,7 @@ class RoleSpecConfig(BaseModel):
     @pydantic.model_validator(mode="after")
     def _check_image_xor_nix(self) -> Self:
         if (self.image is None) == (self.nix is None):
-            raise ValueError(
-                f"role {self.name!r}: must specify exactly one of `image` or `nix`"
-            )
+            raise ValueError(f"role {self.name!r}: must specify exactly one of `image` or `nix`")
         return self
 
 

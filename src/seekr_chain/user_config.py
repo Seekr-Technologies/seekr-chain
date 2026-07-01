@@ -16,15 +16,15 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
-NixCompression = Literal["NONE", "ZSTD", "XZ", "BZIP2", "GZIP"]
+import dotenv
 
 try:
     import tomllib
 except ImportError:
     import tomli as tomllib  # type: ignore[no-reuse-imports]
 
-import dotenv
 
+NixCompression = Literal["NONE", "ZSTD", "XZ", "BZIP2", "GZIP"]
 _CONFIG_FILENAME = ".seekrchain.toml"
 
 # Maps environment variable name -> UserConfig field name.

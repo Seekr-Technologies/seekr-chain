@@ -212,8 +212,9 @@ class TestResolveNixRole:
         """When user_config.nix_runner_image is unset, fall back to the
         hardcoded _DEFAULT_NIX_RUNNER_IMAGE. Same pattern as init_image.
         """
-        from seekr_chain.backends.k8s.jobset import _DEFAULT_NIX_RUNNER_IMAGE, _resolve_nix_role
+        from seekr_chain.backends.k8s.jobset import _resolve_nix_role
         from seekr_chain.config import RoleSpecConfig
+        from seekr_chain.nix_resolution import _DEFAULT_NIX_RUNNER_IMAGE
         from seekr_chain.user_config import UserConfig
 
         _patch_user_config(monkeypatch, UserConfig(nix_store="s3://x"))
@@ -226,7 +227,9 @@ class TestResolveNixRole:
         assert _resolve_nix_role(role)["image"] == _DEFAULT_NIX_RUNNER_IMAGE
 
     def test_missing_closure_with_build_true_is_silently_ok_at_render_time(
-        self, monkeypatch, _user_config_with_nix_image,
+        self,
+        monkeypatch,
+        _user_config_with_nix_image,
     ):
         """build=True + missing closure: _resolve_nix_role doesn't error.
 
@@ -318,7 +321,8 @@ class TestResolveNixRole:
         from seekr_chain.user_config import UserConfig
 
         monkeypatch.setattr(
-            jobset_mod, "_user_config",
+            jobset_mod,
+            "_user_config",
             UserConfig(
                 nix_runner_image="img:tag",
                 nix_store="s3://b",
@@ -340,7 +344,8 @@ class TestResolveNixRole:
         from seekr_chain.user_config import UserConfig
 
         monkeypatch.setattr(
-            jobset_mod, "_user_config",
+            jobset_mod,
+            "_user_config",
             UserConfig(
                 nix_runner_image="img:tag",
                 nix_store="s3://b",
@@ -363,7 +368,11 @@ class TestResolveNixRole:
 
 
 def _render_nix_jobset(
-    *, tmp_path, monkeypatch, closure="/nix/store/abc12345def-train", store="s3://bucket",
+    *,
+    tmp_path,
+    monkeypatch,
+    closure="/nix/store/abc12345def-train",
+    store="s3://bucket",
     user_config_overrides=None,
 ):
     """Render a nix-mode JobSet manifest to dict and return (manifest, role_pod_template).
@@ -371,11 +380,12 @@ def _render_nix_jobset(
     Wires the minimum stubs: nix-runner image, closure_exists returning True.
     Workflow has a single nix-mode role.
     """
-    from seekr_chain.backends.k8s import jobset as jobset_mod, render
+    import yaml
+
+    from seekr_chain.backends.k8s import render
     from seekr_chain.backends.k8s.job_info import get_job_info
     from seekr_chain.backends.k8s.jobset import build_jobset_context
     from seekr_chain.user_config import UserConfig
-    import yaml
 
     overrides = {"nix_runner_image": "registry.example.com/nix-runner:test"}
     if user_config_overrides:
@@ -443,10 +453,12 @@ class TestNixRendering:
         # the module constant so this assertion doesn't drift if we tune
         # the default later.
         from seekr_chain.backends.k8s.jobset import _DEFAULT_NIX_STORE_MAX_BYTES
+
         assert env_dict["SEEKR_CHAIN_NIX_STORE_MAX_BYTES"] == str(_DEFAULT_NIX_STORE_MAX_BYTES)
 
     def test_size_parser_handles_iec_suffixes(self):
         from seekr_chain.backends.k8s.jobset import _parse_size_to_bytes
+
         assert _parse_size_to_bytes("50G") == 50 * 1024**3
         assert _parse_size_to_bytes("50GiB") == 50 * 1024**3
         assert _parse_size_to_bytes("50 G") == 50 * 1024**3
@@ -498,7 +510,8 @@ class TestNixRendering:
 
     def test_nix_store_volume_can_be_emptydir(self, tmp_path, monkeypatch):
         _manifest, pod = _render_nix_jobset(
-            tmp_path=tmp_path, monkeypatch=monkeypatch,
+            tmp_path=tmp_path,
+            monkeypatch=monkeypatch,
             user_config_overrides={"nix_store_volume_kind": "emptyDir"},
         )
         vol = next(v for v in pod["spec"]["volumes"] if v["name"] == "nix-store")
@@ -519,9 +532,9 @@ class TestNixRendering:
         # so the only podAffinity term is the closure one.
         preferred = pod["spec"]["affinity"]["podAffinity"]["preferredDuringSchedulingIgnoredDuringExecution"]
         closure_terms = [
-            p for p in preferred
-            if p["podAffinityTerm"]["labelSelector"]["matchLabels"].get("seekr-chain.nix/closure")
-                == "abc12345def"
+            p
+            for p in preferred
+            if p["podAffinityTerm"]["labelSelector"]["matchLabels"].get("seekr-chain.nix/closure") == "abc12345def"
         ]
         assert len(closure_terms) == 1
         term = closure_terms[0]
@@ -532,18 +545,20 @@ class TestNixRendering:
         """When resolve_nix_steps populated role.nix._warm_nodes, the renderer
         injects a soft nodeAffinity preferring those hostnames (weight 90).
         """
-        from seekr_chain.backends.k8s import jobset as jobset_mod, render
+        import yaml
+
+        from seekr_chain.backends.k8s import render
         from seekr_chain.backends.k8s.job_info import get_job_info
         from seekr_chain.backends.k8s.jobset import build_jobset_context
         from seekr_chain.user_config import UserConfig
-        import yaml
 
         _patch_user_config(monkeypatch, UserConfig(nix_runner_image="img:tag"))
         monkeypatch.setattr("seekr_chain.nix_utils.closure_exists", lambda *_a, **_k: True)
         _mock_eval(monkeypatch, "/nix/store/warmhash-x")
 
         cfg = WorkflowConfig(
-            name="t", code={"path": "/tmp/t"},
+            name="t",
+            code={"path": "/tmp/t"},
             steps=[
                 {
                     "name": "train",
@@ -559,8 +574,12 @@ class TestNixRendering:
 
         job_info = get_job_info("ab1234", datastore_root="s3://b/")
         _, context = build_jobset_context(
-            workflow_config=cfg, step_index=0, job_info=job_info,
-            workflow_name="ab1234", workflow_secrets=[], interactive=False,
+            workflow_config=cfg,
+            step_index=0,
+            job_info=job_info,
+            workflow_name="ab1234",
+            workflow_secrets=[],
+            interactive=False,
             assets_path=tmp_path / "assets",
         )
         manifest = yaml.safe_load(render.render("jobset.yaml.j2", context))
@@ -570,7 +589,8 @@ class TestNixRendering:
         preferred = node_affinity["preferredDuringSchedulingIgnoredDuringExecution"]
         # The closure-warm-cache term: weight 90, hostname In [warm_nodes].
         warm_terms = [
-            t for t in preferred
+            t
+            for t in preferred
             if any(
                 e.get("key") == "kubernetes.io/hostname" and e.get("operator") == "In"
                 for e in t["preference"].get("matchExpressions", [])
@@ -597,18 +617,20 @@ class TestNixRendering:
         nodeAffinity preferring those hostnames at the *lower* weight (30).
         Without exact warm nodes, this is the only nodeAffinity term.
         """
+        import yaml
+
         from seekr_chain.backends.k8s import render
         from seekr_chain.backends.k8s.job_info import get_job_info
         from seekr_chain.backends.k8s.jobset import build_jobset_context
         from seekr_chain.user_config import UserConfig
-        import yaml
 
         _patch_user_config(monkeypatch, UserConfig(nix_runner_image="img:tag"))
         monkeypatch.setattr("seekr_chain.nix_utils.closure_exists", lambda *_a, **_k: True)
         _mock_eval(monkeypatch, "/nix/store/warmhash-x")
 
         cfg = WorkflowConfig(
-            name="t", code={"path": "/tmp/t"},
+            name="t",
+            code={"path": "/tmp/t"},
             steps=[
                 {
                     "name": "train",
@@ -622,18 +644,21 @@ class TestNixRendering:
 
         job_info = get_job_info("ab1234", datastore_root="s3://b/")
         _, context = build_jobset_context(
-            workflow_config=cfg, step_index=0, job_info=job_info,
-            workflow_name="ab1234", workflow_secrets=[], interactive=False,
+            workflow_config=cfg,
+            step_index=0,
+            job_info=job_info,
+            workflow_name="ab1234",
+            workflow_secrets=[],
+            interactive=False,
             assets_path=tmp_path / "assets",
         )
         manifest = yaml.safe_load(render.render("jobset.yaml.j2", context))
         pod = manifest["spec"]["replicatedJobs"][0]["template"]["spec"]["template"]
 
-        preferred = pod["spec"]["affinity"]["nodeAffinity"][
-            "preferredDuringSchedulingIgnoredDuringExecution"
-        ]
+        preferred = pod["spec"]["affinity"]["nodeAffinity"]["preferredDuringSchedulingIgnoredDuringExecution"]
         partial_terms = [
-            t for t in preferred
+            t
+            for t in preferred
             if any(
                 e.get("key") == "kubernetes.io/hostname" and e.get("operator") == "In"
                 for e in t["preference"].get("matchExpressions", [])
@@ -650,18 +675,20 @@ class TestNixRendering:
         emits two distinct nodeAffinity preferred terms — weight 90 for the
         exact list, weight 30 for the partial list.
         """
+        import yaml
+
         from seekr_chain.backends.k8s import render
         from seekr_chain.backends.k8s.job_info import get_job_info
         from seekr_chain.backends.k8s.jobset import build_jobset_context
         from seekr_chain.user_config import UserConfig
-        import yaml
 
         _patch_user_config(monkeypatch, UserConfig(nix_runner_image="img:tag"))
         monkeypatch.setattr("seekr_chain.nix_utils.closure_exists", lambda *_a, **_k: True)
         _mock_eval(monkeypatch, "/nix/store/warmhash-x")
 
         cfg = WorkflowConfig(
-            name="t", code={"path": "/tmp/t"},
+            name="t",
+            code={"path": "/tmp/t"},
             steps=[
                 {
                     "name": "train",
@@ -676,18 +703,21 @@ class TestNixRendering:
 
         job_info = get_job_info("ab1234", datastore_root="s3://b/")
         _, context = build_jobset_context(
-            workflow_config=cfg, step_index=0, job_info=job_info,
-            workflow_name="ab1234", workflow_secrets=[], interactive=False,
+            workflow_config=cfg,
+            step_index=0,
+            job_info=job_info,
+            workflow_name="ab1234",
+            workflow_secrets=[],
+            interactive=False,
             assets_path=tmp_path / "assets",
         )
         manifest = yaml.safe_load(render.render("jobset.yaml.j2", context))
         pod = manifest["spec"]["replicatedJobs"][0]["template"]["spec"]["template"]
 
-        preferred = pod["spec"]["affinity"]["nodeAffinity"][
-            "preferredDuringSchedulingIgnoredDuringExecution"
-        ]
+        preferred = pod["spec"]["affinity"]["nodeAffinity"]["preferredDuringSchedulingIgnoredDuringExecution"]
         hostname_terms = [
-            t for t in preferred
+            t
+            for t in preferred
             if any(
                 e.get("key") == "kubernetes.io/hostname" and e.get("operator") == "In"
                 for e in t["preference"].get("matchExpressions", [])
@@ -702,10 +732,11 @@ class TestNixRendering:
 
     def test_non_nix_role_has_no_closure_label_or_affinity(self, tmp_path):
         """Sanity: image-mode roles get neither the label nor the closure affinity."""
+        import yaml
+
         from seekr_chain.backends.k8s import render
         from seekr_chain.backends.k8s.job_info import get_job_info
         from seekr_chain.backends.k8s.jobset import build_jobset_context
-        import yaml
 
         cfg = WorkflowConfig(
             name="test-job",
@@ -744,15 +775,18 @@ class TestNixRendering:
         That's the mechanism by which a consumer step's podAffinity preference
         targets the node that ran the build — same label, same topology key.
         """
-        from seekr_chain.backends.k8s import jobset as jobset_mod, render
+        import yaml
+
+        from seekr_chain.backends.k8s import jobset as jobset_mod
+        from seekr_chain.backends.k8s import render
         from seekr_chain.backends.k8s.job_info import get_job_info
         from seekr_chain.backends.k8s.jobset import build_jobset_context
         from seekr_chain.nix_resolution import resolve_nix_steps
         from seekr_chain.user_config import UserConfig
-        import yaml
 
         monkeypatch.setattr(
-            jobset_mod, "_user_config",
+            jobset_mod,
+            "_user_config",
             UserConfig(nix_runner_image="registry.example.com/nix-runner:test"),
         )
         # nix_resolution.py imports _user_config from user_config directly.
@@ -827,20 +861,19 @@ class TestNixRendering:
         This is the cache-hit mechanism for jobs that mix closures: pod A
         attracts to nodes where the same closure-A ran (not closure-B).
         """
+        import yaml
+
         from seekr_chain.backends.k8s import render
         from seekr_chain.backends.k8s.job_info import get_job_info
         from seekr_chain.backends.k8s.jobset import build_jobset_context
         from seekr_chain.user_config import UserConfig
-        import yaml
 
         _patch_user_config(monkeypatch, UserConfig(nix_runner_image="img:tag"))
         monkeypatch.setattr("seekr_chain.nix_utils.closure_exists", lambda *_a, **_k: True)
         # Different expressions resolve to different closures.
         monkeypatch.setattr(
             "seekr_chain.nix_utils.eval_closure_path",
-            lambda expression, **_k: (
-                "/nix/store/aaaa1111-a" if expression == "./a" else "/nix/store/bbbb2222-b"
-            ),
+            lambda expression, **_k: "/nix/store/aaaa1111-a" if expression == "./a" else "/nix/store/bbbb2222-b",
         )
 
         cfg = WorkflowConfig(
@@ -881,9 +914,7 @@ class TestNixRendering:
 
         # Each pod's podAffinity targets its OWN hash, not the other's.
         def _closure_targets(pod):
-            preferred = pod["spec"]["affinity"]["podAffinity"][
-                "preferredDuringSchedulingIgnoredDuringExecution"
-            ]
+            preferred = pod["spec"]["affinity"]["podAffinity"]["preferredDuringSchedulingIgnoredDuringExecution"]
             return [
                 p["podAffinityTerm"]["labelSelector"]["matchLabels"]["seekr-chain.nix/closure"]
                 for p in preferred
@@ -901,11 +932,12 @@ class TestNixRendering:
         affinity target means both prefer ANY pod with that closure on
         node — including the build pod that produced it.
         """
+        import yaml
+
         from seekr_chain.backends.k8s import render
         from seekr_chain.backends.k8s.job_info import get_job_info
         from seekr_chain.backends.k8s.jobset import build_jobset_context
         from seekr_chain.user_config import UserConfig
-        import yaml
 
         _patch_user_config(monkeypatch, UserConfig(nix_runner_image="img:tag"))
         monkeypatch.setattr("seekr_chain.nix_utils.closure_exists", lambda *_a, **_k: True)
@@ -944,13 +976,11 @@ class TestNixRendering:
             == "sharedhash"
         )
         for pod in pods:
-            preferred = pod["spec"]["affinity"]["podAffinity"][
-                "preferredDuringSchedulingIgnoredDuringExecution"
-            ]
+            preferred = pod["spec"]["affinity"]["podAffinity"]["preferredDuringSchedulingIgnoredDuringExecution"]
             closure_terms = [
-                p for p in preferred
-                if p["podAffinityTerm"]["labelSelector"]["matchLabels"].get("seekr-chain.nix/closure")
-                    == "sharedhash"
+                p
+                for p in preferred
+                if p["podAffinityTerm"]["labelSelector"]["matchLabels"].get("seekr-chain.nix/closure") == "sharedhash"
             ]
             assert len(closure_terms) == 1
 
@@ -962,11 +992,12 @@ class TestNixRendering:
         term in preferredDuringSchedulingIgnoredDuringExecution. The closure
         cache-hit affordance is additive, not exclusive.
         """
+        import yaml
+
         from seekr_chain.backends.k8s import render
         from seekr_chain.backends.k8s.job_info import get_job_info
         from seekr_chain.backends.k8s.jobset import build_jobset_context
         from seekr_chain.user_config import UserConfig
-        import yaml
 
         _patch_user_config(monkeypatch, UserConfig(nix_runner_image="img:tag"))
         monkeypatch.setattr("seekr_chain.nix_utils.closure_exists", lambda *_a, **_k: True)
@@ -996,22 +1027,20 @@ class TestNixRendering:
         )
         manifest = yaml.safe_load(render.render("jobset.yaml.j2", context))
         pod = manifest["spec"]["replicatedJobs"][0]["template"]["spec"]["template"]
-        preferred = pod["spec"]["affinity"]["podAffinity"][
-            "preferredDuringSchedulingIgnoredDuringExecution"
-        ]
+        preferred = pod["spec"]["affinity"]["podAffinity"]["preferredDuringSchedulingIgnoredDuringExecution"]
 
         # Pack term: user's group label.
         pack_terms = [
-            p for p in preferred
+            p
+            for p in preferred
             if "seekr-chain/pg.pack-it" in p["podAffinityTerm"]["labelSelector"].get("matchLabels", {})
         ]
         assert len(pack_terms) == 1
 
         # Closure term: still present alongside the user's term.
         closure_terms = [
-            p for p in preferred
-            if p["podAffinityTerm"]["labelSelector"].get("matchLabels", {}).get(
-                "seekr-chain.nix/closure"
-            ) == "userpref"
+            p
+            for p in preferred
+            if p["podAffinityTerm"]["labelSelector"].get("matchLabels", {}).get("seekr-chain.nix/closure") == "userpref"
         ]
         assert len(closure_terms) == 1

@@ -16,7 +16,6 @@ import pytest
 import seekr_chain
 from seekr_chain._testing import assert_nested_match
 
-
 _NIX_AVAILABLE = shutil.which("nix") is not None
 # nix system strings match `uname -m` on linux (x86_64, aarch64).
 _NIX_SYSTEM = f"{platform.machine()}-linux"
@@ -73,30 +72,34 @@ class TestNixMode:
         _evict_narinfo(s3_client, "seekr-chain-test", closure)
 
         def make_config():
-            return seekr_chain.WorkflowConfig.model_validate({
-                "name": "test-nix",  # overridden by patch_configs_for_testing
-                "namespace": "argo-workflows",
-                "code": {"path": "."},
-                "steps": [{
-                    "name": "step",
-                    "nix": {
-                        "expression": "./",
-                        "system": _NIX_SYSTEM,
-                        "store": "s3://seekr-chain-test",
-                        "build": True,
-                        # Minimal resources so the build pod fits on hermetic
-                        # k3d. pkgs.hello is a few-MB closure that builds in
-                        # seconds; the default 4cpu/16Gi is overkill here.
-                        "build_resources": {
-                            "num_nodes": 1,
-                            "cpus_per_node": "250m",
-                            "mem_per_node": "512Mi",
-                            "ephemeral_storage_per_node": "2Gi",
-                        },
-                    },
-                    "script": "hello",
-                }],
-            })
+            return seekr_chain.WorkflowConfig.model_validate(
+                {
+                    "name": "test-nix",  # overridden by patch_configs_for_testing
+                    "namespace": "argo-workflows",
+                    "code": {"path": "."},
+                    "steps": [
+                        {
+                            "name": "step",
+                            "nix": {
+                                "expression": "./",
+                                "system": _NIX_SYSTEM,
+                                "store": "s3://seekr-chain-test",
+                                "build": True,
+                                # Minimal resources so the build pod fits on hermetic
+                                # k3d. pkgs.hello is a few-MB closure that builds in
+                                # seconds; the default 4cpu/16Gi is overkill here.
+                                "build_resources": {
+                                    "num_nodes": 1,
+                                    "cpus_per_node": "250m",
+                                    "mem_per_node": "512Mi",
+                                    "ephemeral_storage_per_node": "2Gi",
+                                },
+                            },
+                            "script": "hello",
+                        }
+                    ],
+                }
+            )
 
         # ---------- first submit: closure missing → build step injected ----------
         job1 = seekr_chain.launch_argo_workflow(make_config())
@@ -106,13 +109,14 @@ class TestNixMode:
 
         logs1 = job1.get_logs().to_dict()
         build_keys_1 = [k for k in logs1 if k.startswith("step=nix-build-")]
-        assert len(build_keys_1) == 1, (
-            f"expected exactly one nix-build- step in first run, got: {sorted(logs1)}"
-        )
+        assert len(build_keys_1) == 1, f"expected exactly one nix-build- step in first run, got: {sorted(logs1)}"
         # User step ran and the closure's hello executed via PATH=$CLOSURE/bin
-        assert_nested_match(logs1["step=step"], {
-            "index=0": {"attempt=0": ["Hello, world!", ""]},
-        })
+        assert_nested_match(
+            logs1["step=step"],
+            {
+                "index=0": {"attempt=0": ["Hello, world!", ""]},
+            },
+        )
 
         # ---------- second submit: closure present → no build step ----------
         job2 = seekr_chain.launch_argo_workflow(make_config())
@@ -123,9 +127,11 @@ class TestNixMode:
         logs2 = job2.get_logs().to_dict()
         build_keys_2 = [k for k in logs2 if k.startswith("step=nix-build-")]
         assert build_keys_2 == [], (
-            f"expected no nix-build- step in second run (closure should be in cache); "
-            f"got: {sorted(logs2)}"
+            f"expected no nix-build- step in second run (closure should be in cache); got: {sorted(logs2)}"
         )
-        assert_nested_match(logs2["step=step"], {
-            "index=0": {"attempt=0": ["Hello, world!", ""]},
-        })
+        assert_nested_match(
+            logs2["step=step"],
+            {
+                "index=0": {"attempt=0": ["Hello, world!", ""]},
+            },
+        )

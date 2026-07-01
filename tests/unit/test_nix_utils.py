@@ -10,7 +10,6 @@ from __future__ import annotations
 import pytest
 
 from seekr_chain.nix_utils import (
-    NixEvalError,
     NixNotInstalledError,
     closure_exists,
     closure_hash_from_path,
@@ -124,6 +123,7 @@ class TestFindWarmNodes:
         Override to put a pod into the partial bucket.
         """
         from unittest.mock import MagicMock
+
         from seekr_chain.nix_utils import NIX_CLOSURE_LABEL
 
         pod = MagicMock()
@@ -146,18 +146,20 @@ class TestFindWarmNodes:
             v1.list_namespaced_pod.return_value = result
 
         from seekr_chain import k8s_utils
+
         monkeypatch.setattr(k8s_utils, "get_core_v1_api", lambda: v1)
         return v1
 
     def test_returns_unique_nodes_newest_first(self, monkeypatch):
-        from seekr_chain.nix_utils import find_warm_nodes
         import datetime
+
+        from seekr_chain.nix_utils import find_warm_nodes
 
         # Three pods across three nodes, all carrying the queried closure.
         pods = [
-            self._mock_pod("a", "node-old",   datetime.datetime(2026, 6, 1)),
-            self._mock_pod("b", "node-new",   datetime.datetime(2026, 6, 3)),
-            self._mock_pod("c", "node-mid",   datetime.datetime(2026, 6, 2)),
+            self._mock_pod("a", "node-old", datetime.datetime(2026, 6, 1)),
+            self._mock_pod("b", "node-new", datetime.datetime(2026, 6, 3)),
+            self._mock_pod("c", "node-mid", datetime.datetime(2026, 6, 2)),
         ]
         self._mock_api(monkeypatch, pods=pods)
 
@@ -166,8 +168,9 @@ class TestFindWarmNodes:
         assert partial == []
 
     def test_dedups_multiple_pods_on_same_node(self, monkeypatch):
-        from seekr_chain.nix_utils import find_warm_nodes
         import datetime
+
+        from seekr_chain.nix_utils import find_warm_nodes
 
         pods = [
             self._mock_pod("a", "node-1", datetime.datetime(2026, 6, 1)),
@@ -182,13 +185,11 @@ class TestFindWarmNodes:
         assert partial == []
 
     def test_respects_limit(self, monkeypatch):
-        from seekr_chain.nix_utils import find_warm_nodes
         import datetime
 
-        pods = [
-            self._mock_pod(f"p{i}", f"node-{i}", datetime.datetime(2026, 6, i + 1))
-            for i in range(20)
-        ]
+        from seekr_chain.nix_utils import find_warm_nodes
+
+        pods = [self._mock_pod(f"p{i}", f"node-{i}", datetime.datetime(2026, 6, i + 1)) for i in range(20)]
         self._mock_api(monkeypatch, pods=pods)
 
         exact, _ = find_warm_nodes("abc123", namespace="argo-workflows", limit=5)
@@ -206,8 +207,9 @@ class TestFindWarmNodes:
         """A pod that hasn't been scheduled yet (no spec.nodeName) shouldn't
         appear in the warm list — we can't infer a node from it.
         """
-        from seekr_chain.nix_utils import find_warm_nodes
         import datetime
+
+        from seekr_chain.nix_utils import find_warm_nodes
 
         pods = [
             self._mock_pod("pending", None, datetime.datetime(2026, 6, 5)),
@@ -232,11 +234,12 @@ class TestFindWarmNodes:
         """Pods carrying the requested closure_hash go to exact; pods with
         any other label value go to partial. Disjoint lists.
         """
-        from seekr_chain.nix_utils import find_warm_nodes
         import datetime
 
+        from seekr_chain.nix_utils import find_warm_nodes
+
         pods = [
-            self._mock_pod("a", "node-exact",   datetime.datetime(2026, 6, 1), closure="abc123"),
+            self._mock_pod("a", "node-exact", datetime.datetime(2026, 6, 1), closure="abc123"),
             self._mock_pod("b", "node-other-1", datetime.datetime(2026, 6, 2), closure="xyz999"),
             self._mock_pod("c", "node-other-2", datetime.datetime(2026, 6, 3), closure="def456"),
         ]
@@ -252,13 +255,14 @@ class TestFindWarmNodes:
         into exact only, never both. This holds even if the non-match pod is
         more recent — the closure paths are on disk either way.
         """
-        from seekr_chain.nix_utils import find_warm_nodes
         import datetime
+
+        from seekr_chain.nix_utils import find_warm_nodes
 
         pods = [
             # node-mixed: older exact pod + newer non-match pod
-            self._mock_pod("old-exact",  "node-mixed", datetime.datetime(2026, 6, 1), closure="abc123"),
-            self._mock_pod("new-other",  "node-mixed", datetime.datetime(2026, 6, 5), closure="xyz999"),
+            self._mock_pod("old-exact", "node-mixed", datetime.datetime(2026, 6, 1), closure="abc123"),
+            self._mock_pod("new-other", "node-mixed", datetime.datetime(2026, 6, 5), closure="xyz999"),
             # node-other: only a non-match pod
             self._mock_pod("only-other", "node-other", datetime.datetime(2026, 6, 3), closure="xyz999"),
         ]
@@ -273,13 +277,13 @@ class TestFindWarmNodes:
         """exact uses ``limit``; partial uses ``partial_limit``. They cap
         independently.
         """
-        from seekr_chain.nix_utils import find_warm_nodes
         import datetime
+
+        from seekr_chain.nix_utils import find_warm_nodes
 
         # 6 exact nodes, 25 partial nodes.
         pods = [
-            self._mock_pod(f"e{i}", f"ex-{i}", datetime.datetime(2026, 6, i + 1), closure="abc123")
-            for i in range(6)
+            self._mock_pod(f"e{i}", f"ex-{i}", datetime.datetime(2026, 6, i + 1), closure="abc123") for i in range(6)
         ] + [
             self._mock_pod(f"p{i}", f"pt-{i}", datetime.datetime(2025, 6, (i % 28) + 1), closure="xyz999")
             for i in range(25)
@@ -287,7 +291,10 @@ class TestFindWarmNodes:
         self._mock_api(monkeypatch, pods=pods)
 
         exact, partial = find_warm_nodes(
-            "abc123", namespace="argo-workflows", limit=3, partial_limit=10,
+            "abc123",
+            namespace="argo-workflows",
+            limit=3,
+            partial_limit=10,
         )
         assert len(exact) == 3
         assert len(partial) == 10
@@ -296,9 +303,10 @@ class TestFindWarmNodes:
         """Defensive: even though the API selector should filter them out,
         a pod with no closure label is skipped (no bucket).
         """
-        from seekr_chain.nix_utils import find_warm_nodes
         import datetime
         from unittest.mock import MagicMock
+
+        from seekr_chain.nix_utils import find_warm_nodes
 
         unlabeled = MagicMock()
         unlabeled.metadata.name = "unlabeled"
