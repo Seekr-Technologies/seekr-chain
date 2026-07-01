@@ -12,6 +12,7 @@ in the renderer already tick against ``datetime.now()``.
 
 import logging
 import threading
+import time
 from typing import Callable, Optional
 
 from seekr_chain.backends.k8s.workflow_state import WorkflowState
@@ -77,6 +78,7 @@ class BackgroundStateFetcher:
 
     def _run(self) -> None:
         while not self._stop.is_set():
+            t0 = time.monotonic()
             try:
                 state = self._fetch_fn()
             except Exception as e:
@@ -86,5 +88,8 @@ class BackgroundStateFetcher:
                 with self._lock:
                     self._latest = state
                 self._first_ready.set()
-            # Event.wait returns True immediately if set — cheap responsive stop.
-            self._stop.wait(timeout=self._interval)
+            # Aim for one fetch per ``interval`` seconds: if the fetch already
+            # took that long, refetch immediately rather than adding idle time.
+            remaining = self._interval - (time.monotonic() - t0)
+            if remaining > 0:
+                self._stop.wait(timeout=remaining)

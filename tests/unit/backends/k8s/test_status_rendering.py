@@ -12,6 +12,7 @@ collectors — collector behavior is covered in ``test_collect_states.py``.
 """
 
 import datetime
+import re
 
 import pytest
 from rich.text import Text
@@ -460,8 +461,6 @@ class TestRender:
     def test_header_includes_timestamp(self):
         # The header timestamp is the current local wall-clock, so we assert
         # its shape rather than an exact value.
-        import re
-
         assert re.search(r"\[\d{2}:\d{2}:\d{2}\]", render(self._simple_ws()).plain)
 
     def test_body_row_appears(self):

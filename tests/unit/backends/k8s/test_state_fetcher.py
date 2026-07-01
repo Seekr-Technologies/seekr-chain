@@ -126,3 +126,29 @@ def test_stop_wakes_thread_promptly_even_with_long_interval():
     t0 = time.monotonic()
     f.stop(join_timeout=2.0)
     assert time.monotonic() - t0 < 1.0
+
+
+def test_slow_fetch_refetches_immediately_no_extra_sleep():
+    """When a fetch takes longer than the interval, the next fetch starts
+    immediately — we don't stack fetch_time + interval per cycle."""
+    starts: list[float] = []
+    fetch_duration = 0.10
+    interval = 0.02
+
+    def fetch_fn():
+        starts.append(time.monotonic())
+        time.sleep(fetch_duration)
+        return SimpleNamespace(tag="v")
+
+    with BackgroundStateFetcher(fetch_fn, interval=interval) as f:
+        f.wait_for_first(timeout=1)
+        # Let a few slow fetches happen.
+        deadline = time.monotonic() + 0.5
+        while time.monotonic() < deadline and len(starts) < 4:
+            time.sleep(0.01)
+
+    assert len(starts) >= 3
+    # Consecutive starts should be ~fetch_duration apart, not fetch_duration + interval.
+    # Allow a generous 50 ms tolerance for scheduling.
+    gaps = [starts[i + 1] - starts[i] for i in range(len(starts) - 1)]
+    assert max(gaps) < fetch_duration + 0.05, f"gaps too large: {gaps}"

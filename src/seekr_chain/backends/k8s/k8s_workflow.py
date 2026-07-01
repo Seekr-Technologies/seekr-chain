@@ -248,9 +248,6 @@ class K8sWorkflow(Workflow):
                                 )
 
                 time.sleep(1)
-                # If a fetch is in flight, `latest()` returns the previous
-                # snapshot; durations still tick because the renderer uses
-                # `datetime.now()` for open-ended intervals.
                 workflow_state = fetcher.latest()
 
             for t_thread in follow_threads:
