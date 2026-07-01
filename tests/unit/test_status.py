@@ -67,6 +67,40 @@ class TestPodStatus:
         result = min(statuses)
         assert isinstance(result, PodStatus)
 
+    # Discriminating cases where lexicographic (str) order and definition
+    # order disagree — these would have failed before the __lt__ fix.
+    def test_min_prefers_running_over_failed(self):
+        assert min([PodStatus.FAILED, PodStatus.RUNNING]) == PodStatus.RUNNING
+
+    def test_min_prefers_running_over_succeeded(self):
+        assert min([PodStatus.SUCCEEDED, PodStatus.RUNNING]) == PodStatus.RUNNING
+
+    def test_min_prefers_pending_over_terminated(self):
+        assert min([PodStatus.TERMINATED, PodStatus.PENDING]) == PodStatus.PENDING
+
+    def test_sorted_follows_definition_order(self):
+        result = sorted([PodStatus.FAILED, PodStatus.PENDING, PodStatus.RUNNING])
+        assert result == [PodStatus.PENDING, PodStatus.RUNNING, PodStatus.FAILED]
+
+    def test_lt_follows_definition_order(self):
+        assert PodStatus.RUNNING < PodStatus.FAILED
+        assert not (PodStatus.FAILED < PodStatus.RUNNING)
+
+    def test_gt_follows_definition_order(self):
+        """Regression: str.__gt__ was previously winning over any override."""
+        assert PodStatus.FAILED > PodStatus.RUNNING
+        assert not (PodStatus.RUNNING > PodStatus.FAILED)
+
+    def test_le_and_ge_are_consistent(self):
+        assert PodStatus.RUNNING <= PodStatus.RUNNING
+        assert PodStatus.RUNNING <= PodStatus.FAILED
+        assert PodStatus.FAILED >= PodStatus.RUNNING
+        assert PodStatus.FAILED >= PodStatus.FAILED
+
+    def test_str_equality_still_holds(self):
+        """The str/Enum hybrid must still compare equal to its raw value."""
+        assert PodStatus.RUNNING == "RUNNING"
+
 
 # ---------------------------------------------------------------------------
 # ContainerStatus

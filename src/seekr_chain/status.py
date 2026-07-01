@@ -61,6 +61,36 @@ class PodStatus(str, Enum):
             PodStatus.TERMINATED,
         ]
 
+    # Rank a status by its position in `order` — used by all comparisons.
+    def _rank(self) -> int:
+        return self.order.index(self)
+
+    # Without these, min()/sorted()/`<`/`>` would use the inherited str
+    # comparison (lexicographic) instead of definition order, so e.g.
+    # min([FAILED, RUNNING]) would return FAILED — the opposite of intent.
+    # functools.total_ordering does NOT help here: str already supplies all
+    # four rich-comparison methods, so total_ordering skips them. Define
+    # them explicitly.
+    def __lt__(self, other):
+        if not isinstance(other, PodStatus):
+            return NotImplemented
+        return self._rank() < other._rank()
+
+    def __le__(self, other):
+        if not isinstance(other, PodStatus):
+            return NotImplemented
+        return self._rank() <= other._rank()
+
+    def __gt__(self, other):
+        if not isinstance(other, PodStatus):
+            return NotImplemented
+        return self._rank() > other._rank()
+
+    def __ge__(self, other):
+        if not isinstance(other, PodStatus):
+            return NotImplemented
+        return self._rank() >= other._rank()
+
     def is_running(self) -> bool:
         return self == PodStatus.RUNNING
 
