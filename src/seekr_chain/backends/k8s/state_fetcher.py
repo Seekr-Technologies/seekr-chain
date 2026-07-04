@@ -25,7 +25,10 @@ class BackgroundStateFetcher:
 
     Transient exceptions from ``fetch_fn`` are logged and swallowed so a
     single API blip does not tear down the follow session — the last good
-    snapshot keeps being served via :meth:`latest`.
+    snapshot keeps being served via :meth:`latest`. When ``transient_check``
+    classifies an exception as transient, it is logged at DEBUG (quiet)
+    instead of WARNING; this hides self-resolving blips (e.g. a 401 during a
+    token refresh window) from the user.
 
     Usage::
 
@@ -37,9 +40,15 @@ class BackgroundStateFetcher:
                 state = f.latest()
     """
 
-    def __init__(self, fetch_fn: Callable[[], WorkflowState], interval: float = 1.0):
+    def __init__(
+        self,
+        fetch_fn: Callable[[], WorkflowState],
+        interval: float = 1.0,
+        transient_check: Optional[Callable[[Exception], bool]] = None,
+    ):
         self._fetch_fn = fetch_fn
         self._interval = interval
+        self._transient_check = transient_check
         self._lock = threading.Lock()
         self._latest: Optional[WorkflowState] = None
         self._first_ready = threading.Event()
@@ -83,7 +92,13 @@ class BackgroundStateFetcher:
                 state = self._fetch_fn()
             except Exception as e:
                 # Swallow so a transient K8s API blip doesn't kill the loop.
-                logger.warning("state fetch failed: %s", e)
+                # Known-transient errors are demoted to DEBUG so the user
+                # doesn't see noise from self-resolving blips (e.g. a 401
+                # during a token refresh window).
+                if self._transient_check is not None and self._transient_check(e):
+                    logger.debug("transient state fetch failed: %s", e)
+                else:
+                    logger.warning("state fetch failed: %s", e)
             else:
                 with self._lock:
                     self._latest = state

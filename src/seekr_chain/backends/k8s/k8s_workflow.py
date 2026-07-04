@@ -32,6 +32,19 @@ from seekr_chain.workflow import Workflow
 logger = logging.getLogger(__name__)
 
 
+# HTTP status codes that are self-resolving during a follow session:
+# 401 Unauthorized — transient, occurs during a token-refresh window; the
+# next fetch cycle succeeds once the client refreshes its credentials.
+_TRANSIENT_API_STATUSES = {401}
+
+
+def _is_transient_api_exception(exc: Exception) -> bool:
+    """Return True for K8s API errors that self-resolve on the next fetch cycle."""
+    if isinstance(exc, ApiException):
+        return getattr(exc, "status", None) in _TRANSIENT_API_STATUSES
+    return False
+
+
 # ---------------------------------------------------------------------------
 # Log-following helpers (used by follow())
 # ---------------------------------------------------------------------------
@@ -220,7 +233,9 @@ class K8sWorkflow(Workflow):
         console = Console()
 
         with (
-            BackgroundStateFetcher(self.get_detailed_state) as fetcher,
+            BackgroundStateFetcher(
+                self.get_detailed_state, transient_check=_is_transient_api_exception
+            ) as fetcher,
             maybe_live(plain=plain, console=console, refresh_per_second=4, transient=False) as live,
         ):
             workflow_state = fetcher.wait_for_first()
@@ -261,7 +276,9 @@ class K8sWorkflow(Workflow):
         plain = False
         poll_interval = 1
         with (
-            BackgroundStateFetcher(self.get_detailed_state) as fetcher,
+            BackgroundStateFetcher(
+                self.get_detailed_state, transient_check=_is_transient_api_exception
+            ) as fetcher,
             maybe_live(plain=plain, console=console, refresh_per_second=4, transient=False) as live,
         ):
             workflow_state = fetcher.wait_for_first()

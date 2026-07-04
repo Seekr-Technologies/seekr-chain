@@ -152,3 +152,62 @@ def test_slow_fetch_refetches_immediately_no_extra_sleep():
     # Allow a generous 50 ms tolerance for scheduling.
     gaps = [starts[i + 1] - starts[i] for i in range(len(starts) - 1)]
     assert max(gaps) < fetch_duration + 0.05, f"gaps too large: {gaps}"
+
+
+def test_transient_exception_logged_at_debug_not_warning(caplog):
+    """When transient_check classifies an exception as transient, it is logged
+    at DEBUG — not WARNING — so the user never sees the noise."""
+
+    class Transient(Exception):
+        pass
+
+    calls = {"n": 0}
+
+    def fetch_fn():
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return SimpleNamespace(tag="good")
+        if calls["n"] <= 4:
+            raise Transient("blip")
+        raise RuntimeError("real failure")
+
+    with BackgroundStateFetcher(
+        fetch_fn, interval=0.01, transient_check=lambda e: isinstance(e, Transient)
+    ) as f:
+        f.wait_for_first(timeout=1)
+        deadline = time.monotonic() + 0.5
+        while time.monotonic() < deadline and calls["n"] < 5:
+            time.sleep(0.01)
+        assert calls["n"] >= 5
+        # Last good state survives both transient and non-transient errors.
+        assert f.latest().tag == "good"
+
+    debug_records = [r for r in caplog.records if r.levelname == "DEBUG"]
+    warning_records = [r for r in caplog.records if r.levelname == "WARNING"]
+    # The Transient exceptions were demoted to DEBUG.
+    assert any("transient state fetch failed" in r.message for r in debug_records)
+    # The non-transient RuntimeError was still logged at WARNING.
+    assert any("state fetch failed" in r.message for r in warning_records)
+
+
+def test_no_transient_check_defaults_to_warning(caplog):
+    """Without transient_check, all exceptions are logged at WARNING (current behavior)."""
+
+    calls = {"n": 0}
+
+    def fetch_fn():
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return SimpleNamespace(tag="good")
+        raise RuntimeError("boom")
+
+    with BackgroundStateFetcher(fetch_fn, interval=0.01) as f:
+        f.wait_for_first(timeout=1)
+        deadline = time.monotonic() + 0.3
+        while time.monotonic() < deadline and calls["n"] < 3:
+            time.sleep(0.01)
+
+    warning_records = [r for r in caplog.records if r.levelname == "WARNING"]
+    assert any("state fetch failed" in r.message for r in warning_records)
+    debug_records = [r for r in caplog.records if r.levelname == "DEBUG"]
+    assert not any("transient state fetch failed" in r.message for r in debug_records)
