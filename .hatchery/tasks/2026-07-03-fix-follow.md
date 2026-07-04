@@ -1,6 +1,6 @@
 # Task: fix-follow
 
-**Status**: in-progress
+**Status**: complete
 **Branch**: hatchery/fix-follow
 **Created**: 2026-07-03 21:50
 
@@ -19,34 +19,50 @@ The 401 error, but we immediately recover.
 
 we shouldn't surface this to the user if we can avoid it
 
-## Agreed Plan
-
-1. **Add a `transient_check` callback to `BackgroundStateFetcher`** — an optional
-   `Callable[[Exception], bool]`. When provided and it returns `True` for a given
-   exception, the fetcher logs at **DEBUG** (suppressed) instead of **WARNING**.
-   Default is `None` (all exceptions logged at WARNING — current behavior). This
-   keeps the fetcher generic; it doesn't need to know about kubernetes.
-
-2. **Pass a transient check from `K8sWorkflow`** — when constructing
-   `BackgroundStateFetcher` in `follow()` and `attach()`, pass a callback that
-   returns `True` for `kubernetes.client.exceptions.ApiException` with
-   `status == 401` (transient auth/token-refresh blips). These are self-resolving
-   via the next fetch cycle.
-
-3. **Add unit tests** — verify that when `transient_check` classifies an exception
-   as transient, it's logged at DEBUG (not WARNING), while non-transient exceptions
-   are still logged at WARNING. Verify the last-good state survives a transient error.
-
-
-## Progress Log
-
-- [x] Add `transient_check` callback to `BackgroundStateFetcher` — demotes known-transient exceptions to DEBUG
-- [x] Pass `_is_transient_api_exception` from `K8sWorkflow.follow()` and `attach()` (401 classified transient)
-- [x] Add unit tests for transient suppression + default-warning fallback
-- [x] Verify logic standalone (no kubernetes in container); files compile clean
-
 ## Summary
 
-*(Fill in on completion — then remove Agreed Plan and Progress Log above.
-Cover: key decisions made, patterns established, files changed, gotchas,
-and anything a future agent working in this repo should know.)*
+### Problem
+During `follow`/`attach`, `BackgroundStateFetcher` polls the k8s API every
+~1 s. Occasional 401 Unauthorized responses (transient — they occur during a
+client token-refresh window and self-resolve on the next fetch) were logged at
+WARNING, surfacing noisy stack traces to the user even though the state itself
+recovered immediately.
+
+### Approach
+Added an optional `transient_check: Callable[[Exception], bool]` callback to
+`BackgroundStateFetcher.__init__`. When the callback classifies a thrown
+exception as transient, the fetcher logs at **DEBUG** (suppressed by default)
+instead of **WARNING**; non-transient exceptions still warn. The last-known
+good `WorkflowState` continues to be served, unchanged.
+
+`K8sWorkflow` passes a module-level `_is_transient_api_exception` helper that
+treats `kubernetes.client.rest.ApiException` with `status == 401` as transient.
+The set of transient codes lives in `_TRANSIENT_API_STATUSES` for easy
+extension.
+
+### Why a callback, not a hard-coded k8s check
+`BackgroundStateFetcher` is intentionally generic over its `fetch_fn` return
+type and has no kubernetes dependency in its own module. Pushing the
+classification rule in via a callback keeps the fetcher decoupled and testable
+without kubernetes installed, and lets other backends (or other classes of
+transient errors) reuse the mechanism with their own predicate.
+
+### Files changed
+- `src/seekr_chain/backends/k8s/state_fetcher.py` — new `transient_check`
+  parameter; DEBUG-vs-WARNING branching in `_run`.
+- `src/seekr_chain/backends/k8s/k8s_workflow.py` — `_TRANSIENT_API_STATUSES`,
+  `_is_transient_api_exception`, and the callback passed to
+  `BackgroundStateFetcher` in both `follow()` and `attach()`.
+- `tests/unit/backends/k8s/test_state_fetcher.py` — tests for transient
+  demotion to DEBUG and default WARNING fallback.
+
+### Gotchas
+- The container used for this task has no `kubernetes` / `pytest` installed,
+  so the unit tests could not be executed here. The fetcher logic was verified
+  with a standalone replica (identical control flow) and all three edited
+  files pass `py_compile`. **Run `pytest tests/unit/backends/k8s/test_state_fetcher.py`
+  locally before merging.**
+- A persistent 401 (genuine auth failure) will now be silent at WARNING level;
+  the signal for a real problem is that the workflow never progresses. This is
+  acceptable because the fetcher loops indefinitely regardless, so a recurring
+  WARNING was never actionable on its own.
