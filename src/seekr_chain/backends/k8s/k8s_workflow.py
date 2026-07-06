@@ -233,9 +233,7 @@ class K8sWorkflow(Workflow):
         console = Console()
 
         with (
-            BackgroundStateFetcher(
-                self.get_detailed_state, transient_check=_is_transient_api_exception
-            ) as fetcher,
+            BackgroundStateFetcher(self.get_detailed_state, transient_check=_is_transient_api_exception) as fetcher,
             maybe_live(plain=plain, console=console, refresh_per_second=4, transient=False) as live,
         ):
             workflow_state = fetcher.wait_for_first()
@@ -276,9 +274,7 @@ class K8sWorkflow(Workflow):
         plain = False
         poll_interval = 1
         with (
-            BackgroundStateFetcher(
-                self.get_detailed_state, transient_check=_is_transient_api_exception
-            ) as fetcher,
+            BackgroundStateFetcher(self.get_detailed_state, transient_check=_is_transient_api_exception) as fetcher,
             maybe_live(plain=plain, console=console, refresh_per_second=4, transient=False) as live,
         ):
             workflow_state = fetcher.wait_for_first()

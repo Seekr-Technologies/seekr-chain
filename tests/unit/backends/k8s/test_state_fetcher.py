@@ -171,9 +171,7 @@ def test_transient_exception_logged_at_debug_not_warning(caplog):
             raise Transient("blip")
         raise RuntimeError("real failure")
 
-    with BackgroundStateFetcher(
-        fetch_fn, interval=0.01, transient_check=lambda e: isinstance(e, Transient)
-    ) as f:
+    with BackgroundStateFetcher(fetch_fn, interval=0.01, transient_check=lambda e: isinstance(e, Transient)) as f:
         f.wait_for_first(timeout=1)
         deadline = time.monotonic() + 0.5
         while time.monotonic() < deadline and calls["n"] < 5:
