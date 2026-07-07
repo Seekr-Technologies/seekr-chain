@@ -6,6 +6,7 @@ generic over its fetch_fn's return type, so the tests never build a real
 WorkflowState.
 """
 
+import logging
 import threading
 import time
 from types import SimpleNamespace
@@ -157,6 +158,11 @@ def test_slow_fetch_refetches_immediately_no_extra_sleep():
 def test_transient_exception_logged_at_debug_not_warning(caplog):
     """When transient_check classifies an exception as transient, it is logged
     at DEBUG — not WARNING — so the user never sees the noise."""
+    # The seekr_chain logger is set to INFO at import time (via loggerado),
+    # which filters DEBUG records at the logger level before caplog can
+    # capture them. Set DEBUG on the specific logger so the demoted
+    # transient-exception records are captured.
+    caplog.set_level(logging.DEBUG, logger="seekr_chain")
 
     class Transient(Exception):
         pass
