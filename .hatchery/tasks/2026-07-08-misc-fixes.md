@@ -32,7 +32,29 @@ Please address the following misc fixes:
 
 ## Agreed Plan
 
-*(To be filled in after planning discussion)*
+1. **Fix 1 — Bare `except Exception` in `workflow_state.py`:**
+   - `_list_jobsets_by_step` (line 476): catch `ApiException`, only swallow 404, re-raise others.
+   - `is_jobset_suspended` (line 567): catch `ApiException`, only return False on 404, re-raise others.
+   - Update tests: `test_unexpected_exception_returns_false` → `test_unexpected_exception_raises`; add propagation test for `_list_jobsets_by_step`.
+
+2. **Fix 2 — `follow()` loops forever after controller Job GC'd:**
+   - `get_workflow_job_status` (line 539): add 404 guard returning `(UNKNOWN, None)`, re-raise non-404.
+   - `follow()` in `k8s_workflow.py`: treat `UNKNOWN` status as terminal (break loop).
+   - Add test for 404 guard.
+
+3. **Fix 3 — Controller stalls on transient submit error:**
+   - `_submit_ready_steps`: catch non-409 `ApiException`, log, `continue` (leave step PENDING).
+   - Add `_submit_ready_steps` call at top of each watch loop iteration for retry.
+   - Update test `test_non_409_api_error_raises` → `test_non_409_api_error_stays_pending`. Add retry-on-next-iteration test.
+
+4. **Fix 4 — Heartbeat stale on event-quiet watch:**
+   - Add `timeout_seconds=30` to `w.stream()` call.
+   - Add `_submit_ready_steps` call at top of watch loop (already in Fix 3) ensures heartbeat is touched each iteration.
+
+5. **Fix 5 — `_build_failure_policy` discards rules:**
+   - `_build_failure_policy` in `jobset.py`: include `rules` in returned dict.
+   - `jobset.yaml.j2`: render `rules` list with `action` and `targetReplicatedJobs`.
+   - Add manifest rendering test.
 
 ## Progress Log
 
