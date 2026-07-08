@@ -13,7 +13,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from seekr_chain.backends.k8s.state_fetcher import BackgroundStateFetcher
+from seekr_chain.backends.k8s.state_fetcher import BackgroundStateFetcher, ContinuousFetchError
 
 
 def test_latest_none_before_first_fetch():
@@ -43,14 +43,12 @@ def test_latest_reflects_most_recent_result():
 
     with BackgroundStateFetcher(fetch_fn, interval=0.01) as f:
         f.wait_for_first(timeout=1)
-        # Poll for a later version to arrive; interval is 10 ms so this is quick.
         deadline = time.monotonic() + 1.0
         while time.monotonic() < deadline:
             if counter["n"] >= 3:
                 break
             time.sleep(0.01)
         assert counter["n"] >= 3
-        # latest() should be one of the later versions.
         assert f.latest().tag != "v1"
 
 
@@ -64,7 +62,7 @@ def test_wait_for_first_times_out_when_fetch_hangs():
     with BackgroundStateFetcher(fetch_fn, interval=0.01) as f:
         with pytest.raises(TimeoutError):
             f.wait_for_first(timeout=0.05)
-        hang.set()  # let the thread exit cleanly on stop()
+        hang.set()
 
 
 def test_exception_in_fetch_fn_is_swallowed_and_last_good_state_survives(caplog):
@@ -76,17 +74,14 @@ def test_exception_in_fetch_fn_is_swallowed_and_last_good_state_survives(caplog)
             return SimpleNamespace(tag="good")
         raise RuntimeError("boom")
 
-    with BackgroundStateFetcher(fetch_fn, interval=0.01) as f:
+    with BackgroundStateFetcher(fetch_fn, interval=0.01, error_tolerance=10.0) as f:
         f.wait_for_first(timeout=1)
-        # Let a few failing fetches run.
         deadline = time.monotonic() + 0.5
         while time.monotonic() < deadline and calls["n"] < 4:
             time.sleep(0.01)
         assert calls["n"] >= 4
-        # Last good state is still served.
         assert f.latest().tag == "good"
 
-    # The exceptions were logged, not raised.
     assert any("state fetch failed" in r.message for r in caplog.records if r.levelname == "WARNING")
 
 
@@ -98,7 +93,7 @@ def test_stop_is_idempotent():
     f.start()
     f.wait_for_first(timeout=1)
     f.stop()
-    f.stop()  # second call should be a no-op, not raise
+    f.stop()
     assert not f._thread.is_alive()
 
 
@@ -115,9 +110,6 @@ def test_context_manager_cleans_up_on_exception():
 
 
 def test_stop_wakes_thread_promptly_even_with_long_interval():
-    """The thread waits on the stop event, not on time.sleep — so a large
-    interval doesn't delay shutdown."""
-
     def fetch_fn():
         return SimpleNamespace(tag="v")
 
@@ -130,8 +122,6 @@ def test_stop_wakes_thread_promptly_even_with_long_interval():
 
 
 def test_slow_fetch_refetches_immediately_no_extra_sleep():
-    """When a fetch takes longer than the interval, the next fetch starts
-    immediately — we don't stack fetch_time + interval per cycle."""
     starts: list[float] = []
     fetch_duration = 0.10
     interval = 0.02
@@ -141,16 +131,13 @@ def test_slow_fetch_refetches_immediately_no_extra_sleep():
         time.sleep(fetch_duration)
         return SimpleNamespace(tag="v")
 
-    with BackgroundStateFetcher(fetch_fn, interval=interval) as f:
+    with BackgroundStateFetcher(fetch_fn, interval=interval, error_tolerance=10.0) as f:
         f.wait_for_first(timeout=1)
-        # Let a few slow fetches happen.
         deadline = time.monotonic() + 0.5
         while time.monotonic() < deadline and len(starts) < 4:
             time.sleep(0.01)
 
     assert len(starts) >= 3
-    # Consecutive starts should be ~fetch_duration apart, not fetch_duration + interval.
-    # Allow a generous 50 ms tolerance for scheduling.
     gaps = [starts[i + 1] - starts[i] for i in range(len(starts) - 1)]
     assert max(gaps) < fetch_duration + 0.05, f"gaps too large: {gaps}"
 
@@ -158,10 +145,6 @@ def test_slow_fetch_refetches_immediately_no_extra_sleep():
 def test_transient_exception_logged_at_debug_not_warning(caplog):
     """When transient_check classifies an exception as transient, it is logged
     at DEBUG — not WARNING — so the user never sees the noise."""
-    # The seekr_chain logger is set to INFO at import time (via loggerado),
-    # which filters DEBUG records at the logger level before caplog can
-    # capture them. Set DEBUG on the specific logger so the demoted
-    # transient-exception records are captured.
     caplog.set_level(logging.DEBUG, logger="seekr_chain")
 
     class Transient(Exception):
@@ -177,25 +160,24 @@ def test_transient_exception_logged_at_debug_not_warning(caplog):
             raise Transient("blip")
         raise RuntimeError("real failure")
 
-    with BackgroundStateFetcher(fetch_fn, interval=0.01, transient_check=lambda e: isinstance(e, Transient)) as f:
+    with BackgroundStateFetcher(
+        fetch_fn, interval=0.01, error_tolerance=10.0, transient_check=lambda e: isinstance(e, Transient)
+    ) as f:
         f.wait_for_first(timeout=1)
         deadline = time.monotonic() + 0.5
         while time.monotonic() < deadline and calls["n"] < 5:
             time.sleep(0.01)
         assert calls["n"] >= 5
-        # Last good state survives both transient and non-transient errors.
         assert f.latest().tag == "good"
 
     debug_records = [r for r in caplog.records if r.levelname == "DEBUG"]
     warning_records = [r for r in caplog.records if r.levelname == "WARNING"]
-    # The Transient exceptions were demoted to DEBUG.
     assert any("transient state fetch failed" in r.message for r in debug_records)
-    # The non-transient RuntimeError was still logged at WARNING.
     assert any("state fetch failed" in r.message for r in warning_records)
 
 
 def test_no_transient_check_defaults_to_warning(caplog):
-    """Without transient_check, all exceptions are logged at WARNING (current behavior)."""
+    """Without transient_check, all exceptions are logged at WARNING."""
 
     calls = {"n": 0}
 
@@ -205,7 +187,7 @@ def test_no_transient_check_defaults_to_warning(caplog):
             return SimpleNamespace(tag="good")
         raise RuntimeError("boom")
 
-    with BackgroundStateFetcher(fetch_fn, interval=0.01) as f:
+    with BackgroundStateFetcher(fetch_fn, interval=0.01, error_tolerance=10.0) as f:
         f.wait_for_first(timeout=1)
         deadline = time.monotonic() + 0.3
         while time.monotonic() < deadline and calls["n"] < 3:
@@ -215,3 +197,113 @@ def test_no_transient_check_defaults_to_warning(caplog):
     assert any("state fetch failed" in r.message for r in warning_records)
     debug_records = [r for r in caplog.records if r.levelname == "DEBUG"]
     assert not any("transient state fetch failed" in r.message for r in debug_records)
+
+
+def test_single_transient_blip_is_silent_then_recovers(caplog):
+    """A single transient error that recovers on the next fetch is swallowed at
+    DEBUG and the streak resets — no WARNING, no raise."""
+    caplog.set_level(logging.DEBUG, logger="seekr_chain")
+
+    class Transient(Exception):
+        pass
+
+    calls = {"n": 0}
+
+    def fetch_fn():
+        calls["n"] += 1
+        if calls["n"] == 2:
+            raise Transient("blip")
+        return SimpleNamespace(tag=f"v{calls['n']}")
+
+    with BackgroundStateFetcher(
+        fetch_fn, interval=0.01, error_tolerance=0.2, transient_check=lambda e: isinstance(e, Transient)
+    ) as f:
+        f.wait_for_first(timeout=1)
+        deadline = time.monotonic() + 1.0
+        while time.monotonic() < deadline and calls["n"] < 5:
+            time.sleep(0.01)
+        assert calls["n"] >= 5
+        assert f.latest().tag != "v1"
+
+    warning_records = [r for r in caplog.records if r.levelname == "WARNING"]
+    assert not warning_records
+
+
+def test_continuous_transient_errors_raise_after_tolerance():
+    """When transient errors persist continuously past error_tolerance, the
+    fetcher raises ContinuousFetchError from latest()."""
+
+    class Transient(Exception):
+        pass
+
+    def fetch_fn():
+        raise Transient("persistent 401")
+
+    with BackgroundStateFetcher(
+        fetch_fn, interval=0.01, error_tolerance=0.1, transient_check=lambda e: isinstance(e, Transient)
+    ) as f:
+        # Wait for the streak to exceed the tolerance.
+        deadline = time.monotonic() + 2.0
+        while time.monotonic() < deadline:
+            with f._lock:
+                if f._fatal_error is not None:
+                    break
+            time.sleep(0.01)
+        with f._lock:
+            assert f._fatal_error is not None
+        # latest() re-raises the fatal error.
+        with pytest.raises(ContinuousFetchError) as exc_info:
+            f.latest()
+        assert exc_info.value.errors
+        assert any("persistent 401" in str(e) for e in exc_info.value.errors)
+
+
+def test_continuous_non_transient_errors_raise_after_tolerance():
+    """Non-transient errors also escalate to a raise after the tolerance window."""
+
+    def fetch_fn():
+        raise RuntimeError("server 500")
+
+    with BackgroundStateFetcher(fetch_fn, interval=0.01, error_tolerance=0.1) as f:
+        deadline = time.monotonic() + 2.0
+        while time.monotonic() < deadline:
+            with f._lock:
+                if f._fatal_error is not None:
+                    break
+            time.sleep(0.01)
+        with f._lock:
+            assert f._fatal_error is not None
+        with pytest.raises(ContinuousFetchError) as exc_info:
+            f.latest()
+        assert exc_info.value.errors
+        assert any("server 500" in str(e) for e in exc_info.value.errors)
+
+
+def test_success_resets_streak():
+    """A successful fetch in the middle of errors resets the streak, so a later
+    blip doesn't accumulate toward the tolerance."""
+
+    class Transient(Exception):
+        pass
+
+    calls = {"n": 0}
+
+    def fetch_fn():
+        calls["n"] += 1
+        n = calls["n"]
+        # pattern: good, blip, good, blip, good, ... never persists long enough
+        if n % 2 == 0:
+            raise Transient("blip")
+        return SimpleNamespace(tag=f"v{n}")
+
+    with BackgroundStateFetcher(
+        fetch_fn, interval=0.01, error_tolerance=0.2, transient_check=lambda e: isinstance(e, Transient)
+    ) as f:
+        f.wait_for_first(timeout=1)
+        deadline = time.monotonic() + 1.0
+        while time.monotonic() < deadline and calls["n"] < 20:
+            time.sleep(0.01)
+        assert calls["n"] >= 20
+        # Never went fatal — streak kept resetting on success.
+        with f._lock:
+            assert f._fatal_error is None
