@@ -241,15 +241,25 @@ def _submit_ready_steps(
                     f"[controller] step={name!r} jobset={js_name!r} already exists, resuming",
                     flush=True,
                 )
-            else:
-                # Transient submit error (5xx, timeout, etc.) — leave the
-                # step PENDING so it is retried on the next watch iteration.
-                # Re-raising would stall the DAG permanently because the watch
-                # only re-delivers already-terminal events.
+            elif e.status == 429 or e.status >= 500:
+                # Retriable error (rate limit, server error, gateway timeout) —
+                # leave the step PENDING so it is retried on the next watch
+                # iteration.  Re-raising would stall the DAG permanently because
+                # the watch only re-delivers already-terminal events.
                 print(
-                    f"[controller] warning: submit error for step={name!r} jobset={js_name!r}: {e}, will retry",
+                    f"[controller] warning: retriable submit error for step={name!r} jobset={js_name!r}: {e}, will retry",
                     flush=True,
                 )
+                continue
+            else:
+                # Permanent error (400 malformed manifest, 403 RBAC, 422
+                # validation) — fail the step so the DAG doesn't retry forever.
+                print(
+                    f"[controller] error: permanent submit error for step={name!r} jobset={js_name!r}: {e}, marking FAILED",
+                    file=sys.stderr,
+                    flush=True,
+                )
+                phases[name] = "FAILED"
                 continue
 
         phases[name] = "RUNNING"
@@ -322,10 +332,12 @@ def main() -> int:
             _touch_heartbeat()
 
             # Retry any steps that failed to submit on a previous iteration
-            # (transient API errors leave them PENDING).
+            # (retriable API errors leave them PENDING).  Also cascade-fail
+            # dependents of any step marked FAILED by a permanent submit error.
             _submit_ready_steps(
                 dag, phases, js_names, js_to_step, assets_path, namespace, owner_ref, k8s_custom
             )
+            _cascade_fail(dag, phases)
             _save_phases(k8s_v1, namespace, workflow_id, phases, owner_ref)
 
             if all(p in ("SUCCEEDED", "FAILED") for p in phases.values()):

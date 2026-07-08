@@ -223,7 +223,15 @@ class K8sWorkflow(Workflow):
             BackgroundStateFetcher(self.get_detailed_state) as fetcher,
             maybe_live(plain=plain, console=console, refresh_per_second=4, transient=False) as live,
         ):
-            workflow_state = fetcher.wait_for_first()
+            try:
+                workflow_state = fetcher.wait_for_first(timeout=30)
+            except TimeoutError:
+                # The background fetcher keeps failing — surface the error
+                # instead of hanging forever on a persistent API/RBAC issue.
+                raise RuntimeError(
+                    "Could not retrieve workflow state after 30 s. "
+                    "Check cluster connectivity and RBAC permissions."
+                )
             while True:
                 live.update(render(workflow_state))
 
@@ -264,7 +272,15 @@ class K8sWorkflow(Workflow):
             BackgroundStateFetcher(self.get_detailed_state) as fetcher,
             maybe_live(plain=plain, console=console, refresh_per_second=4, transient=False) as live,
         ):
-            workflow_state = fetcher.wait_for_first()
+            try:
+                workflow_state = fetcher.wait_for_first(timeout=30)
+            except TimeoutError:
+                # The background fetcher keeps failing — surface the error
+                # instead of hanging forever on a persistent API/RBAC issue.
+                raise RuntimeError(
+                    "Could not retrieve workflow state after 30 s. "
+                    "Check cluster connectivity and RBAC permissions."
+                )
             while True:
                 live.update(render(workflow_state))
 

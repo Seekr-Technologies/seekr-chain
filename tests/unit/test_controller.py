@@ -188,8 +188,8 @@ class TestSubmitReadySteps:
         assert phases["a"] == "RUNNING"
         assert js_names["a"] == "a-js"
 
-    def test_non_409_api_error_stays_pending(self):
-        """Non-409 API errors should be caught, logged, and the step left PENDING."""
+    def test_retriable_api_error_stays_pending(self):
+        """Retriable errors (5xx/429) should be caught, logged, and the step left PENDING."""
         from kubernetes.client.exceptions import ApiException
 
         dag = [{"name": "a", "depends_on": []}]
@@ -205,6 +205,29 @@ class TestSubmitReadySteps:
 
         # Step should remain PENDING — it will be retried on the next iteration
         assert phases["a"] == "PENDING"
+        assert js_names == {}
+        assert js_to_step == {}
+
+    def test_permanent_api_error_marks_step_failed(self):
+        """Permanent errors (4xx) should mark the step FAILED, not retry forever."""
+        from kubernetes.client.exceptions import ApiException
+
+        dag = [
+            {"name": "a", "depends_on": []},
+            {"name": "b", "depends_on": ["a"]},
+        ]
+        phases = {"a": "PENDING", "b": "PENDING"}
+        js_names: dict = {}
+        js_to_step: dict = {}
+        mock_k8s = MagicMock()
+        mock_k8s.create_namespaced_custom_object.side_effect = ApiException(status=403)
+
+        with patch.object(controller, "_load_manifest") as mock_load:
+            mock_load.return_value = {"metadata": {"name": "a-js"}, "spec": {}}
+            _submit_ready_steps(dag, phases, js_names, js_to_step, "/assets", "ns", [], mock_k8s)
+
+        # Step a should be FAILED (permanent error), not PENDING
+        assert phases["a"] == "FAILED"
         assert js_names == {}
         assert js_to_step == {}
 
