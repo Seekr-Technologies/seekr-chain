@@ -58,7 +58,7 @@ class TestPodStatus:
         assert not PodStatus.PULL_ERROR.is_finished()
 
     def test_order_covers_all_values(self):
-        assert set(PodStatus.RUNNING.order) == set(PodStatus)
+        assert set(PodStatus._order().keys()) == set(PodStatus)
 
     def test_order_is_total(self):
         """Every status must be comparable via min() because order is defined."""
@@ -66,6 +66,29 @@ class TestPodStatus:
         # min() uses __lt__ which relies on order; should not raise
         result = min(statuses)
         assert isinstance(result, PodStatus)
+
+    # Discriminating cases where lexicographic (str) order and definition
+    # order disagree — these would have failed before the __lt__ fix.
+    def test_min_prefers_running_over_failed(self):
+        assert min([PodStatus.FAILED, PodStatus.RUNNING]) == PodStatus.RUNNING
+
+    def test_min_prefers_running_over_succeeded(self):
+        assert min([PodStatus.SUCCEEDED, PodStatus.RUNNING]) == PodStatus.RUNNING
+
+    def test_min_prefers_pending_over_terminated(self):
+        assert min([PodStatus.TERMINATED, PodStatus.PENDING]) == PodStatus.PENDING
+
+    def test_sorted_follows_definition_order(self):
+        result = sorted([PodStatus.FAILED, PodStatus.PENDING, PodStatus.RUNNING])
+        assert result == [PodStatus.PENDING, PodStatus.RUNNING, PodStatus.FAILED]
+
+    def test_lt_follows_definition_order(self):
+        assert PodStatus.RUNNING < PodStatus.FAILED
+        assert not (PodStatus.FAILED < PodStatus.RUNNING)
+
+    def test_str_equality_still_holds(self):
+        """The str/Enum hybrid must still compare equal to its raw value."""
+        assert PodStatus.RUNNING == "RUNNING"
 
 
 # ---------------------------------------------------------------------------
