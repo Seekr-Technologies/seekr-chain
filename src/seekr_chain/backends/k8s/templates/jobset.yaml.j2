@@ -28,6 +28,18 @@ spec:
   {% if failure_policy %}
   failurePolicy:
     maxRestarts: {{ failure_policy.maxRestarts }}
+    {% if failure_policy.rules is defined and failure_policy.rules %}
+    rules:
+    {% for rule in failure_policy.rules %}
+    - action: {{ rule.action }}
+      {% if rule.targetReplicatedJobs %}
+      targetReplicatedJobs:
+      {% for role_name in rule.targetReplicatedJobs %}
+      - {{ role_name }}
+      {% endfor %}
+      {% endif %}
+    {% endfor %}
+    {% endif %}
   {% endif %}
   replicatedJobs:
   {% for role in roles %}

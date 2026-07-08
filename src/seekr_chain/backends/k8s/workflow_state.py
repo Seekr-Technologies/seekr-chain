@@ -473,7 +473,9 @@ def _list_jobsets_by_step(k8s_custom, namespace: str, workflow_id: str) -> dict[
             namespace=namespace,
             label_selector=f"seekr-chain/job-id={workflow_id}",
         ).get("items", [])
-    except Exception:
+    except k8s.client.exceptions.ApiException as e:
+        if e.status != 404:
+            raise
         jobsets = []
     return {
         js["metadata"]["labels"]["seekr-chain/step-name"]: js
@@ -536,7 +538,12 @@ def get_workflow_job_status(
     Used by ``K8sWorkflow.get_status()`` (called repeatedly by ``wait()``) so
     callers can poll status without fetching the full workflow state.
     """
-    job = k8s_batch.read_namespaced_job_status(name=workflow_id, namespace=namespace)
+    try:
+        job = k8s_batch.read_namespaced_job_status(name=workflow_id, namespace=namespace)
+    except k8s.client.exceptions.ApiException as e:
+        if e.status != 404:
+            raise
+        return WorkflowStatus.UNKNOWN, None
     return _job_status_and_completion(job)
 
 
@@ -564,5 +571,7 @@ def is_jobset_suspended(k8s_custom, name: str, namespace: str) -> bool:
             name=name,
         )
         return bool(js.get("spec", {}).get("suspend", False))
-    except Exception:
+    except k8s.client.exceptions.ApiException as e:
+        if e.status != 404:
+            raise
         return False
