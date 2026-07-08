@@ -437,6 +437,8 @@ def _build_failure_policy(step_config) -> dict | None:
                 "targetReplicatedJobs": rule.target_roles,
             },
         )
+    if rules:
+        policy["rules"] = rules
     return policy
 
 
