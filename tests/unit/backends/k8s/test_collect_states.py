@@ -13,11 +13,13 @@ from kubernetes.client.rest import ApiException
 from seekr_chain.backends.k8s.workflow_state import (
     _collect_container_states,
     _collect_pod_state,
+    _list_jobsets_by_step,
     _resolve_status,
     _trim_pull_message,
+    get_workflow_job_status,
     is_jobset_suspended,
 )
-from seekr_chain.status import ContainerStatus, PodStatus
+from seekr_chain.status import ContainerStatus, PodStatus, WorkflowStatus
 
 UTC = datetime.timezone.utc
 
@@ -414,6 +416,11 @@ class _FakeCustomApi:
             raise self._exc
         return self._response
 
+    def list_namespaced_custom_object(self, **kwargs):
+        if self._exc:
+            raise self._exc
+        return self._response
+
 
 class TestIsJobsetSuspended:
     def test_suspended_true(self):
@@ -432,9 +439,17 @@ class TestIsJobsetSuspended:
         api = _FakeCustomApi(exc=ApiException(status=404))
         assert is_jobset_suspended(api, "missing-jobset", "argo-workflows") is False
 
-    def test_unexpected_exception_returns_false(self):
+    def test_non_404_api_exception_raises(self):
+        """Non-404 API errors (e.g. 403 RBAC) must propagate, not be swallowed."""
+        api = _FakeCustomApi(exc=ApiException(status=403))
+        with pytest.raises(ApiException):
+            is_jobset_suspended(api, "my-jobset", "argo-workflows")
+
+    def test_unexpected_exception_raises(self):
+        """Non-Api exceptions must propagate, not be silently swallowed."""
         api = _FakeCustomApi(exc=RuntimeError("unexpected"))
-        assert is_jobset_suspended(api, "my-jobset", "argo-workflows") is False
+        with pytest.raises(RuntimeError):
+            is_jobset_suspended(api, "my-jobset", "argo-workflows")
 
 
 # ---------------------------------------------------------------------------
@@ -604,3 +619,72 @@ class TestResolveStatus:
         rule = [(ContainerStatus.SUCCEEDED, PodStatus.PULLING, "all")]
         assert _resolve_status(all_succeeded, rule) == PodStatus.PULLING
         assert _resolve_status(mixed, rule) is None
+
+
+# ---------------------------------------------------------------------------
+# _list_jobsets_by_step
+# ---------------------------------------------------------------------------
+
+
+class TestListJobsetsByStep:
+    def test_returns_jobsets_keyed_by_step_name(self):
+        api = _FakeCustomApi(
+            response={
+                "items": [
+                    {"metadata": {"labels": {"seekr-chain/step-name": "a"}}, "spec": {}, "status": {}},
+                    {"metadata": {"labels": {"seekr-chain/step-name": "b"}}, "spec": {}, "status": {}},
+                ]
+            }
+        )
+        result = _list_jobsets_by_step(api, "ns", "wf-abc")
+        assert set(result.keys()) == {"a", "b"}
+
+    def test_404_returns_empty_dict(self):
+        api = _FakeCustomApi(exc=ApiException(status=404))
+        result = _list_jobsets_by_step(api, "ns", "wf-abc")
+        assert result == {}
+
+    def test_non_404_api_exception_raises(self):
+        """Non-404 API errors (e.g. 403 RBAC) must propagate, not return empty."""
+        api = _FakeCustomApi(exc=ApiException(status=403))
+        with pytest.raises(ApiException):
+            _list_jobsets_by_step(api, "ns", "wf-abc")
+
+
+# ---------------------------------------------------------------------------
+# get_workflow_job_status
+# ---------------------------------------------------------------------------
+
+
+class _FakeBatchApi:
+    def __init__(self, response=None, exc=None):
+        self._response = response
+        self._exc = exc
+
+    def read_namespaced_job_status(self, **kwargs):
+        if self._exc:
+            raise self._exc
+        return self._response
+
+
+class TestGetWorkflowJobStatus:
+    def test_404_returns_unknown(self):
+        """After ttlSecondsAfterFinished deletes the Job, status should be UNKNOWN."""
+        api = _FakeBatchApi(exc=ApiException(status=404))
+        status, dt = get_workflow_job_status(api, "ns", "wf-abc")
+        assert status == WorkflowStatus.UNKNOWN
+        assert dt is None
+
+    def test_non_404_api_exception_raises(self):
+        api = _FakeBatchApi(exc=ApiException(status=403))
+        with pytest.raises(ApiException):
+            get_workflow_job_status(api, "ns", "wf-abc")
+
+    def test_running_job(self):
+        from types import SimpleNamespace
+
+        job = SimpleNamespace(status=SimpleNamespace(succeeded=0, failed=0, active=1, completion_time=None))
+        api = _FakeBatchApi(response=job)
+        status, dt = get_workflow_job_status(api, "ns", "wf-abc")
+        assert status == WorkflowStatus.RUNNING
+        assert dt is None
