@@ -954,3 +954,145 @@ class TestAffinityRendering:
                 ]
             },
         }
+
+
+    def test_failure_policy_renders_rules(self, tmp_path):
+        """failure_policy.rules should render with action and targetReplicatedJobs."""
+        config = _minimal_config(
+            steps=[
+                {
+                    "name": "train",
+                    "image": "pytorch:2.0",
+                    "script": "echo hello",
+                    "resources": {
+                        "cpus_per_node": "4",
+                        "mem_per_node": "8Gi",
+                        "ephemeral_storage_per_node": "10Gi",
+                    },
+                    "failure_policy": {
+                        "max_restarts": 3,
+                        "rules": [
+                            {"action": "FAIL_JOB_SET"},
+                        ],
+                    },
+                }
+            ]
+        )
+        job_info = _fake_job_info()
+
+        _, context = build_jobset_context(
+            workflow_config=config,
+            step_index=0,
+            job_info=job_info,
+            workflow_name="ab1234",
+            workflow_secrets=[],
+            interactive=False,
+            assets_path=tmp_path / "assets",
+        )
+
+        rendered = render.render("jobset.yaml.j2", context)
+        manifest = yaml.safe_load(rendered)
+
+        fp = manifest["spec"]["failurePolicy"]
+        assert fp["maxRestarts"] == 3
+        assert len(fp["rules"]) == 1
+        assert fp["rules"][0]["action"] == "FailJobSet"
+
+    def test_failure_policy_rules_with_target_roles(self, tmp_path):
+        """Multi-role failure_policy rules should render targetReplicatedJobs."""
+        config = _minimal_config(
+            steps=[
+                {
+                    "name": "train",
+                    "roles": [
+                        {
+                            "name": "trainer",
+                            "image": "pytorch:2.0",
+                            "script": "echo hello",
+                            "resources": {
+                                "cpus_per_node": "4",
+                                "mem_per_node": "8Gi",
+                                "ephemeral_storage_per_node": "10Gi",
+                            },
+                        },
+                        {
+                            "name": "evaluator",
+                            "image": "pytorch:2.0",
+                            "script": "echo eval",
+                            "resources": {
+                                "cpus_per_node": "4",
+                                "mem_per_node": "8Gi",
+                                "ephemeral_storage_per_node": "10Gi",
+                            },
+                        },
+                    ],
+                    "failure_policy": {
+                        "max_restarts": 2,
+                        "rules": [
+                            {"action": "FAIL_JOB_SET", "target_roles": ["trainer"]},
+                            {"action": "RESTART_JOB_SET", "target_roles": ["evaluator"]},
+                        ],
+                    },
+                }
+            ]
+        )
+        job_info = _fake_job_info()
+
+        _, context = build_jobset_context(
+            workflow_config=config,
+            step_index=0,
+            job_info=job_info,
+            workflow_name="ab1234",
+            workflow_secrets=[],
+            interactive=False,
+            assets_path=tmp_path / "assets",
+        )
+
+        rendered = render.render("jobset.yaml.j2", context)
+        manifest = yaml.safe_load(rendered)
+
+        fp = manifest["spec"]["failurePolicy"]
+        assert fp["maxRestarts"] == 2
+        assert len(fp["rules"]) == 2
+        assert fp["rules"][0]["action"] == "FailJobSet"
+        assert fp["rules"][0]["targetReplicatedJobs"] == ["trainer"]
+        assert fp["rules"][1]["action"] == "RestartJobSet"
+        assert fp["rules"][1]["targetReplicatedJobs"] == ["evaluator"]
+
+    def test_failure_policy_no_rules_by_default(self, tmp_path):
+        """Without rules, only maxRestarts should be rendered."""
+        config = _minimal_config(
+            steps=[
+                {
+                    "name": "train",
+                    "image": "pytorch:2.0",
+                    "script": "echo hello",
+                    "resources": {
+                        "cpus_per_node": "4",
+                        "mem_per_node": "8Gi",
+                        "ephemeral_storage_per_node": "10Gi",
+                    },
+                    "failure_policy": {
+                        "max_restarts": 5,
+                    },
+                }
+            ]
+        )
+        job_info = _fake_job_info()
+
+        _, context = build_jobset_context(
+            workflow_config=config,
+            step_index=0,
+            job_info=job_info,
+            workflow_name="ab1234",
+            workflow_secrets=[],
+            interactive=False,
+            assets_path=tmp_path / "assets",
+        )
+
+        rendered = render.render("jobset.yaml.j2", context)
+        manifest = yaml.safe_load(rendered)
+
+        fp = manifest["spec"]["failurePolicy"]
+        assert fp["maxRestarts"] == 5
+        assert "rules" not in fp
