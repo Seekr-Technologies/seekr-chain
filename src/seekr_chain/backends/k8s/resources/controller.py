@@ -44,6 +44,11 @@ import yaml
 # How long to wait before reconnecting the watch stream after an error.
 _WATCH_RECONNECT_DELAY = 2
 
+# Watch stream timeout: forces the watch to return periodically so the
+# heartbeat is touched even when no events arrive (prevents liveness restart
+# on a long, event-quiet watch).
+_WATCH_TIMEOUT_SECONDS = 30
+
 # Path of the heartbeat file checked by the liveness probe.
 _HEARTBEAT_PATH = "/tmp/controller-heartbeat"
 
@@ -237,7 +242,15 @@ def _submit_ready_steps(
                     flush=True,
                 )
             else:
-                raise
+                # Transient submit error (5xx, timeout, etc.) — leave the
+                # step PENDING so it is retried on the next watch iteration.
+                # Re-raising would stall the DAG permanently because the watch
+                # only re-delivers already-terminal events.
+                print(
+                    f"[controller] warning: submit error for step={name!r} jobset={js_name!r}: {e}, will retry",
+                    flush=True,
+                )
+                continue
 
         phases[name] = "RUNNING"
         js_names[name] = js_name
@@ -307,6 +320,17 @@ def main() -> int:
 
         while not all(p in ("SUCCEEDED", "FAILED") for p in phases.values()):
             _touch_heartbeat()
+
+            # Retry any steps that failed to submit on a previous iteration
+            # (transient API errors leave them PENDING).
+            _submit_ready_steps(
+                dag, phases, js_names, js_to_step, assets_path, namespace, owner_ref, k8s_custom
+            )
+            _save_phases(k8s_v1, namespace, workflow_id, phases, owner_ref)
+
+            if all(p in ("SUCCEEDED", "FAILED") for p in phases.values()):
+                break
+
             try:
                 w = kubernetes.watch.Watch()
                 for event in w.stream(
@@ -317,6 +341,7 @@ def main() -> int:
                     namespace=namespace,
                     label_selector=label_selector,
                     resource_version=resource_version,
+                    timeout_seconds=_WATCH_TIMEOUT_SECONDS,
                 ):
                     _touch_heartbeat()
 
