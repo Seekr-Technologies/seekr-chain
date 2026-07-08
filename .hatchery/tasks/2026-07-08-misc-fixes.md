@@ -30,16 +30,21 @@ Address five reported misc fixes across backend/orchestration and shell/cluster:
 **Files:** `src/seekr_chain/backends/k8s/workflow_state.py`, `src/seekr_chain/backends/k8s/k8s_workflow.py`
 
 - `get_workflow_job_status` (line 539): Added a 404 guard matching `_read_workflow_metadata` (line 447). Returns `(WorkflowStatus.UNKNOWN, None)` on 404; re-raises non-404.
-- `follow()` in `k8s_workflow.py`: Added `workflow_state.status == WorkflowStatus.UNKNOWN` as a terminal condition to break the loop. The only way status goes UNKNOWN is the controller Job being deleted (404), so this is safe.
+- `follow()` and `attach()` in `k8s_workflow.py`: Added `workflow_state.status == WorkflowStatus.UNKNOWN` as a terminal condition to break the loop. The only way status goes UNKNOWN is the controller Job being deleted (404), so this is safe.
+- `follow()` and `attach()`: `wait_for_first(timeout=30)` so a persistent API/RBAC error surfaces as `RuntimeError` instead of hanging forever (the `BackgroundStateFetcher` swallows exceptions and only logs warnings).
 
 ### Fix 3 — Controller stalls on transient submit error
 
 **Files:** `src/seekr_chain/backends/k8s/resources/controller.py`
 
-- `_submit_ready_steps`: Non-409 `ApiException` is now caught, logged, and the step is left PENDING via `continue` (instead of re-raising). The step is retried on the next watch iteration.
-- Added `_submit_ready_steps` call at the top of each watch loop iteration (before `w.stream()`), so steps that failed to submit previously get retried even without new events arriving. This is essential because the watch only re-delivers already-terminal events — a step stuck at PENDING would never be retried otherwise.
+- `_submit_ready_steps`: Non-409 `ApiException` is now handled based on status code:
+  - **Retriable** (429, 5xx): logged, step left PENDING, retried on next watch iteration.
+  - **Permanent** (400, 403, 422): logged to stderr, step marked FAILED so the DAG doesn't retry forever.
+  - **409**: unchanged (JobSet already exists, treat as resume).
+- Added `_submit_ready_steps` + `_cascade_fail` call at the top of each watch loop iteration (before `w.stream()`), so steps that failed to submit previously get retried, and dependents of permanently-failed steps are cascade-failed.
+- Added `_save_phases` after the retry/cascade so the ConfigMap reflects the updated state.
 
-**Decision:** Re-raising caused the submit error to propagate up to the `except ApiException` handler in the watch loop, which would sleep and reconnect the watch. But the watch reconnect only re-delivers terminal events for already-submitted JobSets — a step that was never successfully submitted has no JobSet to watch, so it stays PENDING forever.
+**Decision:** Retrying permanent errors (malformed manifest, RBAC) forever would stall the DAG silently — the heartbeat keeps being touched so no liveness restart, and only periodic log lines surface. Failing the step + cascading lets the controller exit with a non-zero code, surfacing the error to the user.
 
 ### Fix 4 — Heartbeat stale on event-quiet watch
 
@@ -56,7 +61,7 @@ Address five reported misc fixes across backend/orchestration and shell/cluster:
 - `_build_failure_policy`: Now includes `rules` in the returned policy dict when rules are present (previously built the list but discarded it).
 - `jobset.yaml.j2`: Template now renders `rules:` with `action` and `targetReplicatedJobs` fields. Uses `failure_policy.get("rules")` to safely handle policies without rules (Jinja2 raises `UndefinedError` on missing dict keys with attribute syntax).
 
-**Gotcha:** Jinja2's `{% if failure_policy.rules %}` raises `UndefinedError` when `rules` is not a key in the dict. Must use `{% if failure_policy.get("rules") %}` instead.
+**Gotcha:** Jinja2's `{% if failure_policy.rules %}` raises `UndefinedError` when `rules` is not a key in the dict (render.py uses `StrictUndefined`). Must use `{% if failure_policy.rules is defined and failure_policy.rules %}` — `.get()` also works but `is defined and` is the idiomatic pattern for `StrictUndefined`.
 
 ### Tests
 
