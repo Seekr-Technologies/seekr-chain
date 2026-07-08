@@ -235,6 +235,31 @@ def patch_configs_for_testing(job_name, datastore_root, monkeypatch, hermetic_fl
         monkeypatch.setenv("AWS_ACCESS_KEY_ID", minio_service.access_key)
         monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", minio_service.secret_key)
         monkeypatch.setenv("AWS_DEFAULT_REGION", "us-east-1")
+        # Empirically confirmed: a zero-length-body PUT (e.g. s3_utils.touch())
+        # immediately followed by a non-empty PUT on the SAME boto3 client
+        # reliably stalls ~30s against our hermetic MinIO (through the podman
+        # network path) -- the reused keep-alive connection is left in a bad
+        # state after the empty-body request. Forcing "Connection: close" on
+        # every S3 request avoids connection reuse and eliminates the stall.
+        # This never reproduces against real S3, so it's patched here rather
+        # than in production code. Patching boto3.client itself (not just the
+        # s3_client fixture below) so it also covers clients production code
+        # builds for itself, e.g. launch_k8s_workflow._get_s3_client_and_creds().
+        import boto3 as _boto3
+
+        _orig_boto3_client = _boto3.client
+
+        def _boto3_client_no_keepalive(*args, **kwargs):
+            client = _orig_boto3_client(*args, **kwargs)
+            service_name = args[0] if args else kwargs.get("service_name")
+            if service_name == "s3":
+                client.meta.events.register_first(
+                    "before-send.s3.*",
+                    lambda request, **kw: request.headers.__setitem__("Connection", "close"),
+                )
+            return client
+
+        monkeypatch.setattr(_boto3, "client", _boto3_client_no_keepalive)
 
     if hermetic_flag and k3d_cluster is not None:
         # Route argo CLI and kubernetes client to k3d cluster
