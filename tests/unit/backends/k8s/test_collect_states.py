@@ -13,11 +13,11 @@ from kubernetes.client.rest import ApiException
 from seekr_chain.backends.k8s.workflow_state import (
     _collect_container_states,
     _collect_pod_state,
+    _list_jobsets_by_step,
     _resolve_status,
     _trim_pull_message,
-    is_jobset_suspended,
-    _list_jobsets_by_step,
     get_workflow_job_status,
+    is_jobset_suspended,
 )
 from seekr_chain.status import ContainerStatus, PodStatus, WorkflowStatus
 
@@ -628,12 +628,14 @@ class TestResolveStatus:
 
 class TestListJobsetsByStep:
     def test_returns_jobsets_keyed_by_step_name(self):
-        api = _FakeCustomApi(response={
-            "items": [
-                {"metadata": {"labels": {"seekr-chain/step-name": "a"}}, "spec": {}, "status": {}},
-                {"metadata": {"labels": {"seekr-chain/step-name": "b"}}, "spec": {}, "status": {}},
-            ]
-        })
+        api = _FakeCustomApi(
+            response={
+                "items": [
+                    {"metadata": {"labels": {"seekr-chain/step-name": "a"}}, "spec": {}, "status": {}},
+                    {"metadata": {"labels": {"seekr-chain/step-name": "b"}}, "spec": {}, "status": {}},
+                ]
+            }
+        )
         result = _list_jobsets_by_step(api, "ns", "wf-abc")
         assert set(result.keys()) == {"a", "b"}
 
@@ -680,9 +682,8 @@ class TestGetWorkflowJobStatus:
 
     def test_running_job(self):
         from types import SimpleNamespace
-        job = SimpleNamespace(
-            status=SimpleNamespace(succeeded=0, failed=0, active=1, completion_time=None)
-        )
+
+        job = SimpleNamespace(status=SimpleNamespace(succeeded=0, failed=0, active=1, completion_time=None))
         api = _FakeBatchApi(response=job)
         status, dt = get_workflow_job_status(api, "ns", "wf-abc")
         assert status == WorkflowStatus.RUNNING

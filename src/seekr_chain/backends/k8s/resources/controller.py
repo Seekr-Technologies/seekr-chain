@@ -334,9 +334,7 @@ def main() -> int:
             # Retry any steps that failed to submit on a previous iteration
             # (retriable API errors leave them PENDING).  Also cascade-fail
             # dependents of any step marked FAILED by a permanent submit error.
-            _submit_ready_steps(
-                dag, phases, js_names, js_to_step, assets_path, namespace, owner_ref, k8s_custom
-            )
+            _submit_ready_steps(dag, phases, js_names, js_to_step, assets_path, namespace, owner_ref, k8s_custom)
             _cascade_fail(dag, phases)
             _save_phases(k8s_v1, namespace, workflow_id, phases, owner_ref)
 

@@ -955,7 +955,6 @@ class TestAffinityRendering:
             },
         }
 
-
     def test_failure_policy_renders_rules(self, tmp_path):
         """failure_policy.rules should render with action and targetReplicatedJobs."""
         config = _minimal_config(

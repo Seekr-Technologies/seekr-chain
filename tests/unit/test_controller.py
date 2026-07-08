@@ -8,8 +8,6 @@ import importlib.util
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-import pytest
-
 # ---------------------------------------------------------------------------
 # Bootstrap: import controller.py as a standalone module without installing it
 # ---------------------------------------------------------------------------
@@ -774,6 +772,7 @@ class TestTransientSubmitRetry:
             call_count[0] += 1
             if call_count[0] == 1:
                 from kubernetes.client.exceptions import ApiException
+
                 raise ApiException(status=500)
             return {}
 

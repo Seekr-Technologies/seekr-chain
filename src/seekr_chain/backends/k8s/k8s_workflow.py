@@ -229,8 +229,7 @@ class K8sWorkflow(Workflow):
                 # The background fetcher keeps failing — surface the error
                 # instead of hanging forever on a persistent API/RBAC issue.
                 raise RuntimeError(
-                    "Could not retrieve workflow state after 30 s. "
-                    "Check cluster connectivity and RBAC permissions."
+                    "Could not retrieve workflow state after 30 s. Check cluster connectivity and RBAC permissions."
                 )
             while True:
                 live.update(render(workflow_state))
@@ -278,8 +277,7 @@ class K8sWorkflow(Workflow):
                 # The background fetcher keeps failing — surface the error
                 # instead of hanging forever on a persistent API/RBAC issue.
                 raise RuntimeError(
-                    "Could not retrieve workflow state after 30 s. "
-                    "Check cluster connectivity and RBAC permissions."
+                    "Could not retrieve workflow state after 30 s. Check cluster connectivity and RBAC permissions."
                 )
             while True:
                 live.update(render(workflow_state))
