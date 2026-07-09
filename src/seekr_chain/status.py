@@ -45,21 +45,29 @@ class PodStatus(str, Enum):
     FAILED = "FAILED"
     TERMINATED = "TERMINATED"
 
-    @property
-    def order(self):
-        return [
-            PodStatus.UNKNOWN,
-            PodStatus.PENDING,
-            PodStatus.INIT_WAITING,
-            PodStatus.INIT_RUNNING,
-            PodStatus.INIT_ERROR,
-            PodStatus.PULL_ERROR,
-            PodStatus.PULLING,
-            PodStatus.RUNNING,
-            PodStatus.SUCCEEDED,
-            PodStatus.FAILED,
-            PodStatus.TERMINATED,
-        ]
+    @classmethod
+    def _order(cls):
+        """Map each member to its definition index, cached on the class.
+
+        ``order`` is the single source of truth for comparison ranking.
+        Computing it from ``enumerate(cls)`` means it can never drift out
+        of sync with the member list.
+        """
+        if "_order_map" not in cls.__dict__:
+            cls._order_map = {m: i for i, m in enumerate(cls)}
+        return cls._order_map
+
+    # Without this, min()/sorted()/`<` would use the inherited str
+    # comparison (lexicographic) instead of definition order, so e.g.
+    # min([FAILED, RUNNING]) would return FAILED — the opposite of intent.
+    # functools.total_ordering does NOT help here: str already supplies
+    # all four rich-comparison methods, so total_ordering skips them.
+    # Only __lt__ is defined because only min()/sorted() are used on
+    # PodStatus; max()/`>`/`>=` would still fall back to str comparison.
+    def __lt__(self, other):
+        if not isinstance(other, PodStatus):
+            return NotImplemented
+        return self._order()[self] < self._order()[other]
 
     def is_running(self) -> bool:
         return self == PodStatus.RUNNING

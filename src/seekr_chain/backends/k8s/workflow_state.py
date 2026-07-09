@@ -615,5 +615,7 @@ def is_jobset_suspended(k8s_custom, name: str, namespace: str) -> bool:
             name=name,
         )
         return bool(js.get("spec", {}).get("suspend", False))
-    except Exception:
+    except k8s.client.exceptions.ApiException as e:
+        if e.status != 404:
+            raise
         return False

@@ -8,8 +8,6 @@ import importlib.util
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-import pytest
-
 # ---------------------------------------------------------------------------
 # Bootstrap: import controller.py as a standalone module without installing it
 # ---------------------------------------------------------------------------
@@ -188,7 +186,8 @@ class TestSubmitReadySteps:
         assert phases["a"] == "RUNNING"
         assert js_names["a"] == "a-js"
 
-    def test_non_409_api_error_raises(self):
+    def test_retriable_api_error_stays_pending(self):
+        """Retriable errors (5xx/429) should be caught, logged, and the step left PENDING."""
         from kubernetes.client.exceptions import ApiException
 
         dag = [{"name": "a", "depends_on": []}]
@@ -200,8 +199,35 @@ class TestSubmitReadySteps:
 
         with patch.object(controller, "_load_manifest") as mock_load:
             mock_load.return_value = {"metadata": {"name": "a-js"}, "spec": {}}
-            with pytest.raises(ApiException):
-                _submit_ready_steps(dag, phases, js_names, js_to_step, "/assets", "ns", [], mock_k8s)
+            _submit_ready_steps(dag, phases, js_names, js_to_step, "/assets", "ns", [], mock_k8s)
+
+        # Step should remain PENDING — it will be retried on the next iteration
+        assert phases["a"] == "PENDING"
+        assert js_names == {}
+        assert js_to_step == {}
+
+    def test_permanent_api_error_marks_step_failed(self):
+        """Permanent errors (4xx) should mark the step FAILED, not retry forever."""
+        from kubernetes.client.exceptions import ApiException
+
+        dag = [
+            {"name": "a", "depends_on": []},
+            {"name": "b", "depends_on": ["a"]},
+        ]
+        phases = {"a": "PENDING", "b": "PENDING"}
+        js_names: dict = {}
+        js_to_step: dict = {}
+        mock_k8s = MagicMock()
+        mock_k8s.create_namespaced_custom_object.side_effect = ApiException(status=403)
+
+        with patch.object(controller, "_load_manifest") as mock_load:
+            mock_load.return_value = {"metadata": {"name": "a-js"}, "spec": {}}
+            _submit_ready_steps(dag, phases, js_names, js_to_step, "/assets", "ns", [], mock_k8s)
+
+        # Step a should be FAILED (permanent error), not PENDING
+        assert phases["a"] == "FAILED"
+        assert js_names == {}
+        assert js_to_step == {}
 
 
 # ---------------------------------------------------------------------------
@@ -677,3 +703,123 @@ class TestMainControllerRetry:
         ]
         assert "a-js" not in submitted
         assert "b-js" in submitted
+
+
+# ---------------------------------------------------------------------------
+# Watch timeout (Fix 4) and transient submit retry (Fix 3)
+# ---------------------------------------------------------------------------
+
+
+class TestWatchTimeout:
+    def test_stream_called_with_timeout_seconds(self):
+        """w.stream() must be called with timeout_seconds to prevent stale heartbeat."""
+        dag = [{"name": "a", "depends_on": []}]
+        events = [
+            [_make_event("a-js", "Completed", rv="2")],
+        ]
+
+        mock_watch_cls = MagicMock()
+        mock_watch_instance = MagicMock()
+        mock_watch_instance.stream.side_effect = lambda *a, **kw: (yield from events[0])
+        mock_watch_instance.stop = MagicMock()
+        mock_watch_cls.return_value = mock_watch_instance
+
+        mock_k8s = MagicMock()
+        mock_k8s.create_namespaced_custom_object.return_value = {}
+
+        env = {
+            "SEEKR_CHAIN_JOB_ASSET_PATH": "/assets",
+            "SEEKR_CHAIN_NAMESPACE": "ns",
+            "SEEKR_CHAIN_CONTROLLER_JOB_NAME": "wf-abc",
+            "SEEKR_CHAIN_CONTROLLER_JOB_UID": "uid-123",
+        }
+
+        with (
+            patch.dict("os.environ", env),
+            patch.object(controller.kubernetes.config, "load_incluster_config"),
+            patch.object(controller.kubernetes.client, "CustomObjectsApi", MagicMock(return_value=mock_k8s)),
+            patch.object(controller.kubernetes.client, "CoreV1Api", MagicMock()),
+            patch.object(controller.kubernetes, "watch", MagicMock(Watch=mock_watch_cls)),
+            patch.object(controller, "_load_manifest", return_value={"metadata": {"name": "a-js"}, "spec": {}}),
+            patch.object(
+                controller, "_load_phases", side_effect=lambda _v1, _ns, _wid, d: {s["name"]: "PENDING" for s in d}
+            ),
+            patch.object(controller, "_save_phases"),
+            patch.object(controller, "_emit_event"),
+            patch.object(controller, "_touch_heartbeat"),
+            patch.object(controller.json, "load", return_value=dag),
+            patch("builtins.open", MagicMock(__enter__=lambda s, *a: s, __exit__=lambda s, *a: None)),
+        ):
+            result = controller.main()
+
+        assert result == 0
+        # Verify timeout_seconds was passed to w.stream()
+        call_kwargs = mock_watch_instance.stream.call_args
+        assert "timeout_seconds" in call_kwargs.kwargs
+        assert call_kwargs.kwargs["timeout_seconds"] == 30
+
+
+class TestTransientSubmitRetry:
+    def test_step_retried_after_transient_error(self):
+        """A 500 on submit leaves the step PENDING; on the next watch iteration
+        the retry succeeds and the step completes."""
+        dag = [{"name": "a", "depends_on": []}]
+
+        call_count = [0]
+        mock_k8s = MagicMock()
+
+        def _create_side_effect(*args, **kwargs):
+            call_count[0] += 1
+            if call_count[0] == 1:
+                from kubernetes.client.exceptions import ApiException
+
+                raise ApiException(status=500)
+            return {}
+
+        mock_k8s.create_namespaced_custom_object.side_effect = _create_side_effect
+
+        # First watch stream returns immediately (timeout, no events);
+        # second delivers the completion event.
+        stream_call_count = [0]
+
+        def _stream_side_effect(*args, **kwargs):
+            idx = stream_call_count[0]
+            stream_call_count[0] += 1
+            if idx == 0:
+                return  # empty — simulates timeout return
+            yield _make_event("a-js", "Completed", rv="2")
+
+        mock_watch_cls = MagicMock()
+        mock_watch_instance = MagicMock()
+        mock_watch_instance.stream.side_effect = _stream_side_effect
+        mock_watch_instance.stop = MagicMock()
+        mock_watch_cls.return_value = mock_watch_instance
+
+        env = {
+            "SEEKR_CHAIN_JOB_ASSET_PATH": "/assets",
+            "SEEKR_CHAIN_NAMESPACE": "ns",
+            "SEEKR_CHAIN_CONTROLLER_JOB_NAME": "wf-abc",
+            "SEEKR_CHAIN_CONTROLLER_JOB_UID": "uid-123",
+        }
+
+        with (
+            patch.dict("os.environ", env),
+            patch.object(controller.kubernetes.config, "load_incluster_config"),
+            patch.object(controller.kubernetes.client, "CustomObjectsApi", MagicMock(return_value=mock_k8s)),
+            patch.object(controller.kubernetes.client, "CoreV1Api", MagicMock()),
+            patch.object(controller.kubernetes, "watch", MagicMock(Watch=mock_watch_cls)),
+            patch.object(controller, "_load_manifest", return_value={"metadata": {"name": "a-js"}, "spec": {}}),
+            patch.object(
+                controller, "_load_phases", side_effect=lambda _v1, _ns, _wid, d: {s["name"]: "PENDING" for s in d}
+            ),
+            patch.object(controller, "_save_phases"),
+            patch.object(controller, "_emit_event"),
+            patch.object(controller, "_touch_heartbeat"),
+            patch.object(controller.json, "load", return_value=dag),
+            patch("builtins.open", MagicMock(__enter__=lambda s, *a: s, __exit__=lambda s, *a: None)),
+        ):
+            result = controller.main()
+
+        assert result == 0
+        # Submit was called twice: first failed, second succeeded
+        assert call_count[0] == 2

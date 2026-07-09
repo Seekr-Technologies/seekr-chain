@@ -267,7 +267,7 @@ class K8sWorkflow(Workflow):
                 while True:
                     live.update(render(workflow_state, watcher.connection_status()))
 
-                    if workflow_state.status.is_finished():
+                    if workflow_state.status.is_finished() or workflow_state.status == WorkflowStatus.UNKNOWN:
                         break
 
                     for step_state in workflow_state.steps:

@@ -3,6 +3,7 @@
 import datetime
 import re
 import tempfile
+import threading
 import time
 from pathlib import Path
 from uuid import uuid4
@@ -144,12 +145,42 @@ class TestBasicFSOps:
         assert stat.mtime > t0
 
         time.sleep(1)
-
         # Touch again, check mtime updated
         s3_utils.touch(dest, s3_client)
         stat_2 = s3_utils.stat(dest, s3_client)
 
         assert stat_2.mtime > stat.mtime
+
+    def test_touch_then_upload_file_is_fast(self, s3_client, s3_tmpdir):
+        """touch() (a zero-byte put_object) immediately followed by upload_file()
+        of an actual file, on the same s3_client, should not stall.
+
+        Regression test: against our hermetic MinIO, a zero-length-body PUT
+        followed by a non-empty PUT reused the same keep-alive HTTP connection
+        and stalled ~30s -- this is the exact sequence _generate_job_info()
+        performs on every job submission (touch the sentinel, then upload the
+        schema version file).
+        """
+        sentinel = s3_utils.join(s3_tmpdir, "sentinel")
+        payload = s3_utils.join(s3_tmpdir, "payload")
+
+        s3_utils.touch(sentinel, s3_client)
+
+        with tempfile.NamedTemporaryFile() as tmpfile:
+            with open(tmpfile.name, "w") as f:
+                f.write("1")
+
+            # Run in a background (daemon) thread and join with a timeout so a
+            # stall fails the test at ~5s instead of blocking for the full
+            # ~30s hang -- the thread is left to die with the process if it
+            # never returns.
+            t0 = time.monotonic()
+            thread = threading.Thread(target=s3_utils.upload_file, args=(tmpfile.name, payload, s3_client), daemon=True)
+            thread.start()
+            thread.join(timeout=5)
+            elapsed = time.monotonic() - t0
+
+        assert not thread.is_alive(), f"upload_file() after touch() did not complete within 5s (elapsed {elapsed:.1f}s)"
 
     def test_delete(self, s3_client, s3_tmpdir):
         contents = {
