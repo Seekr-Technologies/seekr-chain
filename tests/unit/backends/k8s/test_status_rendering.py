@@ -27,6 +27,7 @@ from seekr_chain.backends.k8s.render_status import (
     format_plain,
     render,
 )
+from seekr_chain.backends.k8s.watched_state import WatchDisconnection
 from seekr_chain.backends.k8s.workflow_state import (
     ContainerState,
     PodState,
@@ -489,6 +490,25 @@ class TestRender:
         header_line, body_line = lines[1], lines[2]
         # Time column "0:30" should appear at the same index in both lines.
         assert header_line.index("0:30") == body_line.index("0:30")
+
+    def test_no_disconnection_banner_by_default(self):
+        assert "Disconnected" not in render(self._simple_ws()).plain
+
+    def test_disconnection_banner_reports_attempt_elapsed_and_retry_delay(self):
+        disconnection = WatchDisconnection(
+            kind="pods", attempt=3, max_attempts=5, elapsed_seconds=12.0, retry_in_seconds=4.0
+        )
+        plain = render(self._simple_ws(), disconnection).plain
+        last_line = plain.split("\n")[-1]
+        assert last_line == "Disconnected for 12s, attempting to reconnect (attempt 3/5, retrying in 4s)"
+
+    def test_disconnection_banner_shows_next_attempt_number_while_retry_in_progress(self):
+        disconnection = WatchDisconnection(
+            kind="pods", attempt=3, max_attempts=5, elapsed_seconds=12.0, retry_in_seconds=0.0
+        )
+        plain = render(self._simple_ws(), disconnection).plain
+        last_line = plain.split("\n")[-1]
+        assert last_line == "Disconnected for 12s, attempting to reconnect (attempt 4/5)"
 
 
 class TestFormatState:

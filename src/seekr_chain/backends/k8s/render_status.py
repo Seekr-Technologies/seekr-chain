@@ -36,6 +36,7 @@ from typing import Optional
 
 from rich.text import Text
 
+from seekr_chain.backends.k8s.watched_state import WatchDisconnection
 from seekr_chain.backends.k8s.workflow_state import StepState, WorkflowState
 from seekr_chain.status import PodStatus
 from seekr_chain.utils import format_duration
@@ -319,8 +320,27 @@ def _header_row(workflow_state: WorkflowState) -> _StatusRow:
 # ---------------------------------------------------------------------------
 
 
-def render(workflow_state: WorkflowState) -> Text:
-    """Render the workflow state as a Rich ``Text`` with header + body."""
+def _disconnection_line(d: WatchDisconnection) -> str:
+    # retry_in_seconds counts down to 0 during backoff; once it hits 0 the next
+    # attempt is actively connecting (no countdown to show) until it either
+    # succeeds or fails and starts backing off again.
+    if d.retry_in_seconds <= 0:
+        attempt = min(d.attempt + 1, d.max_attempts)
+        return (
+            f"Disconnected for {d.elapsed_seconds:.0f}s, attempting to reconnect (attempt {attempt}/{d.max_attempts})"
+        )
+    return (
+        f"Disconnected for {d.elapsed_seconds:.0f}s, attempting to reconnect "
+        f"(attempt {d.attempt}/{d.max_attempts}, retrying in {d.retry_in_seconds:.0f}s)"
+    )
+
+
+def render(workflow_state: WorkflowState, disconnection: Optional[WatchDisconnection] = None) -> Text:
+    """Render the workflow state as a Rich ``Text`` with header + body.
+
+    ``disconnection``, when set, appends a banner line reporting an in-progress
+    watch reconnect — see ``ReconnectingWatcher.connection_status()``.
+    """
     all_rows = [_header_row(workflow_state)] + _collect_rows(workflow_state)
     w0, w_time, w_count, w_name = _col_widths(all_rows)
 
@@ -329,6 +349,10 @@ def render(workflow_state: WorkflowState) -> Text:
         if i > 0:
             text.append("\n")
         _append_row(text, row, w0, w_time, w_count, w_name)
+
+    if disconnection is not None:
+        text.append("\n")
+        text.append(_disconnection_line(disconnection), style="bold yellow")
     return text
 
 
