@@ -1,0 +1,44 @@
+name: "nix-torchrun"
+namespace: "argo-workflows"
+ttl: "10:00"
+
+code:
+  path: ./
+
+steps:
+  - name: "train"
+    nix:
+      expression: ./
+      # The default 4-CPU build pod takes ~15 min on a multi-GB ROCm
+      # closure because xz compression (CPU-bound) dominates the
+      # `nix copy --to s3` phase. 64 CPUs cuts that to a few minutes.
+      # Requesting 1 GPU forces the build onto a GPU node, so the
+      # closure-hash podAffinity on the consumer step actually pays off
+      # (consumer needs a GPU node anyway, so it lands where the build
+      # cached the closure).
+      build_resources:
+        cpus_per_node: 64
+        mem_per_node: "128Gi"
+        gpus_per_node: 1
+        gpu_type: "amd.com/gpu"
+    resources:
+      cpus_per_node: 64
+      mem_per_node: "512Gi"
+      ephemeral_storage_per_node: "200Gi"
+      gpus_per_node: 8
+      gpu_type: "amd.com/gpu"
+    script: |
+      echo NNODES=$NNODES
+      echo NODE_RANK=$NODE_RANK
+      echo MASTER_ADDR=$MASTER_ADDR
+      echo MASTER_PORT=$MASTER_PORT
+      echo "=== GPU inventory ==="
+      rocm-smi
+      echo "=== launching torchrun ==="
+      torchrun \
+        --nproc_per_node=$GPUS_PER_NODE \
+        --nnodes=$NNODES \
+        --node_rank=$NODE_RANK \
+        --master_addr=$MASTER_ADDR \
+        --master_port=$MASTER_PORT \
+        job.py

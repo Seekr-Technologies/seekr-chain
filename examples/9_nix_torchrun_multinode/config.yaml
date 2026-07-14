@@ -1,0 +1,38 @@
+name: "nix-torchrun-multinode"
+namespace: "argo-workflows"
+ttl: "10:00"
+
+code:
+  path: ./
+
+steps:
+  - name: "train"
+    nix:
+      expression: ./
+      # See examples/8_nix_torchrun/config.yaml for rationale on these
+      # build resources. Build runs once (not per node), so num_nodes
+      # is implicitly 1 — only the resource shape matters here.
+      build_resources:
+        cpus_per_node: 64
+        mem_per_node: "128Gi"
+        gpus_per_node: 1
+        gpu_type: "amd.com/gpu"
+    resources:
+      num_nodes: 2
+      cpus_per_node: 64
+      mem_per_node: "512Gi"
+      ephemeral_storage_per_node: "200Gi"
+      gpus_per_node: 8
+      gpu_type: "amd.com/gpu"
+    script: |
+      echo NNODES=$NNODES
+      echo NODE_RANK=$NODE_RANK
+      echo MASTER_ADDR=$MASTER_ADDR
+      echo MASTER_PORT=$MASTER_PORT
+      torchrun \
+        --nproc_per_node=$GPUS_PER_NODE \
+        --nnodes=$NNODES \
+        --node_rank=$NODE_RANK \
+        --master_addr=$MASTER_ADDR \
+        --master_port=$MASTER_PORT \
+        job.py

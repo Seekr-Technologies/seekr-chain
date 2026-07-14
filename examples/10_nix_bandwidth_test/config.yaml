@@ -1,0 +1,43 @@
+name: "nix-bandwidth-test"
+namespace: "argo-workflows"
+ttl: "10:00"
+
+code:
+  path: ./
+
+steps:
+  - name: "bench"
+    nix:
+      expression: ./
+      build_resources:
+        cpus_per_node: 64
+        mem_per_node: "128Gi"
+        gpus_per_node: 1
+        gpu_type: "amd.com/gpu"
+    resources:
+      num_nodes: 2
+      cpus_per_node: 64
+      mem_per_node: "512Gi"
+      ephemeral_storage_per_node: "200Gi"
+      gpus_per_node: 8
+      gpu_type: "amd.com/gpu"
+      # privileged + host_network are required for RDMA: privileged grants
+      # /dev/infiniband access (ibv_open_device); host_network lets the pod
+      # see the host's IB-attached interfaces (the default CNI's pod
+      # network doesn't expose IB devices). Without both, RCCL falls back
+      # to TCP and caps at <10 GB/s.
+      security:
+        privileged: true
+      host_network: true
+    # RCCL tuning (NCCL_IB_GID_INDEX=3 + NCCL_CROSS_NIC=1 +
+    # NCCL_NCHANNELS_PER_PEER=8) is baked into the closure's torchrun
+    # wrapper — see flake.nix. The defaults are set via `:=` so a caller
+    # can still override by setting them in this `env:` block.
+    script: |
+      torchrun \
+        --nproc_per_node=$GPUS_PER_NODE \
+        --nnodes=$NNODES \
+        --node_rank=$NODE_RANK \
+        --master_addr=$MASTER_ADDR \
+        --master_port=$MASTER_PORT \
+        job.py

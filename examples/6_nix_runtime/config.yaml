@@ -1,0 +1,29 @@
+name: "nix-runtime-example"
+namespace: "argo-workflows"
+ttl: "10:00"
+
+# Upload this directory so the pod sees flake.nix + job.py + lock file at
+# /seekr-chain/workspace. Required for two reasons:
+#   1. The build step (auto-injected when the closure is missing from the
+#      cache) needs the flake.nix on disk to run `nix build` against.
+#   2. The user step needs job.py to actually run the script below.
+code:
+  path: ./
+
+steps:
+  - name: "step"
+    nix:
+      # Path to the flake (relative to the uploaded code root). seekr-chain
+      # runs `nix eval --raw <flake>#packages.<system>.default.outPath` on
+      # submit to resolve the closure hash, checks the binary cache, and
+      # injects an in-cluster build step if missing.
+      expression: ./
+      # attr: default                      # default
+      # system: x86_64-linux               # default
+      # store: s3://my-bucket/nix-cache    # optional — defaults to ~/.seekrchain.toml's nix_store
+      # build: true                        # default — auto-build missing closures
+      # build_resources:                   # optional — override per-step
+      #   cpus_per_node: 8
+      #   mem_per_node: 32G
+    script: |
+      python job.py

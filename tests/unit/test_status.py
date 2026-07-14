@@ -17,6 +17,7 @@ class TestPodStatus:
             "INIT:RUNNING",
             "INIT:ERROR",
             "PULL:ERROR",
+            "PULL:CLOSURE",
             "PULLING",
             "RUNNING",
             "SUCCEEDED",
