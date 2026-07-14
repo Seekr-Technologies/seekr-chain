@@ -1,6 +1,6 @@
 # Task: fix-invalid-job-name
 
-**Status**: in-progress
+**Status**: complete
 **Branch**: hatchery/fix-invalid-job-name
 **Created**: 2026-07-14 15:24
 
@@ -62,14 +62,20 @@ Background
 
 ## Agreed Plan
 
-*(To be filled in after planning discussion)*
-
-## Progress Log
-
-*(Steps will appear here once the plan is agreed)*
+1. `src/seekr_chain/config.py`: add module-level RFC 1123 label regex + `_validate_rfc1123_name(name)` helper raising `ValueError` with a descriptive message. Add `@field_validator("name") @classmethod` to `RoleSpecConfig`, `MultiRoleStepConfig`, and `WorkflowConfig` calling the helper.
+2. `tests/unit/test_validation.py`: add `TestValidationNames` class covering valid names + invalid names (underscore, uppercase, leading/trailing hyphen, empty string) for single-role step name, multi-role step name, role name, workflow name — parametrized.
+3. Run `pytest tests/unit/test_validation.py -v` and the broader unit suite; fix any fixtures using invalid names (none expected — grep confirmed existing fixtures are already hyphenated/lowercase).
+4. Out of scope: RBAC manifests, `_emit_event` error handling.
 
 ## Summary
 
-*(Fill in on completion — then remove Agreed Plan and Progress Log above.
-Cover: key decisions made, patterns established, files changed, gotchas,
-and anything a future agent working in this repo should know.)*
+Added RFC 1123 label validation to `src/seekr_chain/config.py`:
+- Module-level `_RFC1123_LABEL_RE` regex (`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`) and `_validate_rfc1123_name(name)` helper raising a descriptive `ValueError`.
+- `@field_validator("name")` added to `RoleSpecConfig`, `MultiRoleStepConfig`, and `WorkflowConfig`. `SingleRoleStepConfig` inherits the check for free via `RoleSpecConfig`.
+- This fires inside `WorkflowConfig.model_validate()`, which is the shared entry point for both the k8s and local backends, so no separate backend-specific hooks were needed.
+
+Added `TestValidationNames` to `tests/unit/test_validation.py`, parametrized over `["vmf_v2", "VMF", "-vmf", "vmf-", ""]` across workflow name, single-role step name, multi-role step name, and role name within a multi-role step, plus one passing case with valid hyphenated names.
+
+Full unit suite (514 tests) passes with no regressions — existing fixtures and example configs already used lowercase/hyphenated names.
+
+Confirmed out of scope and untouched: RBAC manifests, `_emit_event`'s best-effort 403 handling in `src/seekr_chain/backends/k8s/resources/controller.py`.

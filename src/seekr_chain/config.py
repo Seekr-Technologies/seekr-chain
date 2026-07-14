@@ -276,7 +276,7 @@ class RoleSpecConfig(BaseModel):
 
     @field_validator("name")
     @classmethod
-    def check_name(cls, v: str) -> str:
+    def _check_name(cls, v: str) -> str:
         return _validate_rfc1123_name(v)
 
 
@@ -333,7 +333,7 @@ class MultiRoleStepConfig(BaseModel):
 
     @field_validator("name")
     @classmethod
-    def check_name(cls, v: str) -> str:
+    def _check_name(cls, v: str) -> str:
         return _validate_rfc1123_name(v)
 
     @pydantic.model_validator(mode="after")
@@ -418,7 +418,7 @@ class WorkflowConfig(BaseModel):
 
     @field_validator("name")
     @classmethod
-    def check_name(cls, v: str) -> str:
+    def _check_name(cls, v: str) -> str:
         return _validate_rfc1123_name(v)
 
     @field_validator("affinity", mode="before")
