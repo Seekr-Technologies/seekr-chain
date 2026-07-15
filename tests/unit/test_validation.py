@@ -106,9 +106,7 @@ class TestValidationNames:
 
     @pytest.mark.parametrize("bad_name", INVALID_NAMES)
     def test_single_role_step_name(self, bad_name):
-        config_dict = self._base_config(
-            steps=[{"name": bad_name, "image": "ubuntu:24.04", "script": "echo hi"}]
-        )
+        config_dict = self._base_config(steps=[{"name": bad_name, "image": "ubuntu:24.04", "script": "echo hi"}])
         with pytest.raises(ValueError, match="not a valid RFC 1123 label"):
             seekr_chain.WorkflowConfig.model_validate(config_dict)
 
