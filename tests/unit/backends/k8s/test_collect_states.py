@@ -13,11 +13,12 @@ from kubernetes.client.rest import ApiException
 from seekr_chain.backends.k8s.workflow_state import (
     _collect_container_states,
     _collect_pod_state,
-    _list_jobsets_by_step,
+    _group_jobsets_by_step,
     _resolve_status,
     _trim_pull_message,
     get_workflow_job_status,
     is_jobset_suspended,
+    list_jobsets,
 )
 from seekr_chain.status import ContainerStatus, PodStatus, WorkflowStatus
 
@@ -622,33 +623,38 @@ class TestResolveStatus:
 
 
 # ---------------------------------------------------------------------------
-# _list_jobsets_by_step
+# list_jobsets / _group_jobsets_by_step
 # ---------------------------------------------------------------------------
 
 
-class TestListJobsetsByStep:
+class TestGroupJobsetsByStep:
     def test_returns_jobsets_keyed_by_step_name(self):
-        api = _FakeCustomApi(
-            response={
-                "items": [
-                    {"metadata": {"labels": {"seekr-chain/step-name": "a"}}, "spec": {}, "status": {}},
-                    {"metadata": {"labels": {"seekr-chain/step-name": "b"}}, "spec": {}, "status": {}},
-                ]
-            }
-        )
-        result = _list_jobsets_by_step(api, "ns", "wf-abc")
+        jobsets = [
+            {"metadata": {"labels": {"seekr-chain/step-name": "a"}}, "spec": {}, "status": {}},
+            {"metadata": {"labels": {"seekr-chain/step-name": "b"}}, "spec": {}, "status": {}},
+        ]
+        result = _group_jobsets_by_step(jobsets)
         assert set(result.keys()) == {"a", "b"}
 
-    def test_404_returns_empty_dict(self):
+    def test_jobset_without_step_name_label_is_skipped(self):
+        jobsets = [{"metadata": {"labels": {}}, "spec": {}, "status": {}}]
+        assert _group_jobsets_by_step(jobsets) == {}
+
+
+class TestListJobsets:
+    def test_404_propagates(self):
+        """A 404 must propagate rather than be swallowed into an empty list —
+        the caller (get_workflow_state / the watch seed) needs to distinguish
+        "no JobSets yet" from "we couldn't reach the API"."""
         api = _FakeCustomApi(exc=ApiException(status=404))
-        result = _list_jobsets_by_step(api, "ns", "wf-abc")
-        assert result == {}
+        with pytest.raises(ApiException):
+            list_jobsets(api, "ns", "wf-abc")
 
     def test_non_404_api_exception_raises(self):
         """Non-404 API errors (e.g. 403 RBAC) must propagate, not return empty."""
         api = _FakeCustomApi(exc=ApiException(status=403))
         with pytest.raises(ApiException):
-            _list_jobsets_by_step(api, "ns", "wf-abc")
+            list_jobsets(api, "ns", "wf-abc")
 
 
 # ---------------------------------------------------------------------------

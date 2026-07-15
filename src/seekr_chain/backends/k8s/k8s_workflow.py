@@ -5,7 +5,6 @@ import os
 import shutil
 import subprocess
 import threading
-import time
 
 import boto3
 import kubernetes as k8s
@@ -16,7 +15,12 @@ from seekr_chain import k8s_utils, s3_utils
 from seekr_chain.backends.k8s.job_info import JobInfo, get_job_info
 from seekr_chain.backends.k8s.parse_logs import LogStore, parse_logs
 from seekr_chain.backends.k8s.render_status import format_plain, render
-from seekr_chain.backends.k8s.state_fetcher import BackgroundStateFetcher
+from seekr_chain.backends.k8s.watched_state import (
+    WatchStalledError,
+    controller_status_watcher,
+    print_reconnect_hint,
+    workflow_state_watcher,
+)
 from seekr_chain.backends.k8s.workflow_state import (
     PodState,
     WorkflowState,
@@ -147,6 +151,39 @@ class K8sWorkflow(Workflow):
         status, _ = get_workflow_job_status(self._k8s_batch, self._namespace, self._id)
         return status
 
+    def watch_controller_status(self):
+        """Yield WorkflowStatus on each change by watching only the controller Job.
+
+        Deliberately separate from workflow_state_watcher() (see watched_state.py),
+        which watches the controller Job *and* JobSets *and* Pods to build a
+        full per-step/pod WorkflowState for the live follow()/attach() display.
+        This method only needs the controller Job's own status, and wait()
+        may be watching many jobs concurrently — one lightweight Job-only
+        watch per job keeps that cheap rather than paying for 3x the watches
+        and list calls per job. Built on controller_status_watcher(), which
+        shares its reconnect/backoff bookkeeping with workflow_state_watcher().
+        """
+        try:
+            with controller_status_watcher(self._k8s_batch, self._namespace, self._id) as watcher:
+                last_status = None
+                status = watcher.wait_for_first()
+                while True:
+                    if status is None:
+                        # Controller Job is gone — end the stream so callers
+                        # (e.g. wait._watch_to_completion) fall through to
+                        # their get_status()-based fallback instead of hanging.
+                        return
+                    if status != last_status:
+                        yield status
+                        last_status = status
+                    if status.is_finished():
+                        return
+                    watcher.wait_for_update()
+                    status = watcher.latest()
+        except WatchStalledError as e:
+            print_reconnect_hint(e)
+            raise
+
     def get_detailed_state(self) -> WorkflowState:
         return get_workflow_state(self._k8s_custom, self._k8s_v1, self._k8s_batch, self._namespace, self._id)
 
@@ -219,46 +256,50 @@ class K8sWorkflow(Workflow):
         follow_threads = []
         console = Console()
 
-        with (
-            BackgroundStateFetcher(self.get_detailed_state) as fetcher,
-            maybe_live(plain=plain, console=console, refresh_per_second=4, transient=False) as live,
-        ):
-            try:
-                workflow_state = fetcher.wait_for_first(timeout=30)
-            except TimeoutError:
-                # The background fetcher keeps failing — surface the error
-                # instead of hanging forever on a persistent API/RBAC issue.
-                raise RuntimeError(
-                    "Could not retrieve workflow state after 30 s. Check cluster connectivity and RBAC permissions."
-                )
-            while True:
-                live.update(render(workflow_state))
+        try:
+            with (
+                workflow_state_watcher(
+                    self._k8s_custom, self._k8s_v1, self._k8s_batch, self._namespace, self._id
+                ) as watcher,
+                maybe_live(plain=plain, console=console, refresh_per_second=4, transient=False) as live,
+            ):
+                workflow_state = watcher.wait_for_first()
+                while True:
+                    live.update(render(workflow_state, watcher.connection_status()))
 
-                if workflow_state.status.is_finished() or workflow_state.status == WorkflowStatus.UNKNOWN:
-                    break
+                    if workflow_state.status.is_finished() or workflow_state.status == WorkflowStatus.UNKNOWN:
+                        break
 
-                for step_state in workflow_state.steps:
-                    for role_state in step_state.roles:
-                        for pod_state in role_state.pods:
-                            if _should_follow(pod_state, followed_pods, all_replicas=all_replicas):
-                                followed_pods.add(pod_state.name)
-                                follow_threads.append(
-                                    _spawn_follow_pod_thread(
-                                        self._k8s_v1,
-                                        pod_state.name,
-                                        self._namespace,
-                                        container_name="main",
-                                        step_name=step_state.name,
-                                        role_name=role_state.name,
-                                        job_index=pod_state.job_index,
+                    for step_state in workflow_state.steps:
+                        for role_state in step_state.roles:
+                            for pod_state in role_state.pods:
+                                if _should_follow(pod_state, followed_pods, all_replicas=all_replicas):
+                                    followed_pods.add(pod_state.name)
+                                    follow_threads.append(
+                                        _spawn_follow_pod_thread(
+                                            self._k8s_v1,
+                                            pod_state.name,
+                                            self._namespace,
+                                            container_name="main",
+                                            step_name=step_state.name,
+                                            role_name=role_state.name,
+                                            job_index=pod_state.job_index,
+                                        )
                                     )
-                                )
 
-                time.sleep(1)
-                workflow_state = fetcher.latest()
+                    # Wake up as soon as any watched resource (Job/JobSet/Pod) changes,
+                    # falling back to a 1 s timeout in case a change was missed.
+                    watcher.wait_for_update(timeout=1.0)
+                    workflow_state = watcher.latest()
 
-            for t_thread in follow_threads:
-                t_thread.join(timeout=2)
+                for t_thread in follow_threads:
+                    t_thread.join(timeout=2)
+        except WatchStalledError as e:
+            # Printed only once the Live display above has stopped and released
+            # the terminal — printing while it's still rendering interleaves
+            # into mangled output.
+            print_reconnect_hint(e)
+            raise
 
     def attach(self):
         """Attach to an interactive job."""
@@ -266,29 +307,27 @@ class K8sWorkflow(Workflow):
 
         console = Console()
         plain = False
-        poll_interval = 1
-        with (
-            BackgroundStateFetcher(self.get_detailed_state) as fetcher,
-            maybe_live(plain=plain, console=console, refresh_per_second=4, transient=False) as live,
-        ):
-            try:
-                workflow_state = fetcher.wait_for_first(timeout=30)
-            except TimeoutError:
-                # The background fetcher keeps failing — surface the error
-                # instead of hanging forever on a persistent API/RBAC issue.
-                raise RuntimeError(
-                    "Could not retrieve workflow state after 30 s. Check cluster connectivity and RBAC permissions."
-                )
-            while True:
-                live.update(render(workflow_state))
+        try:
+            with (
+                workflow_state_watcher(
+                    self._k8s_custom, self._k8s_v1, self._k8s_batch, self._namespace, self._id
+                ) as watcher,
+                maybe_live(plain=plain, console=console, refresh_per_second=4, transient=False) as live,
+            ):
+                workflow_state = watcher.wait_for_first()
+                while True:
+                    live.update(render(workflow_state, watcher.connection_status()))
 
-                pod = first_running_or_finished_pod(workflow_state)
-                if pod is not None:
-                    print(f"First running/finished pod: {pod.name}")
-                    break
+                    pod = first_running_or_finished_pod(workflow_state)
+                    if pod is not None:
+                        print(f"First running/finished pod: {pod.name}")
+                        break
 
-                time.sleep(poll_interval)
-                workflow_state = fetcher.latest()
+                    watcher.wait_for_update(timeout=1.0)
+                    workflow_state = watcher.latest()
+        except WatchStalledError as e:
+            print_reconnect_hint(e)
+            raise
 
         assert isinstance(pod, PodState)
 

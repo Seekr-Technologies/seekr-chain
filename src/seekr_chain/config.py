@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import datetime
+import re
 import warnings
 from enum import Enum
 from typing import Annotated, Literal, Optional, Self, Union
@@ -11,6 +12,21 @@ from pydantic import Field, field_validator, model_validator
 
 class BaseModel(pydantic.BaseModel):
     model_config = pydantic.ConfigDict(extra="forbid")
+
+
+_RFC1123_LABEL_RE = re.compile(r"^[a-z0-9]([-a-z0-9]*[a-z0-9])?$")
+
+
+def _validate_rfc1123_name(name: str) -> str:
+    """Kubernetes resource names must be RFC 1123 labels; invalid names fail
+    silently far downstream (at JobSet creation), so reject them at config-parse time."""
+    if not _RFC1123_LABEL_RE.match(name):
+        raise ValueError(
+            f"'{name}' is not a valid RFC 1123 label: must consist of lowercase "
+            "alphanumeric characters or '-', and must start and end with an "
+            "alphanumeric character (no underscores or uppercase letters allowed)."
+        )
+    return name
 
 
 class NodeAffinityRule(BaseModel):
@@ -258,6 +274,11 @@ class RoleSpecConfig(BaseModel):
     depends_on: Optional[list[str]] = None
     env: Optional[dict[str, str]] = None
 
+    @field_validator("name")
+    @classmethod
+    def _check_name(cls, v: str) -> str:
+        return _validate_rfc1123_name(v)
+
 
 class SingleRoleStepConfig(RoleSpecConfig):
     """A step with a single role (the most common step type). Inherits all fields from RoleSpecConfig.
@@ -309,6 +330,11 @@ class MultiRoleStepConfig(BaseModel):
     success_policy: Optional[SuccessPolicy] = None
     failure_policy: FailurePolicy | None = None
     roles: list[RoleSpecConfig]
+
+    @field_validator("name")
+    @classmethod
+    def _check_name(cls, v: str) -> str:
+        return _validate_rfc1123_name(v)
 
     @pydantic.model_validator(mode="after")
     def check_failure_policy(self) -> Self:
@@ -389,6 +415,11 @@ class WorkflowConfig(BaseModel):
     Resolution order: this field, then ``controller_image`` in user config,
     then the built-in default. Useful for testing a custom controller image
     against a single workflow without changing the user-level default."""
+
+    @field_validator("name")
+    @classmethod
+    def _check_name(cls, v: str) -> str:
+        return _validate_rfc1123_name(v)
 
     @field_validator("affinity", mode="before")
     @classmethod
