@@ -470,7 +470,7 @@ class ReconnectingWatcher:
                     # fault — recording it as a failure would flash a spurious
                     # "Disconnected..." banner and push the watch toward a
                     # premature WatchStalledError. Re-list from scratch, no backoff.
-                    logger.info("%s watch resourceVersion too old (410); re-listing from scratch", spec.kind)
+                    logger.debug("%s watch resourceVersion too old (410); re-listing from scratch", spec.kind)
                     resource_version = ""
                     continue
                 delay = self._record_failure(spec.kind, e)
