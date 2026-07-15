@@ -109,11 +109,14 @@ def _save_phases(
     namespace: str,
     workflow_id: str,
     phases: dict[str, str],
+    reasons: dict[str, str],
     owner_ref: list[dict],
 ) -> None:
     """Persist phase state to a ConfigMap. Best-effort — never raises."""
     cm_name = f"{workflow_id}-phases"
     data = {"phases": json.dumps(phases)}
+    if reasons:
+        data["reasons"] = json.dumps(reasons)
     try:
         try:
             k8s_v1.patch_namespaced_config_map(
@@ -195,9 +198,23 @@ def _cascade_fail(dag: list[dict], phases: dict[str, str]) -> None:
                 changed = True
 
 
+def _extract_error_reason(e: kubernetes.client.exceptions.ApiException) -> str:
+    """Pull the K8s API's own structured message out of an ApiException.
+
+    ``str(e)`` dumps the full HTTP response (headers included), which is
+    noisy and not fit to show a user; the API's JSON body carries a
+    ``message`` field with just the validation detail.
+    """
+    try:
+        return json.loads(e.body)["message"]
+    except Exception:
+        return str(e)
+
+
 def _submit_ready_steps(
     dag: list[dict],
     phases: dict[str, str],
+    reasons: dict[str, str],
     js_names: dict[str, str],
     js_to_step: dict[str, str],
     assets_path: str,
@@ -207,9 +224,10 @@ def _submit_ready_steps(
 ) -> None:
     """Submit any PENDING steps whose dependencies have all SUCCEEDED.
 
-    Updates js_names and js_to_step in place for newly submitted steps.
-    Handles 409 Conflict gracefully: if a JobSet already exists (e.g. on
-    controller pod retry after a crash), treat it as already submitted.
+    Updates js_names, js_to_step, and reasons in place for newly submitted /
+    permanently-failed steps. Handles 409 Conflict gracefully: if a JobSet
+    already exists (e.g. on controller pod retry after a crash), treat it as
+    already submitted.
     """
     for step in dag:
         name = step["name"]
@@ -254,12 +272,14 @@ def _submit_ready_steps(
             else:
                 # Permanent error (400 malformed manifest, 403 RBAC, 422
                 # validation) — fail the step so the DAG doesn't retry forever.
+                reason = _extract_error_reason(e)
                 print(
                     f"[controller] error: permanent submit error for step={name!r} jobset={js_name!r}: {e}, marking FAILED",
                     file=sys.stderr,
                     flush=True,
                 )
                 phases[name] = "FAILED"
+                reasons[name] = reason
                 continue
 
         phases[name] = "RUNNING"
@@ -303,14 +323,15 @@ def main() -> int:
 
     # Restore persisted phase state so a restarted controller pod resumes correctly.
     phases = _load_phases(k8s_v1, namespace, workflow_id, dag)
+    reasons: dict[str, str] = {}
 
     js_names: dict[str, str] = {}
     # reverse map: jobset name -> step name (for event dispatch); updated incrementally
     js_to_step: dict[str, str] = {}
 
     # Submit all initially-ready steps before opening the watch.
-    _submit_ready_steps(dag, phases, js_names, js_to_step, assets_path, namespace, owner_ref, k8s_custom)
-    _save_phases(k8s_v1, namespace, workflow_id, phases, owner_ref)
+    _submit_ready_steps(dag, phases, reasons, js_names, js_to_step, assets_path, namespace, owner_ref, k8s_custom)
+    _save_phases(k8s_v1, namespace, workflow_id, phases, reasons, owner_ref)
 
     if all(p in ("SUCCEEDED", "FAILED") for p in phases.values()):
         # All steps were no-dep and already submitted; nothing to watch.
@@ -334,9 +355,9 @@ def main() -> int:
             # Retry any steps that failed to submit on a previous iteration
             # (retriable API errors leave them PENDING).  Also cascade-fail
             # dependents of any step marked FAILED by a permanent submit error.
-            _submit_ready_steps(dag, phases, js_names, js_to_step, assets_path, namespace, owner_ref, k8s_custom)
+            _submit_ready_steps(dag, phases, reasons, js_names, js_to_step, assets_path, namespace, owner_ref, k8s_custom)
             _cascade_fail(dag, phases)
-            _save_phases(k8s_v1, namespace, workflow_id, phases, owner_ref)
+            _save_phases(k8s_v1, namespace, workflow_id, phases, reasons, owner_ref)
 
             if all(p in ("SUCCEEDED", "FAILED") for p in phases.values()):
                 break
@@ -399,13 +420,13 @@ def main() -> int:
                         )
 
                     _cascade_fail(dag, phases)
-                    _save_phases(k8s_v1, namespace, workflow_id, phases, owner_ref)
+                    _save_phases(k8s_v1, namespace, workflow_id, phases, reasons, owner_ref)
 
                     # Submit any steps now unblocked by this completion.
                     _submit_ready_steps(
-                        dag, phases, js_names, js_to_step, assets_path, namespace, owner_ref, k8s_custom
+                        dag, phases, reasons, js_names, js_to_step, assets_path, namespace, owner_ref, k8s_custom
                     )
-                    _save_phases(k8s_v1, namespace, workflow_id, phases, owner_ref)
+                    _save_phases(k8s_v1, namespace, workflow_id, phases, reasons, owner_ref)
 
                     if all(p in ("SUCCEEDED", "FAILED") for p in phases.values()):
                         w.stop()
@@ -438,7 +459,13 @@ def main() -> int:
             event_type="Warning",
         )
         print(f"[controller] workflow FAILED — failed steps: {failed}", file=sys.stderr, flush=True)
-        return 1
+        # A determined outcome (even a failed one) is fully persisted in the
+        # phases ConfigMap above — that ConfigMap, not this exit code, is what
+        # the CLI treats as the source of truth for the workflow's result.
+        # Exiting 0 here tells Kubernetes there's nothing left to retry, so a
+        # misconfigured/unfixable step doesn't spawn backoffLimit's worth of
+        # new controller pods that would only re-derive the same FAILED state.
+        return 0
 
     _emit_event(
         k8s_v1,
