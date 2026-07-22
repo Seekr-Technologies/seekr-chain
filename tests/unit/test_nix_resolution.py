@@ -420,6 +420,11 @@ class TestErrorPaths:
 
         _missing(monkeypatch)
         monkeypatch.setattr(nr_mod, "_user_config", UserConfig(nix_store="s3://x"))
+        # _NIX_RUNNER_IMAGE is computed once at import time from the real
+        # _user_config, so patching _user_config above doesn't change it --
+        # must patch this too, or a local ~/.seekrchain.toml/.seekrchain.toml
+        # with nix_runner_image set masks this test locally while it fails in CI.
+        monkeypatch.setattr(nr_mod, "_NIX_RUNNER_IMAGE", _DEFAULT_NIX_RUNNER_IMAGE)
 
         c = WorkflowConfig(
             name="t",
