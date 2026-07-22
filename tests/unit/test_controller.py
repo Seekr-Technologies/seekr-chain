@@ -36,11 +36,18 @@ _save_phases = controller._save_phases
 # ---------------------------------------------------------------------------
 
 
-def _make_event(js_name: str, terminal: str | None, rv: str = "1", event_type: str = "MODIFIED") -> dict:
+def _make_event(
+    js_name: str,
+    terminal: str | None,
+    rv: str = "1",
+    event_type: str = "MODIFIED",
+    suspend: bool = False,
+) -> dict:
     return {
         "type": event_type,
         "object": {
             "metadata": {"name": js_name, "resourceVersion": rv},
+            "spec": {"suspend": suspend},
             "status": {"terminalState": terminal} if terminal else {},
         },
     }
@@ -127,6 +134,17 @@ class TestCascadeFail:
         _cascade_fail(dag, phases)
         # RUNNING steps are not touched — they were already submitted
         assert phases["b"] == "RUNNING"
+
+    def test_cancelled_dep_cascades_cancelled_not_failed(self):
+        dag = [
+            {"name": "a", "depends_on": []},
+            {"name": "b", "depends_on": ["a"]},
+            {"name": "c", "depends_on": ["b"]},
+        ]
+        phases = {"a": "CANCELLED", "b": "PENDING", "c": "PENDING"}
+        _cascade_fail(dag, phases)
+        assert phases["b"] == "CANCELLED"
+        assert phases["c"] == "CANCELLED"
 
 
 # ---------------------------------------------------------------------------
@@ -490,6 +508,47 @@ class TestMainDiamondDag:
             [
                 _make_event("a-js", "Completed", rv="2"),
                 _make_event("b-js", "Failed", rv="3"),
+                _make_event("c-js", "Completed", rv="4"),
+            ],
+        ]
+        assert _run_main(dag, events) == 1
+
+
+class TestMainCancellation:
+    def test_single_step_cancelled_exits(self):
+        """A JobSet suspended (chain cancel) with no terminalState must not hang."""
+        dag = [{"name": "a", "depends_on": []}]
+        events = [
+            [_make_event("a-js", terminal=None, rv="2", suspend=True)],
+        ]
+        assert _run_main(dag, events) == 1
+
+    def test_cascade_cancels_unsubmitted_dependent(self):
+        """a is cancelled before b's dependency is satisfied — b must never be
+        submitted and must cascade to CANCELLED instead of hanging."""
+        dag = [
+            {"name": "a", "depends_on": []},
+            {"name": "b", "depends_on": ["a"]},
+        ]
+        events = [
+            [_make_event("a-js", terminal=None, rv="2", suspend=True)],
+        ]
+        assert _run_main(dag, events) == 1
+
+    def test_diamond_partial_cancel_cascades_join_step(self):
+        """a → b, a → c, b+c → d. b is cancelled, c succeeds — d must
+        cascade-cancel rather than waiting forever for a JobSet that is
+        never submitted."""
+        dag = [
+            {"name": "a", "depends_on": []},
+            {"name": "b", "depends_on": ["a"]},
+            {"name": "c", "depends_on": ["a"]},
+            {"name": "d", "depends_on": ["b", "c"]},
+        ]
+        events = [
+            [
+                _make_event("a-js", "Completed", rv="2"),
+                _make_event("b-js", terminal=None, rv="3", suspend=True),
                 _make_event("c-js", "Completed", rv="4"),
             ],
         ]
