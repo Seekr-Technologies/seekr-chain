@@ -1,0 +1,111 @@
+{# chain-nix-init init container: fetch the nix closure into the shared
+   /nix volume before main starts. Mounts directly at /nix with
+   subPath=nix (matching the main/consumer container's mount exactly),
+   replacing the image's own /nix entirely. The runner image preserves
+   a full copy of its own /nix at /nix-baked specifically for this:
+   the script's copy-on-init bootstrap step seeds the (possibly-empty)
+   mounted volume from /nix-baked before running any real nix command.
+
+   This replaced an earlier design that mounted at /nix-shared and used
+   `nix --store "local?root=/nix-shared"` to redirect writes there —
+   abandoned because `nix-store --restore`/`--register-validity
+   --hash-given` were found to silently ignore a chroot store's root=
+   for path resolution (only --add/--check-validity respect it),
+   making that approach a dead end for anything but real nix's own
+   unified `nix copy`/`nix build`.
+
+   Script source lives at
+   src/seekr_chain/backends/k8s/resources/chain-nix-init.sh and is
+   uploaded with the job (chain-init downloads it to /seekr-chain/resources
+   before this container runs — initContainers execute sequentially).
+
+   Rendered into jobset.yaml.j2 under spec.initContainers when role.nix_init
+   is truthy. Expects `role` and `workflow_name` in scope.
+#}
+- name: chain-nix-init
+  image: {{ role.nix_init.image }}
+  command: ["/bin/sh"]
+  args: ["/seekr-chain/resources/chain-nix-init.sh"]
+  # Never needs privilege: it only copies files into a mounted volume
+  # and runs `nix copy`/`nix path-info`. Unlike main's own
+  # securityContext, this isn't role-configurable -- an init container
+  # doing bounded filesystem I/O has no legitimate reason to run
+  # privileged, so there's nothing to make a per-role knob for.
+  #
+  # runAsUser/runAsGroup pinned to root (0) explicitly: writing to the
+  # shared hostPath /nix only works today because the runner image's
+  # default UID (root -- no USER directive in its Dockerfile) happens
+  # to own it. That's an implicit assumption today; a cluster that
+  # later rolls out a restricted PodSecurity default (which can imply
+  # a non-root runAsUser) would silently break this container's writes
+  # to /nix with permission-denied errors that look unrelated to the
+  # actual cause. Pin explicitly so behavior doesn't depend on
+  # whatever the cluster's ambient default happens to be. (fsGroup is
+  # pod-scoped, not container-scoped in the k8s API -- there's no pod-
+  # level securityContext in jobset.yaml.j2 today to attach one to;
+  # runAsGroup is this container's own equivalent.)
+  securityContext:
+    privileged: false
+    allowPrivilegeEscalation: false
+    runAsUser: 0
+    runAsGroup: 0
+  # No `role.nix_init.resources` config exists yet (unlike main's
+  # `role.resources`) -- these are fixed, conservative defaults sized
+  # for a bootstrap copy + closure pull, not a build. Without any
+  # limits at all, a stalled/runaway pull could consume unbounded
+  # CPU/memory on a node this hostPath volume is shared across with
+  # other pods. Revisit if a workload needs to override this.
+  resources:
+    requests:
+      cpu: "500m"
+      memory: "512Mi"
+  env:
+  - name: AWS_ACCESS_KEY_ID
+    valueFrom:
+      secretKeyRef:
+        name: {{ workflow_name }}
+        key: AWS_ACCESS_KEY_ID
+  - name: AWS_SECRET_ACCESS_KEY
+    valueFrom:
+      secretKeyRef:
+        name: {{ workflow_name }}
+        key: AWS_SECRET_ACCESS_KEY
+  - name: AWS_REGION
+    valueFrom:
+      secretKeyRef:
+        name: {{ workflow_name }}
+        key: AWS_REGION
+        optional: true
+  - name: S3_ENDPOINT_URL
+    valueFrom:
+      secretKeyRef:
+        name: {{ workflow_name }}
+        key: S3_ENDPOINT_URL
+        optional: true
+  {% for e in role.nix_init.env %}
+  - name: {{ e.name }}
+    {% if e.kind == 'value' %}
+    value: {{ e.value | tojson }}
+    {% elif e.kind == 'fieldRef' %}
+    valueFrom:
+      fieldRef:
+        fieldPath: {{ e.fieldPath | tojson }}
+    {% elif e.kind == 'secretKeyRef' %}
+    valueFrom:
+      secretKeyRef:
+        name: {{ e.secret_name }}
+        key: {{ e.key }}
+        {% if e.optional %}
+        optional: true
+        {% endif %}
+    {% endif %}
+  {% endfor %}
+  volumeMounts:
+  - name: nix-store
+    mountPath: /nix
+    subPath: nix
+  # chain-init downloads the script bundle into the workspace volume; we
+  # need the same mount here so /seekr-chain/resources/chain-nix-init.sh
+  # is visible to /bin/sh.
+  - name: workspace
+    mountPath: /seekr-chain

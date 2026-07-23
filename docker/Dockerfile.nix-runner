@@ -1,0 +1,65 @@
+# Bootstrap image for the seekr-chain nix mode.
+#
+# Smallest image that can `nix copy` and then exec. The actual runtime environment
+# is feteched from binary cache at runtime.
+FROM nixos/nix:2.21.1@sha256:3f6c77ee4d2c82e472e64e6cd7087241dc391421a0b42c22e6849c586d5398d9 AS nix-src
+
+# Enable the modern nix CLI (`nix copy`, `nix run`) and disable build
+# sandboxing. build-users-group is cleared (empty, not the `nixbld`
+# default) because everything here runs as root in a container with no
+# real multi-user separation -- the default expects a `nixbld` group +
+# users to exist, which the nix-src image provisions in its own
+# /etc/passwd and /etc/group, but the final stage below is busybox-based
+# and never copies those over. Clearing it makes nix build directly as
+# the current user (root) instead of erroring with "the group 'nixbld'
+# specified in 'build-users-group' does not exist".
+RUN { \
+        echo 'experimental-features = nix-command flakes'; \
+        echo 'sandbox = false'; \
+        echo 'build-users-group ='; \
+    } >> /etc/nix/nix.conf
+
+# The final image is busybox-based, not nix-src-based — it never has a
+# live /nix of its own, so there's nothing for the COPYs below to
+# duplicate. (A same-stage `RUN mv /nix /nix-baked` doesn't achieve
+# this: Docker layers are additive, so a later RUN can't shrink an
+# earlier layer's content — the full /nix from nix-src's own layers
+# would still count toward image size even after being `mv`'d away in
+# a subsequent layer. Only a genuinely /nix-free base plus an explicit
+# cross-stage COPY avoids that.)
+FROM busybox:1.36-musl@sha256:3c6ae8008e2c2eedd141725c30b20d9c36b026eb796688f88205845ef17aa213 AS final
+
+# Bake required static busybox symlinks in for the standard POSIX tools
+# seekr-chain scripts need. mkfifo backs the named-pipe stderr-tee
+# pattern chain-nix-init.sh/nix-build.sh use in place of bash's process
+# substitution (`2> >(tee ...)`), which plain /bin/sh can't parse.
+RUN for tool in \
+        sh head awk cat tee touch sleep time mkfifo \
+        ps ls find grep sed kill df du wc tail less more env which; \
+    do \
+        ln -sf /bin/busybox /bin/$tool; \
+    done
+
+# Preserve nix-src's toolchain at /nix-baked — the only copy of it in
+# this image, since `final` is never FROM nix-src. At pod runtime,
+# chain-nix-init.sh and nix-build.sh both mount the node's shared
+# hostPath (or emptyDir) volume directly at /nix, which shadows
+# whatever's here regardless — /nix-baked is what nix-bootstrap.sh
+# reseeds that mount from, so a working nix toolchain exists before
+# either script runs a real nix command. See
+# src/seekr_chain/backends/k8s/resources/nix-bootstrap.sh for the
+# reseed logic. /etc/nix/nix.conf and /root/.nix-profile (a symlink
+# into /nix) are copied alongside it since both live outside /nix
+# proper and are needed for nix/bash to resolve correctly once /nix is
+# bootstrapped at runtime.
+COPY --from=nix-src /nix /nix-baked
+COPY --from=nix-src /etc/nix/nix.conf /etc/nix/nix.conf
+COPY --from=nix-src /root/.nix-profile /root/.nix-profile
+
+# /bin/bash is required for many autoconf-generated nix builds. The
+# symlink target only resolves once /nix is bootstrapped at pod
+# runtime — `ln -sf` doesn't dereference, so that's fine at build time.
+RUN ln -sf /root/.nix-profile/bin/bash /bin/bash
+
+# add bin to path
+ENV PATH=/bin:/root/.nix-profile/bin:/nix/var/nix/profiles/default/bin:/nix/var/nix/profiles/default/sbin

@@ -43,16 +43,16 @@ def generate_id(N=6):
 
 
 def human_to_int(byte_str: str) -> int:
-    """Format human readable to integer"""
+    """Format human readable to integer. Accepts an optional trailing "B" (e.g. "50GB", "50GiB")."""
     prefixes = ["", "K", "M", "G", "T", "P"]
-    match = re.fullmatch(r"^(\d+\.?\d*)([KMGTP])?(I)?$", byte_str.upper())
+    match = re.fullmatch(r"^(\d+\.?\d*)([KMGTP])?(I)?B?$", byte_str.upper())
     if not match:
         raise ValueError(f"Unable to parse value: {byte_str}")
 
     value, prefix, base2 = match.groups()
     value = float(value)
 
-    exponent = prefixes.index(prefix)
+    exponent = prefixes.index(prefix or "")
     base = 1000
     if base2:
         base = 1024

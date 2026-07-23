@@ -8,15 +8,11 @@ schema_version: "1"
 #   mode is optional and defaults to "ro" (read-only).
 #   Invalid entries are a hard error. Paths that do not exist are silently skipped.
 mounts:
-  # Uncomment to share the UV cache (speed up installs)
-  - ~/.cache/uv:/home/hatchery/.cache/uv:rw
-  # Uncomment for k8s access (oci required)
-  # - "~/.kube:/home/hatchery/.kube:ro"
-  # - "~/.oci:/home/hatchery/.oci:ro"
   # Uncomment for s3 access
-  # - "~/.aws:/home/hatchery/.aws:ro"
-  # DANGEROUS: Uncomment for ssh access
-  # - "~/.ssh:/home/hatchery/.ssh:ro"
+
+volumes:
+  - name: uv-cache
+    path: /home/hatchery/.cache/uv
 
 # Set to true to enable Podman-in-Podman (nested container support).
 # Also uncomment the DinD section in .hatchery/Dockerfile.
