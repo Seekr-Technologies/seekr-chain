@@ -19,6 +19,7 @@ from seekr_chain.backends.k8s.jobset import _INIT_IMAGE, create_jobset_manifest
 from seekr_chain.backends.k8s.parse_logs import DATA_SCHEMA_VERSION
 from seekr_chain.backends.k8s.rbac import detect_service_account
 from seekr_chain.config import EnvSource, SecretRefSource
+from seekr_chain.nix_resolution import resolve_nix_steps
 from seekr_chain.symlink import symlink
 from seekr_chain.tar_directory import tar_directory
 from seekr_chain.user_config import config as _user_config
@@ -178,6 +179,7 @@ def _package_assets(
     staging_dir: Path,
     workflow_name: str,
     workflow_secrets: list[dict],
+    interactive: bool,
 ):
     """Package up assets (code, scripts, jobset manifests, DAG definition) and upload to S3."""
     dest = job_info["remote_assets_path"]
@@ -210,7 +212,7 @@ def _package_assets(
             job_info=job_info,
             workflow_name=workflow_name,
             workflow_secrets=workflow_secrets,
-            interactive=False,
+            interactive=interactive,
             assets_path=assets_path,
         )
 
@@ -403,6 +405,11 @@ def launch_k8s_workflow(
     if isinstance(config, dict):
         config = WorkflowConfig.model_validate(config)
 
+    # Walk nix-mode roles, evaluate expressions, check the store, and inject
+    # in-cluster build steps for any missing closures. No-op when there are
+    # no nix-mode roles, so this is safe to call unconditionally.
+    config = resolve_nix_steps(config)
+
     if interactive:
         if len(config.steps) != 1:
             raise ValueError("Interactive jobs may only have a single step")
@@ -432,6 +439,7 @@ def launch_k8s_workflow(
             staging_dir=staging_dir,
             workflow_name=workflow_id,
             workflow_secrets=workflow_secrets,
+            interactive=interactive,
         )
 
     _create_secrets(workflow_id, s3_creds, config)

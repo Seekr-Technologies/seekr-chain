@@ -1,0 +1,68 @@
+name: "rocm-smi"
+namespace: "argo-workflows"
+ttl: "10:00"
+
+code:
+  path: ./
+
+steps:
+  - name: "smi"
+    nix:
+      expression: ./
+    resources:
+      cpus_per_node: 4
+      mem_per_node: "8Gi"
+      ephemeral_storage_per_node: "10Gi"
+      gpus_per_node: 1
+      gpu_type: "amd.com/gpu"
+    script: |
+      echo "=== environment ==="
+      echo "PATH=$PATH"
+      echo "SEEKR_CHAIN_NIX_CLOSURE=$SEEKR_CHAIN_NIX_CLOSURE"
+      echo
+      echo "=== rocm-smi binary location ==="
+      # command -v is a POSIX shell builtin (works without /bin/which)
+      SMI_PATH="$(command -v rocm-smi)"
+      SMI_REAL="$(readlink -f "$SMI_PATH")"
+      echo "  command -v:   $SMI_PATH"
+      echo "  realpath:     $SMI_REAL"
+      echo "  file type:    $(head -c2 "$SMI_REAL"; echo) (script if #!, binary otherwise)"
+      echo
+      echo "=== rocm-smi library resolution (ldd) ==="
+      # If rocm-smi is a binary, ldd shows its dynamic deps. If it's a
+      # Python script, ldd will refuse and we look at python's own deps.
+      # Either way, any rocm/amd lib resolving outside /nix/store would
+      # indicate the host is shadowing the closure's libs.
+      ldd "$SMI_REAL" 2>&1 | head -40 || true
+      echo
+      echo "=== closure-side rocm + amdsmi + hsa shared objects ==="
+      # Broader search than just libamd_smi — rocm-smi may dlopen its lib
+      # by a different name (librocm_smi64.so, libamdsmi.so, etc.). If
+      # this finds nothing, the closure isn't shipping any C lib at all
+      # — meaning rocm-smi is talking to /dev/kfd directly via ioctls,
+      # bypassing user-space SMI libraries entirely.
+      find /nix/store -maxdepth 6 \
+        \( -name 'librocm*' -o -name 'libamd*' -o -name 'libhsa*' \) \
+        2>/dev/null | head -20 || echo "  (no matching libs found)"
+      echo
+      echo "=== python imports used by rocm-smi ==="
+      # If rocm-smi is a python wrapper, this shows the actual Python
+      # modules it loads — gives us the answer to "where does the lib
+      # version string come from?"
+      head -20 "$SMI_REAL" 2>/dev/null | grep -E '^(#!|from|import)' || true
+      echo
+      echo "=== host-side ROCm presence (should be absent in pure nix mode) ==="
+      ls -la /opt/rocm 2>/dev/null || echo "  /opt/rocm not present (good)"
+      echo
+      echo "=== kernel-side amdgpu driver ==="
+      grep -m1 amdgpu /proc/modules || echo "  amdgpu module not loaded?"
+      cat /sys/module/amdgpu/version 2>/dev/null || echo "  /sys/module/amdgpu/version not readable"
+      echo
+      echo "=== exposed GPU device files ==="
+      ls -la /dev/kfd /dev/dri 2>/dev/null || echo "  /dev/kfd or /dev/dri missing — pod isn't getting GPU access"
+      echo
+      echo "=== rocm-smi --version ==="
+      rocm-smi --version
+      echo
+      echo "=== rocm-smi (GPU inventory) ==="
+      rocm-smi

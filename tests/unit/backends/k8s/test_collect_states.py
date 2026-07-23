@@ -196,6 +196,40 @@ class TestCollectPodState:
         )
         assert _collect_pod_state(pod).status == PodStatus.INIT_RUNNING
 
+    def test_chain_nix_init_running_reports_pulling_closure(self):
+        """When the running init container is `chain-nix-init`, the pod surfaces
+        as PULLING_CLOSURE — the user is waiting on a (potentially multi-GB)
+        nix closure fetch, not on generic init work.
+        """
+        pod = _pod(
+            init_containers=[_container("chain-nix-init", state=_running())],
+            containers=[_container("c", state=_waiting())],
+        )
+        assert _collect_pod_state(pod).status == PodStatus.PULLING_CLOSURE
+
+    def test_chain_nix_init_alongside_generic_init(self):
+        """chain-nix-init still wins the PULLING_CLOSURE label even when it's
+        running concurrently with (or after) a completed generic init.
+        """
+        pod = _pod(
+            init_containers=[
+                _container("chain-init", state=_terminated(exit_code=0)),
+                _container("chain-nix-init", state=_running()),
+            ],
+            containers=[_container("c", state=_waiting())],
+        )
+        assert _collect_pod_state(pod).status == PodStatus.PULLING_CLOSURE
+
+    def test_chain_nix_init_terminated_does_not_report_pulling_closure(self):
+        """Once chain-nix-init has finished, we're back to the normal
+        derivation (all init done → PULLING for the main image).
+        """
+        pod = _pod(
+            init_containers=[_container("chain-nix-init", state=_terminated(exit_code=0))],
+            containers=[_container("c", state=_waiting())],
+        )
+        assert _collect_pod_state(pod).status == PodStatus.PULLING
+
     def test_init_error(self):
         pod = _pod(
             init_containers=[_container("i", state=_terminated(exit_code=1))],
