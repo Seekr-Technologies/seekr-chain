@@ -42,9 +42,7 @@ class TestDetectServiceAccount:
         mock_v1 = _mock_core_v1({})
         with _patch_core_v1(mock_v1):
             assert detect_service_account("ns") == "seekr-chain-controller"
-        mock_v1.read_namespaced_service_account.assert_called_once_with(
-            name="seekr-chain-controller", namespace="ns"
-        )
+        mock_v1.read_namespaced_service_account.assert_called_once_with(name="seekr-chain-controller", namespace="ns")
 
     def test_first_candidate_missing_second_found(self):
         mock_v1 = _mock_core_v1({"seekr-chain-controller": _not_found()})
