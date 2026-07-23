@@ -224,22 +224,32 @@ def _resolve_status(statuses: list[ContainerStatus], rules: list[tuple]) -> Opti
     return None
 
 
+# Init container that fetches the nix closure. When this specific container
+# is INIT_RUNNING, the pod is spending its startup time pulling a potentially
+# multi-GB closure — worth calling out with its own PodStatus so users can
+# distinguish nix-closure fetch (slow, visible) from generic init (fast).
+_NIX_CLOSURE_INIT_CONTAINER = "chain-nix-init"
+
+
 def _derive_pod_status(
     pod_phase: str,
-    init_statuses: list[ContainerStatus],
+    init_containers: list[ContainerState],
     main_statuses: list[ContainerStatus],
 ) -> PodStatus:
-    """Derive overall pod status from container statuses + the pod phase.
+    """Derive overall pod status from container states + the pod phase.
 
     Precedence:
       1. Pod phase already terminal (SUCCEEDED/FAILED) — use it directly.
       2. PULL_ERROR on any container — short-circuit.
       3. Main containers progressing — RUNNING, or transient FAILED/RUNNING when
          main has terminated but the pod phase hasn't flipped yet.
-      4. Init containers — INIT_RUNNING / INIT_ERROR / PULLING / INIT_WAITING.
+      4. Init containers — PULLING_CLOSURE (chain-nix-init running) /
+         INIT_RUNNING / INIT_ERROR / PULLING / INIT_WAITING.
       5. Main containers exist but haven't started (no init container) — PULLING.
       6. Nothing yet — PENDING.
     """
+    init_statuses = [c.status for c in init_containers]
+
     if pod_phase in ("SUCCEEDED", "FAILED"):
         return PodStatus(pod_phase)
 
@@ -266,6 +276,13 @@ def _derive_pod_status(
         return main_result
 
     if init_statuses:
+        # If chain-nix-init is the one currently running, surface it as
+        # PULLING_CLOSURE — the user is waiting on a closure fetch, not
+        # on generic init work.
+        if any(
+            c.status == ContainerStatus.INIT_RUNNING and c.name == _NIX_CLOSURE_INIT_CONTAINER for c in init_containers
+        ):
+            return PodStatus.PULLING_CLOSURE
         return (
             _resolve_status(
                 init_statuses,
@@ -327,7 +344,7 @@ def _collect_pod_state(pod) -> PodState:
     )
     pod_state.status = _derive_pod_status(
         pod_phase=(pod.status.phase or "UNKNOWN").upper(),
-        init_statuses=[c.status for c in pod_state.init_containers],
+        init_containers=pod_state.init_containers,
         main_statuses=[c.status for c in pod_state.containers],
     )
     _finalize_pod_times(pod_state)

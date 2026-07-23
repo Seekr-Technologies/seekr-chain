@@ -31,6 +31,15 @@ dependencies = [
     "rich>=14.0.0",
 ]
 
+[project.optional-dependencies]
+# `pip install seekr-chain[oci]` — pulls in the OCI SDK for the submit-side
+# oci:// closure existence check (see nix_utils.closure_exists). Not needed
+# for s3:// stores; not needed inside the runner image (nix itself handles
+# oci:// there).
+oci = [
+    "oci>=2",
+]
+
 [project.urls]
 Homepage = "https://github.com/seekr-technologies/seekr-chain"
 Documentation = "https://seekr-technologies.github.io/seekr-chain"
@@ -59,6 +68,12 @@ cache-keys = [
 ]
 
 [dependency-groups]
+# Mirrors [project.optional-dependencies].oci — the extra is for pip
+# users (`pip install 'seekr-chain[oci]'`), the group is for uv users
+# (`uv sync --group oci`). Two tables, one dep — keep them in sync.
+oci = [
+    "oci>=2",
+]
 dev = [
     "invoke>=2.2.0",
     "ipdb>=0.13.13",

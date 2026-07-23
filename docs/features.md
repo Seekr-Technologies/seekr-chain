@@ -11,6 +11,7 @@ All features below are configured via the [Configuration Reference](reference/co
 - **Code Upload**: Easily upload code from any directory for your job, with full control over inclusion/exclusion rules
 - **Persistent Volume Claims**: Attach to or create PVCs for your jobs
 - **Secrets**: Securely pass secrets into jobs
+- **Nix-mode runtime**: Replace your Docker image with a nix closure. Per-path parallel fetches from a binary cache, content-addressed cross-image dedup, and per-node warm-cache via hostPath. See [Nix-mode Runtime](guides/nix-mode.md) for the full guide.
 - **Job queue admission (Kueue)**: Assign workflows to a Kueue `LocalQueue` via the `scheduling.queue` field.
   Optionally set a priority class with `scheduling.priority`. The config is backend-agnostic — a future
   SLURM backend will map the same fields to `--partition` / `--qos`.

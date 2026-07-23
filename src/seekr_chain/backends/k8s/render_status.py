@@ -69,6 +69,7 @@ _STATUS_STYLES: dict[str, str] = {
     "INIT:RUNNING": "cyan",
     "INIT:ERROR": "bold red",
     "PULL:ERROR": "bold red",
+    "PULL:CLOSURE": "yellow",
     "PULLING": "yellow",
 }
 
