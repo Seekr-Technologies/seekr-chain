@@ -424,7 +424,7 @@ def launch_k8s_workflow(
 
     kubernetes.config.load_kube_config(config_file=os.environ.get("KUBECONFIG"))
 
-    service_account = detect_service_account(config.namespace)
+    service_account = _user_config.service_account or detect_service_account(config.namespace)
 
     with tempfile.TemporaryDirectory() as staging_dir:
         staging_dir = Path(staging_dir)
@@ -455,7 +455,25 @@ def launch_k8s_workflow(
     )
 
     k8s_batch = kubernetes.client.BatchV1Api()
-    k8s_batch.create_namespaced_job(namespace=config.namespace, body=job_manifest)
+    try:
+        k8s_batch.create_namespaced_job(namespace=config.namespace, body=job_manifest)
+    except kubernetes.client.exceptions.ApiException as e:
+        if _user_config.service_account:
+            hint = (
+                f"'{service_account}' was set explicitly via the `service_account` config option "
+                "(or SEEKRCHAIN_SERVICE_ACCOUNT) — verify it exists in this namespace and has the "
+                "required RBAC (see `chain install-sa`)."
+            )
+        else:
+            hint = (
+                f"'{service_account}' was auto-detected but may lack permissions. Run\n\n"
+                f"    chain install-sa | kubectl apply -n {config.namespace} -f -\n\n"
+                "or set the `service_account` config option to use a specific ServiceAccount."
+            )
+        raise RuntimeError(
+            f"Failed to launch controller job using ServiceAccount {service_account!r} "
+            f"in namespace {config.namespace!r}: {e.reason} (status={e.status}).\n\n{hint}"
+        ) from e
     logger.info(f"Launched controller job: {workflow_id}")
 
     workflow = K8sWorkflow(id=workflow_id, namespace=config.namespace)

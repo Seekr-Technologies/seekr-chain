@@ -39,15 +39,21 @@ def rbac_yaml() -> str:
 def detect_service_account(namespace: str) -> str:
     """Detect which ServiceAccount to use for the controller pod.
 
-    Lists all ServiceAccounts in the namespace in a single API call, then
-    returns the first candidate (in preference order) that exists.  Raises
-    ``RuntimeError`` with setup instructions if none are found.
+    Probes candidates in preference order with a per-name ``get`` — not a
+    namespace-wide ``list`` — since the caller's own kubeconfig identity
+    (not the controller SA) is what's used here, and it may only have
+    narrow, named-resource RBAC rather than a blanket list grant. Raises
+    ``RuntimeError`` with setup instructions if none are found or accessible.
     """
     core_v1 = kubernetes.client.CoreV1Api()
-    existing = {sa.metadata.name for sa in core_v1.list_namespaced_service_account(namespace=namespace).items}
 
     for name in _CANDIDATE_SERVICE_ACCOUNTS:
-        if name in existing:
+        try:
+            core_v1.read_namespaced_service_account(name=name, namespace=namespace)
+        except kubernetes.client.exceptions.ApiException as e:
+            if e.status not in (403, 404):
+                raise
+        else:
             logger.debug(f"Using ServiceAccount {name!r} in namespace {namespace!r}")
             return name
 

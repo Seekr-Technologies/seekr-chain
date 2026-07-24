@@ -33,6 +33,7 @@ _ENV_VAR_MAP: dict[str, str] = {
     "SEEKRCHAIN_DATASTORE_ROOT": "datastore_root",
     "SEEKRCHAIN_INIT_IMAGE": "init_image",
     "SEEKRCHAIN_CONTROLLER_IMAGE": "controller_image",
+    "SEEKRCHAIN_SERVICE_ACCOUNT": "service_account",
     "SEEKRCHAIN_NIX_STORE": "nix_store",
     "SEEKRCHAIN_NIX_RUNNER_IMAGE": "nix_runner_image",
     "SEEKRCHAIN_NIX_STORE_VOLUME_KIND": "nix_store_volume_kind",
@@ -53,6 +54,10 @@ class UserConfig:
     init_image :
         OCI image for the chain-init container. Defaults to the pinned
         ``ghcr.io/seekr-technologies/seekr-chain-init`` build.
+    service_account :
+        ServiceAccount name for the controller pod. When set, skips
+        auto-detection entirely — useful when the submitting user's RBAC
+        role can't list or get ServiceAccounts to probe for one.
     nix_store :
         Default URI for the nix binary cache (e.g. ``s3://bucket``); any
         nix store type works. Used when a step's ``nix.store`` is not
@@ -93,6 +98,7 @@ class UserConfig:
     datastore_root: str | None = None
     init_image: str | None = None
     controller_image: str | None = None
+    service_account: str | None = None
     nix_store: str | None = None
     nix_runner_image: str | None = None
     nix_store_volume_kind: str | None = None
@@ -146,6 +152,7 @@ def _load_config() -> UserConfig:
         datastore_root=values.get("datastore_root"),
         init_image=values.get("init_image"),
         controller_image=values.get("controller_image"),
+        service_account=values.get("service_account"),
         nix_store=values.get("nix_store"),
         nix_runner_image=values.get("nix_runner_image"),
         nix_store_volume_kind=values.get("nix_store_volume_kind"),
