@@ -52,6 +52,11 @@ _WATCH_TIMEOUT_SECONDS = 30
 # Path of the heartbeat file checked by the liveness probe.
 _HEARTBEAT_PATH = "/tmp/controller-heartbeat"
 
+# Phases that stop a step from being retried or re-evaluated further. CANCELLED
+# covers a JobSet suspended via `chain cancel` (spec.suspend=true) rather than
+# one that reached a terminal status — see the watch loop in main().
+_TERMINAL_PHASES = ("SUCCEEDED", "FAILED", "CANCELLED")
+
 
 def _touch_heartbeat() -> None:
     """Touch the heartbeat file to signal the liveness probe that we're alive."""
@@ -80,9 +85,9 @@ def _load_phases(
 ) -> dict[str, str]:
     """Load phase state from ConfigMap if it exists; otherwise return all-PENDING.
 
-    Only SUCCEEDED and FAILED states are restored — RUNNING steps are reset to
-    PENDING so they will be re-submitted (the 409 Conflict guard in
-    _submit_ready_steps handles the case where the JobSet already exists).
+    Only terminal states are restored — RUNNING steps are reset to PENDING so
+    they will be re-submitted (the 409 Conflict guard in _submit_ready_steps
+    handles the case where the JobSet already exists).
     """
     phases: dict[str, str] = {s["name"]: "PENDING" for s in dag}
     cm_name = f"{workflow_id}-phases"
@@ -92,7 +97,7 @@ def _load_phases(
         if raw:
             saved = json.loads(raw)
             for name, phase in saved.items():
-                if name in phases and phase in ("SUCCEEDED", "FAILED"):
+                if name in phases and phase in _TERMINAL_PHASES:
                     phases[name] = phase
             print(
                 f"[controller] restored phases from ConfigMap: {[n for n, p in phases.items() if p != 'PENDING']}",
@@ -182,14 +187,22 @@ def _emit_event(
 
 
 def _cascade_fail(dag: list[dict], phases: dict[str, str]) -> None:
-    """Mark PENDING steps whose dependencies (transitively) include a failed step."""
+    """Mark PENDING steps whose dependencies (transitively) include a failed or
+    cancelled step. A cancelled dependency propagates CANCELLED rather than
+    FAILED — the dependent never ran, it was stopped."""
     changed = True
     while changed:
         changed = False
         for step in dag:
             name = step["name"]
             deps = step.get("depends_on") or []
-            if phases[name] == "PENDING" and any(phases[d] == "FAILED" for d in deps):
+            if phases[name] != "PENDING":
+                continue
+            if any(phases[d] == "CANCELLED" for d in deps):
+                phases[name] = "CANCELLED"
+                print(f"[controller] step={name!r} cascade-cancelled", flush=True)
+                changed = True
+            elif any(phases[d] == "FAILED" for d in deps):
                 phases[name] = "FAILED"
                 print(f"[controller] step={name!r} cascade-failed", flush=True)
                 changed = True
@@ -312,7 +325,7 @@ def main() -> int:
     _submit_ready_steps(dag, phases, js_names, js_to_step, assets_path, namespace, owner_ref, k8s_custom)
     _save_phases(k8s_v1, namespace, workflow_id, phases, owner_ref)
 
-    if all(p in ("SUCCEEDED", "FAILED") for p in phases.values()):
+    if all(p in _TERMINAL_PHASES for p in phases.values()):
         # All steps were no-dep and already submitted; nothing to watch.
         # (Can only be terminal here if the DAG has zero steps, which is invalid,
         # but be safe.)
@@ -328,7 +341,7 @@ def main() -> int:
         resource_version = ""
         label_selector = f"seekr-chain/job-id={workflow_id}"
 
-        while not all(p in ("SUCCEEDED", "FAILED") for p in phases.values()):
+        while not all(p in _TERMINAL_PHASES for p in phases.values()):
             _touch_heartbeat()
 
             # Retry any steps that failed to submit on a previous iteration
@@ -338,7 +351,7 @@ def main() -> int:
             _cascade_fail(dag, phases)
             _save_phases(k8s_v1, namespace, workflow_id, phases, owner_ref)
 
-            if all(p in ("SUCCEEDED", "FAILED") for p in phases.values()):
+            if all(p in _TERMINAL_PHASES for p in phases.values()):
                 break
 
             try:
@@ -365,14 +378,13 @@ def main() -> int:
 
                     obj = event["object"]
                     js_name = obj["metadata"]["name"]
-                    terminal = obj.get("status", {}).get("terminalState") or None
-
-                    if not terminal:
-                        continue
 
                     step_name = js_to_step.get(js_name)
-                    if step_name is None or phases[step_name] in ("SUCCEEDED", "FAILED"):
+                    if step_name is None or phases[step_name] in _TERMINAL_PHASES:
                         continue
+
+                    terminal = obj.get("status", {}).get("terminalState") or None
+                    suspended = obj.get("spec", {}).get("suspend", False)
 
                     if terminal == "Completed":
                         phases[step_name] = "SUCCEEDED"
@@ -397,6 +409,24 @@ def main() -> int:
                             f"Step {step_name!r} failed",
                             event_type="Warning",
                         )
+                    elif suspended:
+                        # Suspended without a terminalState means `chain cancel` (or
+                        # any other spec.suspend=true patch) stopped this JobSet — not
+                        # a normal completion. Treat it as terminal so the DAG loop
+                        # below can exit instead of waiting forever for a
+                        # terminalState that will never arrive.
+                        phases[step_name] = "CANCELLED"
+                        print(f"[controller] step={step_name!r} CANCELLED", flush=True)
+                        _emit_event(
+                            k8s_v1,
+                            namespace,
+                            workflow_id,
+                            job_uid,
+                            "StepCancelled",
+                            f"Step {step_name!r} was cancelled",
+                        )
+                    else:
+                        continue
 
                     _cascade_fail(dag, phases)
                     _save_phases(k8s_v1, namespace, workflow_id, phases, owner_ref)
@@ -407,7 +437,7 @@ def main() -> int:
                     )
                     _save_phases(k8s_v1, namespace, workflow_id, phases, owner_ref)
 
-                    if all(p in ("SUCCEEDED", "FAILED") for p in phases.values()):
+                    if all(p in _TERMINAL_PHASES for p in phases.values()):
                         w.stop()
                         break
 
@@ -438,6 +468,19 @@ def main() -> int:
             event_type="Warning",
         )
         print(f"[controller] workflow FAILED — failed steps: {failed}", file=sys.stderr, flush=True)
+        return 1
+
+    cancelled = [n for n, p in phases.items() if p == "CANCELLED"]
+    if cancelled:
+        _emit_event(
+            k8s_v1,
+            namespace,
+            workflow_id,
+            job_uid,
+            "WorkflowCancelled",
+            f"Workflow cancelled — cancelled steps: {cancelled}",
+        )
+        print(f"[controller] workflow CANCELLED — cancelled steps: {cancelled}", flush=True)
         return 1
 
     _emit_event(
