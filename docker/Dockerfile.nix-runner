@@ -2,64 +2,70 @@
 #
 # Smallest image that can `nix copy` and then exec. The actual runtime environment
 # is feteched from binary cache at runtime.
-FROM nixos/nix:2.21.1@sha256:3f6c77ee4d2c82e472e64e6cd7087241dc391421a0b42c22e6849c586d5398d9 AS nix-src
+#
+# Bakes only nix + bash + cacert into a registered store (not a full
+# nixpkgs channel) and lands it on a tiny Chainguard base. nix
+# substitutes any build's stdenv (git, coreutils, gcc, ...) on demand
+# via a shared /nix volume, so baking those in would only bloat the
+# image. bash is kept for impure `#!/bin/bash` build scripts.
 
-# Enable the modern nix CLI (`nix copy`, `nix run`) and disable build
-# sandboxing. build-users-group is cleared (empty, not the `nixbld`
-# default) because everything here runs as root in a container with no
-# real multi-user separation -- the default expects a `nixbld` group +
-# users to exist, which the nix-src image provisions in its own
-# /etc/passwd and /etc/group, but the final stage below is busybox-based
-# and never copies those over. Clearing it makes nix build directly as
-# the current user (root) instead of erroring with "the group 'nixbld'
-# specified in 'build-users-group' does not exist".
-RUN { \
+# Assemble a minimal, registered nix store at /build/root/nix: reuse
+# this base's own nix binary (via readlink) plus bash + cacert from
+# its pinned <nixpkgs>, so everything shares one glibc/openssl closure.
+# `nix copy --to "local?root=..."` (not `nix-store --restore/
+# --register-validity`, which silently ignores root=) produces a real
+# chroot store with a valid registered DB.
+FROM nixos/nix:2.21.1@sha256:3f6c77ee4d2c82e472e64e6cd7087241dc391421a0b42c22e6849c586d5398d9 AS nixbuilder
+ENV NIX_CONFIG="experimental-features = nix-command flakes"
+RUN set -eu; \
+    NIXPKG=$(dirname "$(dirname "$(readlink -f /nix/var/nix/profiles/default/bin/nix)")"); \
+    echo "using nix package: $NIXPKG"; \
+    PROFILE=$(nix build --no-link --print-out-paths --impure --expr "\
+      let pkgs = import <nixpkgs> {}; in pkgs.buildEnv { \
+        name = \"seekr-chain-nix-runtime\"; \
+        paths = [ (builtins.storePath \"$NIXPKG\") pkgs.bash pkgs.cacert ]; \
+        pathsToLink = [ \"/bin\" \"/etc\" ]; \
+      }"); \
+    echo "built profile: $PROFILE"; \
+    nix copy --no-check-sigs --to "local?root=/build/root" "$PROFILE"; \
+    mkdir -p /build/root/nix/var/nix/profiles; \
+    ln -s "$PROFILE" /build/root/nix/var/nix/profiles/default; \
+    echo "minimal store size:"; du -sh /build/root/nix
+
+# wolfi-base's busybox already covers the POSIX tools seekr-chain
+# scripts need (chain-nix-init.sh, nix-bootstrap.sh, nix-build.sh,
+# nix-gc.sh) — nix's own binaries reference their own glibc under
+# /nix/store, so the base just needs a shell.
+#
+# Chainguard GCs old `:latest` digests, unlike Docker Hub tags — if a
+# build fails with "manifest unknown", re-pull and bump this digest.
+FROM cgr.dev/chainguard/wolfi-base:latest@sha256:02dab76bd852a70556b5b2002195c8a5fdab77d323c433bf6642aab080489795
+
+# build-users-group = (empty): this base has no `nixbld` group, so nix
+# builds as root (already consistent with sandbox = false).
+RUN mkdir -p /etc/nix && { \
         echo 'experimental-features = nix-command flakes'; \
         echo 'sandbox = false'; \
         echo 'build-users-group ='; \
-    } >> /etc/nix/nix.conf
+    } > /etc/nix/nix.conf
 
-# The final image is busybox-based, not nix-src-based — it never has a
-# live /nix of its own, so there's nothing for the COPYs below to
-# duplicate. (A same-stage `RUN mv /nix /nix-baked` doesn't achieve
-# this: Docker layers are additive, so a later RUN can't shrink an
-# earlier layer's content — the full /nix from nix-src's own layers
-# would still count toward image size even after being `mv`'d away in
-# a subsequent layer. Only a genuinely /nix-free base plus an explicit
-# cross-stage COPY avoids that.)
-FROM busybox:1.36-musl@sha256:3c6ae8008e2c2eedd141725c30b20d9c36b026eb796688f88205845ef17aa213 AS final
+# /nix-baked preserves a working nix toolchain; at pod runtime a
+# shared volume mounts directly over /nix, and nix-bootstrap.sh reseeds
+# it from /nix-baked (see
+# src/seekr_chain/backends/k8s/resources/nix-bootstrap.sh).
+#
+# `cp -a` + `cp -al` in one layer hardlinks /nix to /nix-baked so they
+# share bytes in the layer tar instead of doubling image size. /nix/var
+# stays a real copy (not hardlinked) so a local `nix build` can't
+# mutate /nix-baked's DB through a shared inode.
+RUN --mount=type=bind,from=nixbuilder,source=/build/root/nix,target=/mnt/nix \
+    cp -a /mnt/nix /nix-baked && \
+    mkdir -p /nix && \
+    cp -al /nix-baked/store /nix/store && \
+    cp -a  /nix-baked/var   /nix/var
 
-# Bake required static busybox symlinks in for the standard POSIX tools
-# seekr-chain scripts need. mkfifo backs the named-pipe stderr-tee
-# pattern chain-nix-init.sh/nix-build.sh use in place of bash's process
-# substitution (`2> >(tee ...)`), which plain /bin/sh can't parse.
-RUN for tool in \
-        sh head awk cat tee touch sleep time mkfifo \
-        ps ls find grep sed kill df du wc tail less more env which; \
-    do \
-        ln -sf /bin/busybox /bin/$tool; \
-    done
+# Required for autoconf-generated nix builds; resolves once /nix is
+# bootstrapped at pod runtime (`ln -sf` doesn't dereference at build time).
+RUN ln -sf /nix/var/nix/profiles/default/bin/bash /bin/bash
 
-# Preserve nix-src's toolchain at /nix-baked — the only copy of it in
-# this image, since `final` is never FROM nix-src. At pod runtime,
-# chain-nix-init.sh and nix-build.sh both mount the node's shared
-# hostPath (or emptyDir) volume directly at /nix, which shadows
-# whatever's here regardless — /nix-baked is what nix-bootstrap.sh
-# reseeds that mount from, so a working nix toolchain exists before
-# either script runs a real nix command. See
-# src/seekr_chain/backends/k8s/resources/nix-bootstrap.sh for the
-# reseed logic. /etc/nix/nix.conf and /root/.nix-profile (a symlink
-# into /nix) are copied alongside it since both live outside /nix
-# proper and are needed for nix/bash to resolve correctly once /nix is
-# bootstrapped at runtime.
-COPY --from=nix-src /nix /nix-baked
-COPY --from=nix-src /etc/nix/nix.conf /etc/nix/nix.conf
-COPY --from=nix-src /root/.nix-profile /root/.nix-profile
-
-# /bin/bash is required for many autoconf-generated nix builds. The
-# symlink target only resolves once /nix is bootstrapped at pod
-# runtime — `ln -sf` doesn't dereference, so that's fine at build time.
-RUN ln -sf /root/.nix-profile/bin/bash /bin/bash
-
-# add bin to path
-ENV PATH=/bin:/root/.nix-profile/bin:/nix/var/nix/profiles/default/bin:/nix/var/nix/profiles/default/sbin
+ENV PATH=/bin:/nix/var/nix/profiles/default/bin:/nix/var/nix/profiles/default/sbin

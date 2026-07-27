@@ -1,3 +1,14 @@
-FROM python:3.12-slim@sha256:46cb7cc2877e60fbd5e21a9ae6115c30ace7a077b9f8772da879e4590c18c2e3
+# -dev has pip; final stage below is the non-dev distroless variant,
+# fine since the pod runs `python controller.py` directly (see
+# launch_k8s_workflow.py) and never needs a shell in this image.
+#
+# Chainguard GCs old `:latest` digests, unlike Docker Hub tags — if a
+# build fails with "manifest unknown", re-pull and bump this digest.
+FROM cgr.dev/chainguard/python:latest-dev@sha256:7a568bcee42666f73f041645a41c913ce1d442f4c24cf6019bc543a90820e531 AS builder
 COPY controller-requirements.txt /tmp/controller-requirements.txt
-RUN pip install --no-cache-dir --require-hashes -r /tmp/controller-requirements.txt
+RUN pip install --no-cache-dir --require-hashes --target /app/site-packages \
+    -r /tmp/controller-requirements.txt
+
+FROM cgr.dev/chainguard/python:latest@sha256:a0365f7b90bf7b78a5e35f2709efb7c9263acf9c7b1905e0ec4c3e943c88e64d
+COPY --from=builder /app/site-packages /app/site-packages
+ENV PYTHONPATH=/app/site-packages
