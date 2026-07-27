@@ -1,14 +1,9 @@
-# The -dev variant has pip + a shell, needed to install requirements;
-# the final stage below uses the non-dev, distroless-style variant
-# (no pip/shell) since the controller pod's command explicitly runs
-# `python /seekr-chain/resources/controller.py` and never needs a shell
-# in this image (see launch_k8s_workflow.py).
+# -dev has pip; final stage below is the non-dev distroless variant,
+# fine since the pod runs `python controller.py` directly (see
+# launch_k8s_workflow.py) and never needs a shell in this image.
 #
-# NOTE ON PINNING: Chainguard rebuilds `:latest`/`:latest-dev`
-# frequently and may garbage-collect old digests, so a digest pin here
-# can eventually become unresolvable (unlike Docker Hub tags). We still
-# pin for reproducibility per repo convention; if a build fails with
-# "manifest unknown", re-pull the tag and bump the digest.
+# Chainguard GCs old `:latest` digests, unlike Docker Hub tags — if a
+# build fails with "manifest unknown", re-pull and bump this digest.
 FROM cgr.dev/chainguard/python:latest-dev@sha256:7a568bcee42666f73f041645a41c913ce1d442f4c24cf6019bc543a90820e531 AS builder
 COPY controller-requirements.txt /tmp/controller-requirements.txt
 RUN pip install --no-cache-dir --require-hashes --target /app/site-packages \
