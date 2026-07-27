@@ -1,4 +1,6 @@
-FROM alpine:3.22.0@sha256:8a1f59ffb675680d47db6337b49d22281a139e9d709335b492be023728e11715 AS s5cmd-download
+# s5cmd-download is discarded via multi-stage, so it has no portability
+# constraint -- safe to build on Chainguard directly.
+FROM cgr.dev/chainguard/wolfi-base:latest@sha256:02dab76bd852a70556b5b2002195c8a5fdab77d323c433bf6642aab080489795 AS s5cmd-download
 ARG TARGETARCH
 ARG S5CMD_VERSION=2.2.2
 RUN apk add --no-cache curl ca-certificates \
@@ -6,7 +8,22 @@ RUN apk add --no-cache curl ca-certificates \
     && curl -fsSL "https://github.com/peak/s5cmd/releases/download/v${S5CMD_VERSION}/s5cmd_${S5CMD_VERSION}_Linux-${ARCH}.tar.gz" \
          | tar -xz s5cmd
 
-FROM busybox:1.37-uclibc@sha256:e3a499df044f0129fd2e82a63177e7affe66ba6fd73acc9e231fd7695f06e5e2
+# Source of a real, statically-linked busybox binary. jobset.yaml.j2's
+# image-mode role logic does `cp /bin/busybox /seekr-chain/busybox` to
+# inject a shell into arbitrary user workload images -- including
+# stripped/distroless ones with no dynamic linker at all -- so that
+# exact binary must stay static/portable. Chainguard/wolfi's own
+# busybox-like tooling is dynamically linked against the base's glibc
+# and would break the moment it's copied into a container without that
+# glibc, so this stage exists purely as a COPY source; it never becomes
+# the final base.
+FROM busybox:1.37-uclibc@sha256:e3a499df044f0129fd2e82a63177e7affe66ba6fd73acc9e231fd7695f06e5e2 AS busybox-src
+
+# Final stage: Chainguard base provides the shell/tar/coreutils that
+# run jobset.yaml.j2's `sh -c` init script itself (s5cmd cp, tar -xzf,
+# ln -s, mkdir, chmod, cp); wolfi-base ships those as busybox applets.
+FROM cgr.dev/chainguard/wolfi-base:latest@sha256:02dab76bd852a70556b5b2002195c8a5fdab77d323c433bf6642aab080489795
 COPY --from=s5cmd-download /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
 COPY --from=s5cmd-download /s5cmd /bin/s5cmd
+COPY --from=busybox-src /bin/busybox /bin/busybox
 CMD ["/bin/sh"]
