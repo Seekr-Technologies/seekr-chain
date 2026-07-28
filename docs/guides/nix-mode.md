@@ -102,6 +102,22 @@ There are four moving parts at submit time, three at pod runtime.
    path. This is what determines whether the closure is "in cache" — the
    hash changes whenever any input changes.
 
+    Eval runs against the **same curated file set that gets uploaded** — your
+    `code.path` filtered by `code.include`/`code.exclude` — not your live
+    working directory. This keeps eval fast (it doesn't copy `.venv`, `.git`,
+    or caches into the nix store) and, crucially, makes the closure you resolve
+    at submit **byte-identical to what the build pod builds** from the uploaded
+    bundle. Two consequences worth knowing:
+
+    - **Uncommitted files count.** The file set is the upload, not git — a
+      brand-new file you haven't committed *is* seen by the eval (as long as it
+      isn't filtered out by `code.exclude`). There's no "did I `git add` it"
+      trap.
+    - **Excluded files are invisible.** If your flake references a file that
+      `code.exclude` drops (or that isn't matched by a restrictive
+      `code.include`), the eval won't see it — the same way the build pod
+      wouldn't. If an edit "doesn't take", check your `code.include`/`exclude`.
+
 2. **Validate `nix.expression` is inside `code.path`.** The same string is
    used at submit time and inside the build pod (which runs `nix build`
    from `/seekr-chain/workspace`). Lexical containment check rejects
@@ -379,6 +395,32 @@ nix flake lock
 git add flake.nix flake.lock
 ```
 
+### Stabilize your closure hash
+
+seekr-chain already evaluates from the curated upload set (so `.venv`, `.git`,
+and caches don't affect the hash — see [Submit-time
+pipeline](#submit-time-pipeline)). To go further and keep *unrelated* edits from
+churning the closure — editing a `README`, reformatting a `.nix` file, bumping a
+comment — narrow what your flake's derivation actually reads with
+[`lib.fileset`](https://nix.dev/tutorials/working-with-local-files):
+
+```nix
+let
+  src = pkgs.lib.fileset.toSource {
+    root = ./.;
+    fileset = pkgs.lib.fileset.unions [
+      ./requirements.txt
+      (pkgs.lib.fileset.fileFilter (f: f.hasExt "py") ./src)
+    ];
+  };
+in
+# ... use `src` where your derivation needs the code ...
+```
+
+This is complementary to the upload filtering: `code.exclude` controls what's
+*uploaded and evaluated*, while `lib.fileset` controls what *inside* the flake
+feeds a given derivation's hash. Only paths in the fileset trigger a rebuild.
+
 ### Bake env vars into the closure
 
 The closure-fetch wrapper sets `PATH` and `LD_LIBRARY_PATH`, but anything
@@ -566,6 +608,11 @@ If the list has pods but new pods still land on cold nodes, check:
 - **Closure must be a flake.** Plain `.nix` files work for eval but the
   build step's `path:<expression>#packages.<system>.<attr>` ref requires
   a flake.
+- **Eval sees only the uploaded set.** The flake is evaluated from your
+  `code.path` filtered by `code.include`/`code.exclude` — the same bytes the
+  build pod builds. Files dropped by `code.exclude` (default: `.venv`, `.git`,
+  `__pycache__`, `.pytest_cache`, `.ruff_cache`, `*.pyc`) are invisible to the
+  eval. Uncommitted files are fine; excluded ones are not.
 - **Submit machine needs `nix`.** Eval is local. No way around this
   without a remote eval service. Install from
   <https://nixos.org/download>.

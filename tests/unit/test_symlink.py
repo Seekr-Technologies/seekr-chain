@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pytest
 
-from seekr_chain.symlink import symlink
+from seekr_chain.symlink import copy_filtered, symlink
 from tests.utils import _populate
 
 
@@ -562,3 +562,77 @@ class TestSymlink:
         expected = {"linked": {"file.txt": ["top"], "sub": {"nested.txt": ["nested"]}}}
 
         assert actual == expected
+
+
+def _real_tree_to_dict(path: Path) -> dict:
+    """Like _symlink_to_dict but for real (non-symlink) files, as copy_filtered
+    produces. Asserts each file is a real file, not a symlink."""
+    if not path.exists():
+        return {}
+
+    result = {}
+    for item in sorted(path.iterdir()):
+        if item.is_dir() and not item.is_symlink():
+            subdict = _real_tree_to_dict(item)
+            if subdict:
+                result[item.name] = subdict
+        else:
+            assert not item.is_symlink(), f"{item} should be a real file, not a symlink"
+            result[item.name] = item.read_text().split("\n")
+    return result
+
+
+class TestCopyFiltered:
+    def test_copies_real_files_not_symlinks(self, tmp_path):
+        src = tmp_path / "src"
+        dst = tmp_path / "dst"
+        contents = {"a.txt": ["hello"], "c": {"d.txt": ["nested"]}}
+        _populate(src, contents)
+
+        copy_filtered(src, dst, include=None, exclude=None)
+
+        assert _real_tree_to_dict(dst) == contents
+        # Explicitly confirm the destination is decoupled from the source: a real
+        # copy, not a symlink pointing back (nix path: would dangle otherwise).
+        assert not (dst / "a.txt").is_symlink()
+        assert (dst / "a.txt").read_text() == "hello"
+
+    def test_exclude_honored(self, tmp_path):
+        src = tmp_path / "src"
+        dst = tmp_path / "dst"
+        contents = {
+            "flake.nix": ["{}"],
+            ".venv": {"junk": ["x"]},
+            ".pytest_cache": {"v": ["y"]},
+            "keep.py": ["z"],
+        }
+        _populate(src, contents)
+
+        copy_filtered(src, dst, include=None, exclude=[".venv", ".pytest_cache"])
+
+        assert _real_tree_to_dict(dst) == {"flake.nix": ["{}"], "keep.py": ["z"]}
+
+    def test_include_honored(self, tmp_path):
+        src = tmp_path / "src"
+        dst = tmp_path / "dst"
+        contents = {"a.py": ["a"], "b.txt": ["b"], "c": {"d.py": ["d"]}}
+        _populate(src, contents)
+
+        copy_filtered(src, dst, include=["*.py"], exclude=None)
+
+        assert _real_tree_to_dict(dst) == {"a.py": ["a"], "c": {"d.py": ["d"]}}
+
+    def test_dereferences_symlinked_source_file(self, tmp_path):
+        # copy_filtered must materialize target content (like tar_directory's
+        # resolve()), so a symlink in the source becomes a real file in dst.
+        actual = tmp_path / "actual.txt"
+        actual.write_text("real content")
+        src = tmp_path / "src"
+        src.mkdir()
+        (src / "link.txt").symlink_to(actual)
+
+        dst = tmp_path / "dst"
+        copy_filtered(src, dst, include=None, exclude=None)
+
+        assert not (dst / "link.txt").is_symlink()
+        assert (dst / "link.txt").read_text() == "real content"

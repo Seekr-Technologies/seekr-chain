@@ -20,6 +20,7 @@ from __future__ import annotations
 import pytest
 
 from seekr_chain.config import NixConfig, WorkflowConfig
+from tests.utils import _populate
 
 
 @pytest.fixture
@@ -50,8 +51,20 @@ def _no_eval_needed(monkeypatch):
     def fake_eval(expression, attr="default", system="x86_64-linux"):
         # Cheap hash-ish so different (expr, attr, system) tuples differ.
         import hashlib
+        import os
 
-        key = f"{expression}|{attr}|{system}".encode()
+        # Mirror nix content-addressing: the real closure is independent of
+        # *where* the flake is staged. resolve_nix_steps evaluates from a random
+        # temp copy, so strip the volatile staging prefix and key on the
+        # expression relative to the staged root.
+        parts = expression.split(os.sep)
+        rel = expression
+        for i, p in enumerate(parts):
+            if p.startswith("seekr-chain-nix-eval-"):
+                rel = os.sep.join(parts[i + 1 :])
+                break
+        rel = os.path.normpath(rel or ".")
+        key = f"{rel}|{attr}|{system}".encode()
         h = hashlib.sha256(key).hexdigest()[:32]
         return f"/nix/store/{h}-{attr}"
 
@@ -150,13 +163,11 @@ class TestBuildStepInjection:
         # SEEKR_CHAIN_NIX_CLOSURE on the env (not just the script) lets
         # _detect_closure_hash tag the build pod with the same closure label
         # consumers use.
-        # resolve_nix_steps joins nix.expression with code.path before eval,
-        # so the mock sees the joined path (not the original "./"). The
-        # build step's env keeps the original "./" — the build pod resolves
-        # it relative to /seekr-chain/workspace.
-        from seekr_chain import nix_utils
-
-        expected_closure = nix_utils.eval_closure_path("/tmp/t")
+        # resolve_nix_steps evaluates from a staged copy of code.path (random
+        # temp dir), so we read the resolved closure back rather than recomputing
+        # it from a path. The build step's env keeps the original "./" — the
+        # build pod resolves it relative to /seekr-chain/workspace.
+        expected_closure = train.nix._resolved_closure
         assert build.env == {
             "SEEKR_CHAIN_NIX_STORE": "s3://test-bucket",
             "SEEKR_CHAIN_NIX_CLOSURE": expected_closure,
@@ -314,8 +325,10 @@ class TestBuildStepInjection:
         # Figure out what name our build step would get for this expression.
         from seekr_chain import nix_utils
 
-        # resolve_nix_steps joins expression with code.path before eval.
-        closure = nix_utils.eval_closure_path("/tmp/t")
+        # resolve_nix_steps evaluates from a staged copy; the fake eval is
+        # staging-independent (see _no_eval_needed), so evaluating the same
+        # relative expression here yields the same closure it will produce.
+        closure = nix_utils.eval_closure_path("./")
         existing_name = _build_step_name(closure, "s3://test-bucket")
 
         # Now build a workflow where the user already has a step with that name.
@@ -770,3 +783,90 @@ class TestMultiRoleSteps:
         build = next(s for s in out.steps if s.name.startswith("nix-build-"))
         training = next(s for s in out.steps if s.name == "training")
         assert build.name in (training.depends_on or [])
+
+
+class TestStagedEval:
+    """resolve_nix_steps must evaluate the flake from a staged copy of the
+    curated upload set (code.include/exclude), not the live code.path tree.
+    """
+
+    def _capture_eval(self, monkeypatch):
+        """Stub eval_closure_path to record the path it's handed and a snapshot
+        of that directory's contents (taken before the temp copy is cleaned up).
+        Also stub find_warm_nodes so the test never touches a real cluster.
+        """
+        import os
+
+        captured = {}
+
+        def fake_eval(expression, attr="default", system="x86_64-linux"):
+            captured["path"] = expression
+            tree = set()
+            for root, _dirs, files in os.walk(expression):
+                for f in files:
+                    tree.add(os.path.relpath(os.path.join(root, f), expression))
+            captured["tree"] = tree
+            return "/nix/store/0000000000000000000000000000abcd-default"
+
+        monkeypatch.setattr("seekr_chain.nix_utils.eval_closure_path", fake_eval)
+        monkeypatch.setattr("seekr_chain.nix_utils.find_warm_nodes", lambda *_a, **_k: ([], []))
+        return captured
+
+    def test_evaluates_staged_copy_excluding_junk(self, monkeypatch, tmp_path, _nix_user_config):
+        from seekr_chain.nix_resolution import resolve_nix_steps
+
+        _existing(monkeypatch)  # closure present -> no build step, keep it simple
+        captured = self._capture_eval(monkeypatch)
+
+        # Live code dir with a flake, an untracked-style file, and cache junk
+        # covered by CodeConfig's default excludes.
+        _populate(
+            tmp_path,
+            {
+                "flake.nix": ["{}"],
+                "brand_new.py": ["print('uncommitted')"],
+                ".venv": {"lib": ["huge"]},
+                ".pytest_cache": {"v": ["cache"]},
+                "__pycache__": {"m.pyc": ["bytecode"]},
+            },
+        )
+
+        c = WorkflowConfig(
+            name="t",
+            code={"path": str(tmp_path)},
+            steps=[{"name": "train", "nix": {"expression": "./"}, "script": "echo"}],
+        )
+        resolve_nix_steps(c)
+
+        # Eval ran against a staged copy, not the live tree.
+        assert captured["path"] != str(tmp_path)
+        # The curated set: flake + the uncommitted file are present; junk is not.
+        assert captured["tree"] == {"flake.nix", "brand_new.py"}
+        # Closure cached for the jobset renderer.
+        assert c.steps[0].nix._resolved_closure == "/nix/store/0000000000000000000000000000abcd-default"
+
+    def test_subdir_expression_resolves_under_staged_root(self, monkeypatch, tmp_path, _nix_user_config):
+        from seekr_chain.nix_resolution import resolve_nix_steps
+
+        _existing(monkeypatch)
+        captured = self._capture_eval(monkeypatch)
+
+        _populate(
+            tmp_path,
+            {
+                "top.txt": ["ignored-by-flake"],
+                "pkg": {"flake.nix": ["{}"], "app.py": ["x"]},
+            },
+        )
+
+        c = WorkflowConfig(
+            name="t",
+            code={"path": str(tmp_path)},
+            steps=[{"name": "train", "nix": {"expression": "pkg"}, "script": "echo"}],
+        )
+        resolve_nix_steps(c)
+
+        # The subdir expression is rebased onto the staged root.
+        assert captured["path"].endswith("/pkg")
+        assert captured["path"] != str(tmp_path / "pkg")
+        assert captured["tree"] == {"flake.nix", "app.py"}
