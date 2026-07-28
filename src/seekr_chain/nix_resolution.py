@@ -27,7 +27,6 @@ from __future__ import annotations
 import hashlib
 import logging
 import os
-import tempfile
 from urllib.parse import urlparse
 
 from seekr_chain import nix_utils
@@ -39,7 +38,6 @@ from seekr_chain.config import (
     SingleRoleStepConfig,
     WorkflowConfig,
 )
-from seekr_chain.symlink import copy_filtered
 from seekr_chain.user_config import config as _user_config
 
 logger = logging.getLogger(__name__)
@@ -279,7 +277,7 @@ def has_nix_roles(config: WorkflowConfig) -> bool:
     return bool(_collect_nix_roles_by_step(config))
 
 
-def resolve_nix_steps(config: WorkflowConfig, staged_code_dir: str | None = None) -> WorkflowConfig:
+def resolve_nix_steps(config: WorkflowConfig, staged_code_dir: str) -> WorkflowConfig:
     """Walk a WorkflowConfig and augment it with build steps for missing closures.
 
     See module docstring. Mutates and returns ``config``.
@@ -287,11 +285,10 @@ def resolve_nix_steps(config: WorkflowConfig, staged_code_dir: str | None = None
     No-op when no step has ``nix:`` set — so this is safe to call
     unconditionally for every submit.
 
-    ``staged_code_dir``, if given, is a real-file copy of the curated upload
-    set (``code.include``/``code.exclude`` applied to ``code.path``) that the
+    ``staged_code_dir`` is a real-file copy of the curated upload set
+    (``code.include``/``code.exclude`` applied to ``code.path``) that the
     caller already materialized as part of staging the upload — eval runs
-    directly against it instead of building a second copy. When omitted (e.g.
-    tests calling this function directly), a throwaway copy is built here.
+    directly against it instead of building a second copy.
     """
     nix_roles_by_step = _collect_nix_roles_by_step(config)
 
@@ -310,27 +307,12 @@ def resolve_nix_steps(config: WorkflowConfig, staged_code_dir: str | None = None
     # .venv/.git/cache copy nix's `path:` fetcher would otherwise do, and makes
     # the submit-time closure byte-identical to what the pod produces — so
     # nix-build.sh's "source tree drifted" guard can't trip on a set mismatch.
-    if staged_code_dir is not None:
-        role_to_key, needed_builds = _collect_needed_builds(
-            nix_roles_by_step,
-            config.code.path,
-            str(staged_code_dir),
-            config.namespace or "argo",
-        )
-    else:
-        with tempfile.TemporaryDirectory(prefix="seekr-chain-nix-eval-") as staged_root:
-            copy_filtered(
-                config.code.path,
-                staged_root,
-                include=config.code.include,
-                exclude=config.code.exclude,
-            )
-            role_to_key, needed_builds = _collect_needed_builds(
-                nix_roles_by_step,
-                config.code.path,
-                staged_root,
-                config.namespace or "argo",
-            )
+    role_to_key, needed_builds = _collect_needed_builds(
+        nix_roles_by_step,
+        config.code.path,
+        str(staged_code_dir),
+        config.namespace or "argo",
+    )
     if not needed_builds:
         return config
 

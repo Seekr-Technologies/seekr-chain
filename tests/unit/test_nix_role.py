@@ -817,7 +817,7 @@ class TestNixRendering:
                 }
             ],
         )
-        cfg = resolve_nix_steps(cfg)
+        cfg = resolve_nix_steps(cfg, staged_code_dir=tmp_path)
         # First step is the synthesized build; render it.
         assert cfg.steps[0].name.startswith("nix-build-")
         job_info = get_job_info("ab1234", datastore_root="s3://b/")
