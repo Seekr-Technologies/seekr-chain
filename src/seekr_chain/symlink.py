@@ -192,7 +192,9 @@ def symlink(src, dst, include: list[str] | None = None, exclude: list[str] | Non
         dst_file.symlink_to(src_file)
 
 
-def copy_filtered(src, dst, include: list[str] | None = None, exclude: list[str] | None = None, follow_links: bool = True):
+def copy_filtered(
+    src, dst, include: list[str] | None = None, exclude: list[str] | None = None, follow_links: bool = True
+):
     """
     Copy real files from src to dst under the same include/exclude rules as
     ``symlink()``.

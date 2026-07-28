@@ -136,10 +136,13 @@ class TestClosureExists:
 
 
 class TestBuildStepInjection:
-    def test_single_missing_closure_injects_one_build_step(self, staged_dir,
+    def test_single_missing_closure_injects_one_build_step(
+        self,
+        staged_dir,
         monkeypatch,
         _nix_user_config,
-        _no_eval_needed,):
+        _no_eval_needed,
+    ):
         from seekr_chain.nix_resolution import resolve_nix_steps
 
         _missing(monkeypatch)
@@ -215,10 +218,13 @@ class TestBuildStepInjection:
         # reads SEEKR_CHAIN_NIX_COMPRESSION at runtime.
         assert build.env["SEEKR_CHAIN_NIX_COMPRESSION"] == "none"
 
-    def test_dedup_when_two_steps_share_closure(self, staged_dir,
+    def test_dedup_when_two_steps_share_closure(
+        self,
+        staged_dir,
         monkeypatch,
         _nix_user_config,
-        _no_eval_needed,):
+        _no_eval_needed,
+    ):
         from seekr_chain.nix_resolution import resolve_nix_steps
 
         _missing(monkeypatch)
@@ -243,10 +249,13 @@ class TestBuildStepInjection:
         assert build_steps[0].name in (train_a.depends_on or [])
         assert build_steps[0].name in (train_b.depends_on or [])
 
-    def test_same_closure_different_store_gets_two_build_steps(self, staged_dir,
+    def test_same_closure_different_store_gets_two_build_steps(
+        self,
+        staged_dir,
         monkeypatch,
         _nix_user_config,
-        _no_eval_needed,):
+        _no_eval_needed,
+    ):
         """Two roles sharing a closure but configured with different
         nix.store values must each get their own build step pushing to
         their own store — deduping purely on closure would silently only
@@ -291,10 +300,13 @@ class TestBuildStepInjection:
         assert build_for_b.name in (step_b.depends_on or [])
         assert build_for_b.name not in (step_a.depends_on or [])
 
-    def test_two_distinct_closures_get_two_build_steps(self, staged_dir,
+    def test_two_distinct_closures_get_two_build_steps(
+        self,
+        staged_dir,
         monkeypatch,
         _nix_user_config,
-        _no_eval_needed,):
+        _no_eval_needed,
+    ):
         from seekr_chain.nix_resolution import resolve_nix_steps
 
         _missing(monkeypatch)
@@ -311,10 +323,13 @@ class TestBuildStepInjection:
         build_steps = [s for s in out.steps if s.name.startswith("nix-build-")]
         assert len(build_steps) == 2
 
-    def test_build_step_name_disambiguates_collisions(self, staged_dir,
+    def test_build_step_name_disambiguates_collisions(
+        self,
+        staged_dir,
         monkeypatch,
         _nix_user_config,
-        _no_eval_needed,):
+        _no_eval_needed,
+    ):
         """If a user names their step something like our build-step prefix, we
         suffix -1, -2 etc. instead of overwriting it."""
         from seekr_chain.nix_resolution import _build_step_name, resolve_nix_steps
@@ -346,10 +361,13 @@ class TestBuildStepInjection:
         assert existing_name in names
         assert f"{existing_name}-1" in names
 
-    def test_preserves_existing_depends_on(self, staged_dir,
+    def test_preserves_existing_depends_on(
+        self,
+        staged_dir,
         monkeypatch,
         _nix_user_config,
-        _no_eval_needed,):
+        _no_eval_needed,
+    ):
         from seekr_chain.nix_resolution import resolve_nix_steps
 
         _missing(monkeypatch)
@@ -380,10 +398,13 @@ class TestBuildStepInjection:
 
 
 class TestErrorPaths:
-    def test_build_false_with_missing_closure_errors(self, staged_dir,
+    def test_build_false_with_missing_closure_errors(
+        self,
+        staged_dir,
         monkeypatch,
         _nix_user_config,
-        _no_eval_needed,):
+        _no_eval_needed,
+    ):
         from seekr_chain.nix_resolution import resolve_nix_steps
 
         _missing(monkeypatch)
@@ -468,10 +489,13 @@ class TestWarmNodesCache:
         assert out.steps[0].nix._warm_nodes == ["node-a", "node-b"]
         assert out.steps[0].nix._partial_warm_nodes == ["node-c"]
 
-    def test_warm_nodes_deduped_across_roles_sharing_closure(self, staged_dir,
+    def test_warm_nodes_deduped_across_roles_sharing_closure(
+        self,
+        staged_dir,
         monkeypatch,
         _nix_user_config,
-        _no_eval_needed,):
+        _no_eval_needed,
+    ):
         """Two steps with the same expression share a closure; find_warm_nodes
         should be called only once per unique closure, with both roles getting
         the same cached (exact, partial) tuple.
@@ -657,7 +681,9 @@ class TestStoreUriValidation:
         with pytest.raises(ValueError, match="does not support path prefixes"):
             resolve_nix_steps(c, staged_code_dir=staged_dir)
 
-    def test_s3_with_prefix_in_per_step_store_rejected(self, staged_dir, monkeypatch, _no_eval_needed, _nix_user_config):
+    def test_s3_with_prefix_in_per_step_store_rejected(
+        self, staged_dir, monkeypatch, _no_eval_needed, _nix_user_config
+    ):
         """Same rejection when the per-step store sets a prefix."""
         from seekr_chain.nix_resolution import resolve_nix_steps
 
@@ -747,10 +773,13 @@ class TestStoreUriValidation:
 
 
 class TestMultiRoleSteps:
-    def test_multi_role_with_nix_roles_works(self, staged_dir,
+    def test_multi_role_with_nix_roles_works(
+        self,
+        staged_dir,
         monkeypatch,
         _nix_user_config,
-        _no_eval_needed,):
+        _no_eval_needed,
+    ):
         """A multi-role step where one role uses nix gets its build step
         injected and depends_on wired correctly at the step level."""
         from seekr_chain.nix_resolution import resolve_nix_steps
