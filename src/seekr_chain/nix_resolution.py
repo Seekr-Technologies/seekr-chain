@@ -256,20 +256,44 @@ def _validate_expression_under_code_path(expression: str, code_path: str, role_n
     return joined
 
 
-def resolve_nix_steps(config: WorkflowConfig) -> WorkflowConfig:
-    """Walk a WorkflowConfig and augment it with build steps for missing closures.
-
-    See module docstring. Mutates and returns ``config``.
-
-    No-op when no step has ``nix:`` set — so this is safe to call
-    unconditionally for every submit.
-    """
+def _collect_nix_roles_by_step(config: WorkflowConfig) -> list[tuple]:
+    """Return [(step, [nix-mode roles on that step]), ...] for every step
+    that has at least one nix-mode role."""
     nix_roles_by_step: list[tuple] = []
     for step in config.steps:
         roles = _roles_of(step)
         nix_roles = [r for r in roles if r.nix is not None]
         if nix_roles:
             nix_roles_by_step.append((step, nix_roles))
+    return nix_roles_by_step
+
+
+def has_nix_roles(config: WorkflowConfig) -> bool:
+    """Whether any step in ``config`` uses nix mode.
+
+    Lets callers upstream of ``resolve_nix_steps`` (e.g. the code-staging
+    step in ``launch_k8s_workflow``) decide whether they need a real-file
+    copy of ``code.path`` (nix requires it) or can use the cheaper symlink
+    tree.
+    """
+    return bool(_collect_nix_roles_by_step(config))
+
+
+def resolve_nix_steps(config: WorkflowConfig, staged_code_dir: str | None = None) -> WorkflowConfig:
+    """Walk a WorkflowConfig and augment it with build steps for missing closures.
+
+    See module docstring. Mutates and returns ``config``.
+
+    No-op when no step has ``nix:`` set — so this is safe to call
+    unconditionally for every submit.
+
+    ``staged_code_dir``, if given, is a real-file copy of the curated upload
+    set (``code.include``/``code.exclude`` applied to ``code.path``) that the
+    caller already materialized as part of staging the upload — eval runs
+    directly against it instead of building a second copy. When omitted (e.g.
+    tests calling this function directly), a throwaway copy is built here.
+    """
+    nix_roles_by_step = _collect_nix_roles_by_step(config)
 
     if not nix_roles_by_step:
         return config
@@ -286,19 +310,27 @@ def resolve_nix_steps(config: WorkflowConfig) -> WorkflowConfig:
     # .venv/.git/cache copy nix's `path:` fetcher would otherwise do, and makes
     # the submit-time closure byte-identical to what the pod produces — so
     # nix-build.sh's "source tree drifted" guard can't trip on a set mismatch.
-    with tempfile.TemporaryDirectory(prefix="seekr-chain-nix-eval-") as staged_root:
-        copy_filtered(
-            config.code.path,
-            staged_root,
-            include=config.code.include,
-            exclude=config.code.exclude,
-        )
+    if staged_code_dir is not None:
         role_to_key, needed_builds = _collect_needed_builds(
             nix_roles_by_step,
             config.code.path,
-            staged_root,
+            str(staged_code_dir),
             config.namespace or "argo",
         )
+    else:
+        with tempfile.TemporaryDirectory(prefix="seekr-chain-nix-eval-") as staged_root:
+            copy_filtered(
+                config.code.path,
+                staged_root,
+                include=config.code.include,
+                exclude=config.code.exclude,
+            )
+            role_to_key, needed_builds = _collect_needed_builds(
+                nix_roles_by_step,
+                config.code.path,
+                staged_root,
+                config.namespace or "argo",
+            )
     if not needed_builds:
         return config
 

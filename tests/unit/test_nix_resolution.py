@@ -870,3 +870,32 @@ class TestStagedEval:
         assert captured["path"].endswith("/pkg")
         assert captured["path"] != str(tmp_path / "pkg")
         assert captured["tree"] == {"flake.nix", "app.py"}
+
+    def test_uses_caller_provided_staged_dir_without_copying_again(self, monkeypatch, tmp_path):
+        """When the caller (launch_k8s_workflow) already staged the code as a
+        real-file copy for upload, resolve_nix_steps must eval directly
+        against it rather than building a second copy_filtered copy."""
+        from seekr_chain import nix_resolution as nr_mod
+        from seekr_chain.nix_resolution import resolve_nix_steps
+
+        _existing(monkeypatch)
+        captured = self._capture_eval(monkeypatch)
+
+        copy_calls = []
+        monkeypatch.setattr(nr_mod, "copy_filtered", lambda *a, **k: copy_calls.append((a, k)))
+
+        live_dir = tmp_path / "live"
+        staged_dir = tmp_path / "staged"
+        _populate(live_dir, {"flake.nix": ["{}"]})
+        _populate(staged_dir, {"flake.nix": ["{}"]})
+
+        c = WorkflowConfig(
+            name="t",
+            code={"path": str(live_dir)},
+            steps=[{"name": "train", "nix": {"expression": "./"}, "script": "echo"}],
+        )
+        resolve_nix_steps(c, staged_code_dir=str(staged_dir))
+
+        # Eval ran against the caller-provided dir, not a fresh copy of live_dir.
+        assert captured["path"] == str(staged_dir)
+        assert copy_calls == []
