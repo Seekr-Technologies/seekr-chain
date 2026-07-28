@@ -901,7 +901,7 @@ class TestStagedEval:
         assert captured["path"] != str(live_dir / "pkg")
         assert captured["tree"] == {"flake.nix", "app.py"}
 
-    def test_uses_caller_provided_staged_dir_directly(self, monkeypatch, tmp_path):
+    def test_uses_caller_provided_staged_dir_directly(self, monkeypatch, tmp_path, _nix_user_config):
         """resolve_nix_steps evals the caller-provided staged dir as-is — it
         has no staging logic of its own left to bypass."""
         from seekr_chain.nix_resolution import resolve_nix_steps
