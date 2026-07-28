@@ -102,12 +102,12 @@ There are four moving parts at submit time, three at pod runtime.
    path. This is what determines whether the closure is "in cache" — the
    hash changes whenever any input changes.
 
-    Eval runs against the **same curated file set that gets uploaded** — your
-    `code.path` filtered by `code.include`/`code.exclude` — not your live
-    working directory. This keeps eval fast (it doesn't copy `.venv`, `.git`,
-    or caches into the nix store) and, crucially, makes the closure you resolve
-    at submit **byte-identical to what the build pod builds** from the uploaded
-    bundle. Two consequences worth knowing:
+    Eval runs against the **same staged directory that gets uploaded** — your
+    `code.path` filtered by `code.include`/`code.exclude`, materialized once —
+    not your live working directory. This keeps eval fast (it doesn't copy
+    `.venv`, `.git`, or caches into the nix store) and, crucially, makes the
+    closure you resolve at submit **byte-identical to what the build pod
+    builds** from the uploaded bundle. Two consequences worth knowing:
 
     - **Uncommitted files count.** The file set is the upload, not git — a
       brand-new file you haven't committed *is* seen by the eval (as long as it

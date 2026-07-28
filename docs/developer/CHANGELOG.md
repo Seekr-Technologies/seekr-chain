@@ -1,6 +1,12 @@
 # CHANGELOG
  
 ## v0.5.0 [unreleased]
+- Fixed: Nix-mode `chain submit` now evaluates the flake closure from the same
+  curated file set (`code.include`/`code.exclude`) that gets uploaded, staged
+  once and shared between eval and upload, instead of evaluating against the
+  live working directory with a separate throwaway copy for eval. Fixes slow
+  evals on large working trees and a drift-guard mismatch between the
+  submit-time closure and what the build pod actually builds.
 - Added: Centralized kubeconfig loading in `k8s_utils.py` — friendly error when kubeconfig is missing or invalid.
 - Added: `depends_on` validation in `WorkflowConfig` — references to non-existent step names now raise a clear `ValidationError`.
 - Added: S3 credential error wrapping — missing AWS credentials produce actionable guidance instead of raw tracebacks.
