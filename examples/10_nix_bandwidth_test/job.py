@@ -21,14 +21,13 @@ import time
 import torch
 import torch.distributed as dist
 
-
 # Buffer sizes to test (bytes). Smaller sizes are latency-bound, larger
 # are bandwidth-bound. We care about the latter for fabric health.
 SIZES_BYTES = [
-    8 * 1024 * 1024,           # 8 MB
-    64 * 1024 * 1024,          # 64 MB
-    512 * 1024 * 1024,         # 512 MB
-    2 * 1024 * 1024 * 1024,    # 2 GB
+    8 * 1024 * 1024,  # 8 MB
+    64 * 1024 * 1024,  # 64 MB
+    512 * 1024 * 1024,  # 512 MB
+    2 * 1024 * 1024 * 1024,  # 2 GB
 ]
 WARMUP_ITERS = 5
 TIMED_ITERS = 20
@@ -43,7 +42,7 @@ def fmt_bytes(n: int) -> str:
 
 
 def fmt_bw(bytes_per_sec: float) -> str:
-    return f"{bytes_per_sec / (1024 ** 3):8.2f} GB/s"
+    return f"{bytes_per_sec / (1024**3):8.2f} GB/s"
 
 
 def benchmark_size(size_bytes: int, world_size: int) -> tuple[float, float]:

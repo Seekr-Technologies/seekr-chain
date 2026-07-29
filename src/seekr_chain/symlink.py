@@ -1,6 +1,8 @@
 import os
+import shutil
 from fnmatch import fnmatch
 from pathlib import Path
+from typing import Iterator
 
 
 def _matches_pattern(name: str, relative_path: str, pattern: str) -> bool:
@@ -128,6 +130,24 @@ def _should_include(path: Path, relative_path: str, include: list[str], exclude:
     return False
 
 
+# Shared by symlink() and copy_filtered() so both select the identical file
+# set; only the final per-file operation (symlink vs copy) differs.
+def _iter_included_files(
+    src_path: Path,
+    include: list[str],
+    exclude: list[str],
+    follow_links: bool,
+) -> Iterator[tuple[Path, Path]]:
+    """Yield (src_file, relative_path) for every file passing include/exclude."""
+    for root, dirs, files in os.walk(src_path, followlinks=follow_links):
+        root_path = Path(root)
+        for file in files:
+            src_file = root_path / file
+            relative_path = src_file.relative_to(src_path)
+            if _should_include(src_file, str(relative_path), include, exclude):
+                yield src_file, relative_path
+
+
 def symlink(src, dst, include: list[str] | None = None, exclude: list[str] | None = None, follow_links: bool = True):
     """
     Symlink files from src to dst with include/exclude filtering.
@@ -158,24 +178,45 @@ def symlink(src, dst, include: list[str] | None = None, exclude: list[str] | Non
     # Create destination directory if it doesn't exist
     dst_path.mkdir(parents=True, exist_ok=True)
 
-    # Walk through source directory
-    for root, dirs, files in os.walk(src_path, followlinks=follow_links):
-        root_path = Path(root)
+    for src_file, relative_path in _iter_included_files(src_path, include, exclude, follow_links):
+        dst_file = dst_path / relative_path
 
-        # Process files
-        for file in files:
-            src_file = root_path / file
-            relative_path = src_file.relative_to(src_path)
+        # Create parent directory only when needed
+        dst_file.parent.mkdir(parents=True, exist_ok=True)
 
-            if _should_include(src_file, str(relative_path), include, exclude):
-                dst_file = dst_path / relative_path
+        # Remove existing symlink/file if it exists
+        if dst_file.exists() or dst_file.is_symlink():
+            dst_file.unlink()
 
-                # Create parent directory only when needed
-                dst_file.parent.mkdir(parents=True, exist_ok=True)
+        # Create symlink
+        dst_file.symlink_to(src_file)
 
-                # Remove existing symlink/file if it exists
-                if dst_file.exists() or dst_file.is_symlink():
-                    dst_file.unlink()
 
-                # Create symlink
-                dst_file.symlink_to(src_file)
+def copy_filtered(
+    src, dst, include: list[str] | None = None, exclude: list[str] | None = None, follow_links: bool = True
+):
+    """
+    Copy real files from src to dst under the same include/exclude rules as
+    ``symlink()``.
+
+    Unlike ``symlink()`` this materializes real file content (``shutil.copy2``,
+    dereferencing symlinks the same way ``tar_directory`` does at upload time).
+    Needed for nix flake eval: ``nix``'s ``path:`` fetcher preserves symlinks
+    into the store, so a symlink tree would leave dangling store paths. Copying
+    the same selection the upload uses keeps submit-time eval byte-identical to
+    what the build pod builds.
+    """
+    src_path = Path(src).resolve()
+    dst_path = Path(dst).resolve()
+
+    include = include or []
+    exclude = exclude or []
+
+    dst_path.mkdir(parents=True, exist_ok=True)
+
+    for src_file, relative_path in _iter_included_files(src_path, include, exclude, follow_links):
+        dst_file = dst_path / relative_path
+        dst_file.parent.mkdir(parents=True, exist_ok=True)
+        # copy2 follows symlinks (copies target content), matching tar_directory's
+        # file_path.resolve() dereference so both produce the same bytes.
+        shutil.copy2(src_file, dst_file)

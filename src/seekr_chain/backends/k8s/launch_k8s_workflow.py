@@ -19,8 +19,8 @@ from seekr_chain.backends.k8s.jobset import _INIT_IMAGE, create_jobset_manifest
 from seekr_chain.backends.k8s.parse_logs import DATA_SCHEMA_VERSION
 from seekr_chain.backends.k8s.rbac import detect_service_account
 from seekr_chain.config import EnvSource, SecretRefSource
-from seekr_chain.nix_resolution import resolve_nix_steps
-from seekr_chain.symlink import symlink
+from seekr_chain.nix_resolution import has_nix_roles, resolve_nix_steps
+from seekr_chain.symlink import copy_filtered, symlink
 from seekr_chain.tar_directory import tar_directory
 from seekr_chain.user_config import config as _user_config
 
@@ -181,15 +181,15 @@ def _package_assets(
     workflow_secrets: list[dict],
     interactive: bool,
 ):
-    """Package up assets (code, scripts, jobset manifests, DAG definition) and upload to S3."""
+    """Package up assets (code, scripts, jobset manifests, DAG definition) and upload to S3.
+
+    Code is already staged into ``staging_dir / "workspace"`` by the caller
+    (see ``launch_k8s_workflow``) before this runs — this just logs it.
+    """
     dest = job_info["remote_assets_path"]
 
-    # CODE
     if config.code is not None:
-        logger.info(f"Including code from path: {config.code.path}")
-        local_code_dest = staging_dir / "workspace"
-        symlink(Path(config.code.path), local_code_dest, exclude=config.code.exclude, include=config.code.include)
-        logger.info(utils.summarize_dir(local_code_dest, detail=False))
+        logger.info(utils.summarize_dir(staging_dir / "workspace", detail=False))
 
     # COPY RESOURCES (includes chain-entrypoint.sh, fluentbit, and controller.py)
     resources_source = Path(__file__).parent / "resources"
@@ -405,29 +405,47 @@ def launch_k8s_workflow(
     if isinstance(config, dict):
         config = WorkflowConfig.model_validate(config)
 
-    # Walk nix-mode roles, evaluate expressions, check the store, and inject
-    # in-cluster build steps for any missing closures. No-op when there are
-    # no nix-mode roles, so this is safe to call unconditionally.
-    config = resolve_nix_steps(config)
-
     if interactive:
         if len(config.steps) != 1:
             raise ValueError("Interactive jobs may only have a single step")
 
-    s3_client, s3_creds = _get_s3_client_and_creds()
-
-    datastore_root = _resolve_datastore_root()
-    job_info = _generate_job_info(s3_client, datastore_root=datastore_root)
-    workflow_id = job_info["id"]
-
-    workflow_secrets = _create_workflow_secrets(config, workflow_id, s3_creds)
-
-    kubernetes.config.load_kube_config(config_file=os.environ.get("KUBECONFIG"))
-
-    service_account = _user_config.service_account or detect_service_account(config.namespace)
-
     with tempfile.TemporaryDirectory() as staging_dir:
         staging_dir = Path(staging_dir)
+
+        # Stage code and resolve nix closures first, before any S3/kube/secrets
+        # setup below -- nix eval is the step most likely to fail (bad flake,
+        # missing store path), so it should fail fast and cheaply rather than
+        # after that other setup has already run. Staged once here, real files
+        # for nix-mode (nix `path:` can't eval off symlinks -- it'd leave
+        # dangling store links) or the cheap symlink tree otherwise, so eval
+        # and upload share a single materialization instead of each building
+        # their own copy.
+        local_code_dest = None
+        if config.code is not None:
+            local_code_dest = staging_dir / "workspace"
+            if has_nix_roles(config):
+                copy_filtered(
+                    config.code.path, local_code_dest, include=config.code.include, exclude=config.code.exclude
+                )
+            else:
+                symlink(
+                    Path(config.code.path), local_code_dest, exclude=config.code.exclude, include=config.code.include
+                )
+
+        config = resolve_nix_steps(config, staged_code_dir=local_code_dest)
+
+        s3_client, s3_creds = _get_s3_client_and_creds()
+
+        datastore_root = _resolve_datastore_root()
+        job_info = _generate_job_info(s3_client, datastore_root=datastore_root)
+        workflow_id = job_info["id"]
+
+        workflow_secrets = _create_workflow_secrets(config, workflow_id, s3_creds)
+
+        kubernetes.config.load_kube_config(config_file=os.environ.get("KUBECONFIG"))
+
+        service_account = _user_config.service_account or detect_service_account(config.namespace)
+
         # Create assets dir upfront so _package_assets can write dag.json there
         (staging_dir / "assets").mkdir(parents=True, exist_ok=True)
 

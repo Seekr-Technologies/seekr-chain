@@ -446,12 +446,15 @@ class CodeConfig(BaseModel):
     Parameters
     ----------
     path : Local directory to upload
-    exclude : Glob patterns to exclude from upload
+    exclude : Glob patterns to exclude from upload. The default drops virtualenvs,
+        the git dir, and the Python/test/lint caches that otherwise bloat the
+        upload and (for nix-mode) churn the flake closure between runs. Set
+        ``exclude: []`` or add an ``include`` to ship any of these.
     include : Glob patterns to include (default: everything)
     """
 
     path: str
-    exclude: Optional[list[str]] = [".venv", ".git"]
+    exclude: Optional[list[str]] = [".venv", ".git", "__pycache__", ".pytest_cache", ".ruff_cache", "*.pyc"]
     include: Optional[list[str]] = None
 
 

@@ -254,20 +254,43 @@ def _validate_expression_under_code_path(expression: str, code_path: str, role_n
     return joined
 
 
-def resolve_nix_steps(config: WorkflowConfig) -> WorkflowConfig:
-    """Walk a WorkflowConfig and augment it with build steps for missing closures.
-
-    See module docstring. Mutates and returns ``config``.
-
-    No-op when no step has ``nix:`` set — so this is safe to call
-    unconditionally for every submit.
-    """
+def _collect_nix_roles_by_step(config: WorkflowConfig) -> list[tuple]:
+    """Return [(step, [nix-mode roles on that step]), ...] for every step
+    that has at least one nix-mode role."""
     nix_roles_by_step: list[tuple] = []
     for step in config.steps:
         roles = _roles_of(step)
         nix_roles = [r for r in roles if r.nix is not None]
         if nix_roles:
             nix_roles_by_step.append((step, nix_roles))
+    return nix_roles_by_step
+
+
+def has_nix_roles(config: WorkflowConfig) -> bool:
+    """Whether any step in ``config`` uses nix mode.
+
+    Lets callers upstream of ``resolve_nix_steps`` (e.g. the code-staging
+    step in ``launch_k8s_workflow``) decide whether they need a real-file
+    copy of ``code.path`` (nix requires it) or can use the cheaper symlink
+    tree.
+    """
+    return bool(_collect_nix_roles_by_step(config))
+
+
+def resolve_nix_steps(config: WorkflowConfig, staged_code_dir: str) -> WorkflowConfig:
+    """Walk a WorkflowConfig and augment it with build steps for missing closures.
+
+    See module docstring. Mutates and returns ``config``.
+
+    No-op when no step has ``nix:`` set — so this is safe to call
+    unconditionally for every submit.
+
+    ``staged_code_dir`` is a real-file copy of the curated upload set
+    (``code.include``/``code.exclude`` applied to ``code.path``) that the
+    caller already materialized as part of staging the upload — eval runs
+    directly against it instead of building a second copy.
+    """
+    nix_roles_by_step = _collect_nix_roles_by_step(config)
 
     if not nix_roles_by_step:
         return config
@@ -279,9 +302,15 @@ def resolve_nix_steps(config: WorkflowConfig) -> WorkflowConfig:
             "/seekr-chain/workspace, which is populated from code.path."
         )
 
+    # Evaluate the flake from the curated file set that gets uploaded (and that
+    # the build pod builds from), not the live tree. This drops the multi-GB
+    # .venv/.git/cache copy nix's `path:` fetcher would otherwise do, and makes
+    # the submit-time closure byte-identical to what the pod produces — so
+    # nix-build.sh's "source tree drifted" guard can't trip on a set mismatch.
     role_to_key, needed_builds = _collect_needed_builds(
         nix_roles_by_step,
         config.code.path,
+        str(staged_code_dir),
         config.namespace or "argo",
     )
     if not needed_builds:
@@ -293,9 +322,14 @@ def resolve_nix_steps(config: WorkflowConfig) -> WorkflowConfig:
 def _collect_needed_builds(
     nix_roles_by_step: list[tuple],
     code_path: str,
+    staged_root: str,
     namespace: str,
 ) -> tuple[dict[int, tuple[str, str]], dict[tuple[str, str], NixConfig]]:
     """Walk the nix-mode roles, eval each closure, and return:
+
+    ``code_path`` is the live directory (used for the lexical containment
+    check); ``staged_root`` is the curated copy the flake is actually evaluated
+    from — each role's validated expression is rebased onto it.
 
     - ``role_to_key``: id(role) -> (resolved /nix/store path, store_uri).
       Store is part of the key because two roles can share a closure while
@@ -330,8 +364,17 @@ def _collect_needed_builds(
                 code_path,
                 role_name,
             )
+            # Rebase the validated (live) path onto the staged copy so nix
+            # hashes only the uploaded set, matching what the pod builds.
+            rel = os.path.relpath(resolved_expression, os.path.normpath(code_path))
+            staged_expression = os.path.normpath(os.path.join(staged_root, rel))
+            logger.info(
+                "Resolving nix closure for role %r from staged upload set (expression=%r)",
+                role_name,
+                role.nix.expression,
+            )
             closure = nix_utils.eval_closure_path(
-                resolved_expression,
+                staged_expression,
                 attr=role.nix.attr,
                 system=role.nix.system,
             )
