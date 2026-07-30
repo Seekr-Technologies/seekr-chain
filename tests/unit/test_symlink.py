@@ -675,7 +675,7 @@ class TestTraversalPruning:
         _populate(
             src,
             {
-                "src": {"sub": {"main.py": ["a"]}},
+                "src": {"top.py": ["c"], "sub": {"main.py": ["a"]}},
                 "notebooks": {"huge": {"data.ipynb": ["b"]}},
             },
         )
@@ -684,4 +684,4 @@ class TestTraversalPruning:
         copy_filtered(src, dst, include=["src/**/*"], exclude=None)
 
         assert not any(d == "notebooks" or d.startswith("notebooks/") for d in entered)
-        assert _real_tree_to_dict(dst) == {"src": {"sub": {"main.py": ["a"]}}}
+        assert _real_tree_to_dict(dst) == {"src": {"top.py": ["c"], "sub": {"main.py": ["a"]}}}
