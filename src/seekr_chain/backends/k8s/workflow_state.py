@@ -119,13 +119,16 @@ def _parse_timestamp(ts):
     return None
 
 
-def failed_completion_time(status) -> Optional[datetime.datetime]:
-    """Fallback end time for a Job that failed without ``status.completion_time`` set.
+def get_completion_time(status) -> Optional[datetime.datetime]:
+    """Return a Job's terminal timestamp, for either success or failure.
 
-    Kubernetes only sets ``completion_time`` on success; for Failed jobs the
-    terminal timestamp instead lives on the "Failed" condition.
+    Kubernetes only populates ``status.completion_time`` on success; for a
+    failed Job the terminal timestamp instead lives on the "Failed"
+    condition's ``last_transition_time``.
     """
-    for condition in status.conditions or []:
+    if status.completion_time:
+        return _parse_timestamp(status.completion_time)
+    for condition in getattr(status, "conditions", None) or []:
         if condition.type == "Failed" and condition.status == "True":
             return _parse_timestamp(condition.last_transition_time)
     return None
@@ -462,11 +465,11 @@ def job_status_and_completion(job) -> tuple[WorkflowStatus, Optional[datetime.da
     ``completion_time`` is populated only for terminal states.
     """
     s = job.status
-    completion_time = _parse_timestamp(s.completion_time)
+    completion_time = get_completion_time(s)
     if s.succeeded and s.succeeded > 0:
         return WorkflowStatus.SUCCEEDED, completion_time
     if s.failed and s.failed > 0:
-        return WorkflowStatus.FAILED, completion_time or failed_completion_time(s)
+        return WorkflowStatus.FAILED, completion_time
     if s.active and s.active > 0:
         return WorkflowStatus.RUNNING, None
     return WorkflowStatus.PENDING, None
