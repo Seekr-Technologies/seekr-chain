@@ -119,6 +119,18 @@ def _parse_timestamp(ts):
     return None
 
 
+def failed_completion_time(status) -> Optional[datetime.datetime]:
+    """Fallback end time for a Job that failed without ``status.completion_time`` set.
+
+    Kubernetes only sets ``completion_time`` on success; for Failed jobs the
+    terminal timestamp instead lives on the "Failed" condition.
+    """
+    for condition in status.conditions or []:
+        if condition.type == "Failed" and condition.status == "True":
+            return _parse_timestamp(condition.last_transition_time)
+    return None
+
+
 _PULL_ERROR_REASONS = {"ImagePullBackOff", "ErrImagePull", "InvalidImageName", "ErrImageNeverPull"}
 _SKIP_WAITING_MESSAGE = {"CrashLoopBackOff", "ContainerCreating", "PodInitializing"}
 
@@ -454,7 +466,7 @@ def job_status_and_completion(job) -> tuple[WorkflowStatus, Optional[datetime.da
     if s.succeeded and s.succeeded > 0:
         return WorkflowStatus.SUCCEEDED, completion_time
     if s.failed and s.failed > 0:
-        return WorkflowStatus.FAILED, completion_time
+        return WorkflowStatus.FAILED, completion_time or failed_completion_time(s)
     if s.active and s.active > 0:
         return WorkflowStatus.RUNNING, None
     return WorkflowStatus.PENDING, None
