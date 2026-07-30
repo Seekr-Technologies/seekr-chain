@@ -4,6 +4,8 @@ from fnmatch import fnmatch
 from pathlib import Path
 from typing import Iterator
 
+from seekr_chain.glob_match import fnmatch_glob
+
 
 def _matches_pattern(name: str, relative_path: str, pattern: str) -> bool:
     """
@@ -20,10 +22,10 @@ def _matches_pattern(name: str, relative_path: str, pattern: str) -> bool:
         pattern_clean = pattern.lstrip("/")
 
         # Use fnmatch to handle wildcards in the pattern
-        return fnmatch(relative_path, pattern_clean)
+        return fnmatch_glob(relative_path, pattern_clean)
     else:
         # Unanchored pattern - match filename or anywhere in path
-        return fnmatch(name, pattern) or fnmatch(relative_path, pattern)
+        return fnmatch_glob(name, pattern) or fnmatch_glob(relative_path, pattern)
 
 
 def _dir_matches_exclude(dir_name: str, partial_path: str, exclude: list[str]) -> bool:
