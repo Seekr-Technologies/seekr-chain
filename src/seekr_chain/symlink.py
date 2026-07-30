@@ -26,47 +26,73 @@ def _matches_pattern(name: str, relative_path: str, pattern: str) -> bool:
         return fnmatch(name, pattern) or fnmatch(relative_path, pattern)
 
 
+def _dir_matches_exclude(dir_name: str, partial_path: str, exclude: list[str]) -> bool:
+    """True if a directory named `dir_name`, at root-relative path `partial_path`,
+    matches an exclude pattern (as a directory). Shared by `_is_in_excluded_directory`
+    (checking each ancestor of a file) and traversal pruning (checking a directory as
+    we descend into it) so both stay in sync."""
+    for pattern in exclude:
+        if pattern.endswith("/"):
+            # Pattern with trailing slash - matches only directories
+            dir_pattern = pattern.rstrip("/")
+
+            if dir_pattern.startswith("/"):
+                # Anchored directory pattern - check if path starts with this pattern
+                anchor_pattern = dir_pattern.lstrip("/")
+                # Check if we're at or inside this anchored directory
+                if partial_path == anchor_pattern or partial_path.startswith(anchor_pattern + "/"):
+                    return True
+            else:
+                # Unanchored directory pattern - match anywhere
+                if fnmatch(dir_name, dir_pattern):
+                    return True
+        else:
+            # Pattern without trailing slash - matches files or directories
+            if pattern.startswith("/"):
+                # Anchored pattern for directory check
+                pattern_clean = pattern.lstrip("/")
+
+                # Check if we're inside this anchored path
+                if partial_path == pattern_clean or fnmatch(partial_path, pattern_clean):
+                    return True
+            else:
+                # Unanchored - check directory name
+                if fnmatch(dir_name, pattern):
+                    return True
+    return False
+
+
 def _is_in_excluded_directory(relative_path: Path, exclude: list[str]) -> bool:
     """Check if the path is inside an excluded directory."""
     # Check each directory in the path hierarchy (excluding the file itself)
     # For a file at path "a/b/c.txt", we check directories "a" and "a/b", not "c.txt"
     for i in range(len(relative_path.parts) - 1):
         dir_name = relative_path.parts[i]
-
-        # Check against all exclude patterns
-        for pattern in exclude:
-            if pattern.endswith("/"):
-                # Pattern with trailing slash - matches only directories
-                dir_pattern = pattern.rstrip("/")
-
-                if dir_pattern.startswith("/"):
-                    # Anchored directory pattern - check if path starts with this pattern
-                    anchor_pattern = dir_pattern.lstrip("/")
-                    # Build path up to this point
-                    partial_path = str(Path(*relative_path.parts[: i + 1]))
-                    # Check if we're at or inside this anchored directory
-                    if partial_path == anchor_pattern or partial_path.startswith(anchor_pattern + "/"):
-                        return True
-                else:
-                    # Unanchored directory pattern - match anywhere
-                    if fnmatch(dir_name, dir_pattern):
-                        return True
-            else:
-                # Pattern without trailing slash - matches files or directories
-                if pattern.startswith("/"):
-                    # Anchored pattern for directory check
-                    # Build partial path and see if it matches
-                    partial_path = str(Path(*relative_path.parts[: i + 1]))
-                    pattern_clean = pattern.lstrip("/")
-
-                    # Check if we're inside this anchored path
-                    if partial_path == pattern_clean or fnmatch(partial_path, pattern_clean):
-                        return True
-                else:
-                    # Unanchored - check directory name
-                    if fnmatch(dir_name, pattern):
-                        return True
+        partial_path = str(Path(*relative_path.parts[: i + 1]))
+        if _dir_matches_exclude(dir_name, partial_path, exclude):
+            return True
     return False
+
+
+def _pattern_could_match_under(dir_parts: tuple[str, ...], pattern: str) -> bool:
+    """True if `pattern` could still match a path at or below a directory whose
+    root-relative path components are `dir_parts`. Conservative: only returns False
+    when a match is provably impossible, so it's safe to use for pruning traversal.
+
+    - A pattern with no '/' (after stripping an optional trailing '/') can match by
+      basename or directory name at any depth, so it's never prunable.
+    - A pattern containing '/' is always compared against the full root-relative path
+      regardless of a leading '/' (a bare basename can never match a slash-containing
+      pattern), so it's effectively root-anchored - safe to prefix-check component by
+      component from position 0.
+    """
+    p = pattern[:-1] if pattern.endswith("/") else pattern
+    anchored = p.startswith("/")
+    components = (p.lstrip("/") if anchored else p).split("/")
+    if not anchored and len(components) == 1:
+        return True
+    n = min(len(dir_parts), len(components))
+    return all(fnmatch(dir_parts[i], components[i]) for i in range(n))
 
 
 def _is_in_included_directory(relative_path: Path, include: list[str]) -> bool:
@@ -139,8 +165,21 @@ def _iter_included_files(
     follow_links: bool,
 ) -> Iterator[tuple[Path, Path]]:
     """Yield (src_file, relative_path) for every file passing include/exclude."""
-    for root, dirs, files in os.walk(src_path, followlinks=follow_links):
+    for root, dirs, files in os.walk(src_path, followlinks=follow_links, topdown=True):
         root_path = Path(root)
+
+        # Prune subdirectories that provably can't contain an included file, so
+        # os.walk never descends into (or stats) huge unrelated trees.
+        kept_dirs = []
+        for d in dirs:
+            relative_dir = (root_path / d).relative_to(src_path)
+            if exclude and _dir_matches_exclude(d, str(relative_dir), exclude):
+                continue
+            if include and not any(_pattern_could_match_under(relative_dir.parts, p) for p in include):
+                continue
+            kept_dirs.append(d)
+        dirs[:] = kept_dirs
+
         for file in files:
             src_file = root_path / file
             relative_path = src_file.relative_to(src_path)
