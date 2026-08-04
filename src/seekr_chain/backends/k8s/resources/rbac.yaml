@@ -17,7 +17,7 @@
 # back to the `argo` SA automatically if seekr-chain-controller is not present.
 #
 # Required permissions:
-#   jobset.x-k8s.io / jobsets  : create, get, list, watch, delete
+#   jobset.x-k8s.io / jobsets  : create, get, list, watch, delete, patch
 #   core / pods                : list, get  (for status monitoring)
 #   core / configmaps          : create, get, patch  (phase-state persistence across restarts)
 #   core / events              : create, patch  (step-transition observability)
@@ -34,7 +34,7 @@ metadata:
 rules:
   - apiGroups: ["jobset.x-k8s.io"]
     resources: ["jobsets"]
-    verbs: ["create", "get", "list", "watch", "delete"]
+    verbs: ["create", "get", "list", "watch", "delete", "patch"]
   - apiGroups: [""]
     resources: ["pods"]
     verbs: ["list", "get"]
