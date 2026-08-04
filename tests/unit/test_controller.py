@@ -29,6 +29,7 @@ _submit_ready_steps = controller._submit_ready_steps
 _load_manifest = controller._load_manifest
 _load_phases = controller._load_phases
 _save_phases = controller._save_phases
+_jobset_completed_despite_suspend = controller._jobset_completed_despite_suspend
 
 
 # ---------------------------------------------------------------------------
@@ -343,11 +344,16 @@ def _run_main(
     event_sequences: list[list[dict]],
     existing_jobsets: list[str] | None = None,
     initial_phases: dict[str, str] | None = None,
+    configure_k8s=None,
 ):
     """Run controller.main() with a mocked environment and watch stream.
 
     event_sequences: list of event batches, one per watch stream open() call.
     Each batch is exhausted before the next watch reconnect (if any).
+
+    configure_k8s: optional callable(mock_k8s, mock_core_v1) invoked before
+    main() runs, for tests that need to control get_namespaced_custom_object /
+    list_namespaced_pod (e.g. the raced-suspend disambiguation path).
     """
     env = {
         "SEEKR_CHAIN_JOB_ASSET_PATH": "/assets",
@@ -386,6 +392,9 @@ def _run_main(
     mock_custom_api_cls = MagicMock(return_value=mock_k8s)
     mock_core_v1 = MagicMock()
     mock_core_v1_cls = MagicMock(return_value=mock_core_v1)
+
+    if configure_k8s is not None:
+        configure_k8s(mock_k8s, mock_core_v1)
 
     def _load_manifest_mock(_assets, name):
         return {"metadata": {"name": f"{name}-js", "resourceVersion": "1"}, "spec": {}}
@@ -514,6 +523,80 @@ class TestMainDiamondDag:
         assert _run_main(dag, events) == 1
 
 
+# ---------------------------------------------------------------------------
+# _jobset_completed_despite_suspend
+# ---------------------------------------------------------------------------
+
+
+def _pod(phase):
+    return MagicMock(status=MagicMock(phase=phase))
+
+
+class TestJobsetCompletedDespiteSuspend:
+    def test_fresh_get_shows_completed(self):
+        k8s_custom = MagicMock()
+        k8s_custom.get_namespaced_custom_object.return_value = {"status": {"terminalState": "Completed"}}
+        k8s_v1 = MagicMock()
+        result = _jobset_completed_despite_suspend(k8s_custom, k8s_v1, "ns", "wf1", "a", "a-js")
+        assert result == "Completed"
+        k8s_v1.list_namespaced_pod.assert_not_called()
+
+    def test_fresh_get_shows_failed(self):
+        k8s_custom = MagicMock()
+        k8s_custom.get_namespaced_custom_object.return_value = {"status": {"terminalState": "Failed"}}
+        k8s_v1 = MagicMock()
+        result = _jobset_completed_despite_suspend(k8s_custom, k8s_v1, "ns", "wf1", "a", "a-js")
+        assert result == "Failed"
+
+    def test_falls_back_to_pods_when_get_has_no_terminal_state(self):
+        k8s_custom = MagicMock()
+        k8s_custom.get_namespaced_custom_object.return_value = {"status": {}}
+        k8s_v1 = MagicMock()
+        k8s_v1.list_namespaced_pod.return_value = MagicMock(items=[_pod("Succeeded"), _pod("Succeeded")])
+        result = _jobset_completed_despite_suspend(k8s_custom, k8s_v1, "ns", "wf1", "a", "a-js")
+        assert result == "Completed"
+
+    def test_falls_back_to_pods_all_failed(self):
+        k8s_custom = MagicMock()
+        k8s_custom.get_namespaced_custom_object.return_value = {"status": {}}
+        k8s_v1 = MagicMock()
+        k8s_v1.list_namespaced_pod.return_value = MagicMock(items=[_pod("Failed")])
+        result = _jobset_completed_despite_suspend(k8s_custom, k8s_v1, "ns", "wf1", "a", "a-js")
+        assert result == "Failed"
+
+    def test_no_pods_yet_returns_none(self):
+        k8s_custom = MagicMock()
+        k8s_custom.get_namespaced_custom_object.return_value = {"status": {}}
+        k8s_v1 = MagicMock()
+        k8s_v1.list_namespaced_pod.return_value = MagicMock(items=[])
+        result = _jobset_completed_despite_suspend(k8s_custom, k8s_v1, "ns", "wf1", "a", "a-js")
+        assert result is None
+
+    def test_pod_still_running_returns_none(self):
+        k8s_custom = MagicMock()
+        k8s_custom.get_namespaced_custom_object.return_value = {"status": {}}
+        k8s_v1 = MagicMock()
+        k8s_v1.list_namespaced_pod.return_value = MagicMock(items=[_pod("Succeeded"), _pod("Running")])
+        result = _jobset_completed_despite_suspend(k8s_custom, k8s_v1, "ns", "wf1", "a", "a-js")
+        assert result is None
+
+    def test_get_error_falls_back_to_pods(self):
+        k8s_custom = MagicMock()
+        k8s_custom.get_namespaced_custom_object.side_effect = RuntimeError("boom")
+        k8s_v1 = MagicMock()
+        k8s_v1.list_namespaced_pod.return_value = MagicMock(items=[_pod("Succeeded")])
+        result = _jobset_completed_despite_suspend(k8s_custom, k8s_v1, "ns", "wf1", "a", "a-js")
+        assert result == "Completed"
+
+    def test_pod_list_error_returns_none(self):
+        k8s_custom = MagicMock()
+        k8s_custom.get_namespaced_custom_object.return_value = {"status": {}}
+        k8s_v1 = MagicMock()
+        k8s_v1.list_namespaced_pod.side_effect = RuntimeError("boom")
+        result = _jobset_completed_despite_suspend(k8s_custom, k8s_v1, "ns", "wf1", "a", "a-js")
+        assert result is None
+
+
 class TestMainCancellation:
     def test_single_step_cancelled_exits(self):
         """A JobSet suspended (chain cancel) with no terminalState must not hang."""
@@ -553,6 +636,35 @@ class TestMainCancellation:
             ],
         ]
         assert _run_main(dag, events) == 1
+
+    def test_raced_suspend_after_completion_resolves_succeeded(self):
+        """The suspend event lands before the JobSet's own terminalState is
+        written. A fresh re-GET shows Completed, so the step must resolve to
+        SUCCEEDED (exit 0), not a spurious CANCELLED."""
+        dag = [{"name": "a", "depends_on": []}]
+        events = [
+            [_make_event("a-js", terminal=None, rv="2", suspend=True)],
+        ]
+
+        def configure(mock_k8s, _mock_core_v1):
+            mock_k8s.get_namespaced_custom_object.return_value = {"status": {"terminalState": "Completed"}}
+
+        assert _run_main(dag, events, configure_k8s=configure) == 0
+
+    def test_raced_suspend_after_completion_via_pods_resolves_succeeded(self):
+        """Fresh JobSet GET still shows no terminalState (controller hasn't
+        reconciled yet), but the worker pods already exited 0 — must still
+        resolve to SUCCEEDED via the pod-phase fallback."""
+        dag = [{"name": "a", "depends_on": []}]
+        events = [
+            [_make_event("a-js", terminal=None, rv="2", suspend=True)],
+        ]
+
+        def configure(mock_k8s, mock_core_v1):
+            mock_k8s.get_namespaced_custom_object.return_value = {"status": {}}
+            mock_core_v1.list_namespaced_pod.return_value = MagicMock(items=[_pod("Succeeded")])
+
+        assert _run_main(dag, events, configure_k8s=configure) == 0
 
 
 class TestMainWatchReconnect:

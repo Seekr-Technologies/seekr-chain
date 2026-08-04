@@ -27,6 +27,7 @@ from seekr_chain.backends.k8s.workflow_state import (
     first_running_or_finished_pod,
     get_workflow_job_status,
     get_workflow_state,
+    jobset_complete_or_pods_succeeded,
 )
 from seekr_chain.constants import LOCAL_LOG_PATH
 from seekr_chain.live import maybe_live
@@ -224,7 +225,14 @@ class K8sWorkflow(Workflow):
                 logger.warning(f"Failed to delete Secret {self._id}: {e}")
 
     def cancel(self):
-        """Suspend all worker JobSets without deleting them."""
+        """Suspend in-flight worker JobSets without deleting them.
+
+        A no-op for any JobSet that has already finished: suspending a completed
+        JobSet races the controller into recording a spurious CANCELLED, because
+        the JobSet status can lag its worker pods. This is what makes
+        ``cancel()`` safe to call unconditionally at teardown on a run that has
+        already succeeded.
+        """
         try:
             jobsets = self._k8s_custom.list_namespaced_custom_object(
                 group="jobset.x-k8s.io",
@@ -239,6 +247,9 @@ class K8sWorkflow(Workflow):
 
         for js in jobsets:
             name = js["metadata"]["name"]
+            if jobset_complete_or_pods_succeeded(self._k8s_v1, self._namespace, self._id, js):
+                logger.debug(f"Skipping suspend of already-complete JobSet {name}")
+                continue
             try:
                 self._k8s_custom.patch_namespaced_custom_object(
                     group="jobset.x-k8s.io",
