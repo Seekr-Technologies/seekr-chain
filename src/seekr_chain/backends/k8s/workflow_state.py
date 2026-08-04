@@ -621,6 +621,31 @@ def first_running_or_finished_pod(workflow_state: WorkflowState) -> Optional[Pod
     return None
 
 
+def jobset_complete_or_pods_succeeded(k8s_v1, namespace: str, workflow_id: str, jobset: dict) -> bool:
+    """Return True if this JobSet has already finished, so cancelling it is a no-op.
+
+    Checks ``status.terminalState`` first, then falls back to worker pod
+    phases (which can reconcile faster than the JobSet's own status) — the
+    same signals ``_jobset_completed_despite_suspend`` in the controller uses
+    to disambiguate a race between completion and suspension.
+    """
+    if jobset.get("status", {}).get("terminalState") in ("Completed", "Failed"):
+        return True
+    step_name = jobset.get("metadata", {}).get("labels", {}).get("seekr-chain/step-name")
+    if not step_name:
+        return False
+    try:
+        pods = k8s_v1.list_namespaced_pod(
+            namespace=namespace,
+            label_selector=f"seekr-chain/job-id={workflow_id},seekr-chain/step={step_name}",
+        ).items
+    except k8s.client.exceptions.ApiException as e:
+        logger.warning(f"Failed to list pods for step {step_name!r}: {e}")
+        return False
+    phases = [p.status.phase for p in pods]
+    return bool(phases) and all(ph == "Succeeded" for ph in phases)
+
+
 def is_jobset_suspended(k8s_custom, name: str, namespace: str) -> bool:
     """Return True if the named JobSet has ``spec.suspend=True``, False otherwise."""
     try:
