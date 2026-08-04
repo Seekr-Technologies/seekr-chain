@@ -227,11 +227,11 @@ def _jobset_completed_despite_suspend(
             namespace=namespace,
             label_selector=f"seekr-chain/job-id={workflow_id},seekr-chain/step={step_name}",
         ).items
+        phases = [p.status.phase for p in pods]
     except Exception as exc:
         print(f"[controller] warning: could not list pods for step={step_name!r}: {exc}", flush=True)
         return None
 
-    phases = [p.status.phase for p in pods]
     if phases and all(ph == "Succeeded" for ph in phases):
         return "Completed"
     if "Failed" in phases and not any(ph in ("Pending", "Running", None) for ph in phases):
