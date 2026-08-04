@@ -6,54 +6,58 @@ from typing import Optional
 
 import kubernetes
 
+from seekr_chain.backends.k8s.workflow_state import _parse_timestamp, controller_jobset_status_and_completion
+
+_PHASE_BY_STATUS = {
+    "SUCCEEDED": "Succeeded",
+    "FAILED": "Failed",
+    "RUNNING": "Running",
+}
+
 
 def list_k8s_workflows(
     namespace: Optional[str] = None, limit: Optional[int] = None, user: Optional[str] = None
 ) -> list[dict]:
-    """List k8s controller Jobs in the given namespace.
+    """List controller JobSets in the given namespace.
 
     Returns a list of dicts with keys: name, job_name, user, status, created, duration.
     """
     kubernetes.config.load_kube_config(config_file=os.environ.get("KUBECONFIG"))
-    k8s_batch = kubernetes.client.BatchV1Api()
+    k8s_custom = kubernetes.client.CustomObjectsApi()
 
     if namespace is None:
         _, active_ctx = kubernetes.config.list_kube_config_contexts()
         namespace = active_ctx["context"].get("namespace", "default")
 
-    label_selector = "seekr-chain/job-id"
+    label_selector = "seekr-chain/job-id,seekr-chain/is-controller=true"
     if user is not None:
         label_selector += f",seekr-chain/user={user}"
 
     kwargs: dict = {
+        "group": "jobset.x-k8s.io",
+        "version": "v1alpha2",
+        "plural": "jobsets",
         "namespace": namespace,
         "label_selector": label_selector,
     }
     if limit is not None:
         kwargs["limit"] = limit
 
-    result = k8s_batch.list_namespaced_job(**kwargs)
+    result = k8s_custom.list_namespaced_custom_object(**kwargs)
 
     workflows = []
-    for job in result.items:
-        metadata = job.metadata
-        labels = metadata.labels or {}
-        status = job.status
+    for jobset in result.get("items", []):
+        metadata = jobset.get("metadata", {})
+        labels = metadata.get("labels", {}) or {}
 
-        # Determine phase string
-        if status.succeeded and status.succeeded > 0:
-            phase = "Succeeded"
-        elif status.failed and status.failed > 0:
-            phase = "Failed"
-        elif status.active and status.active > 0:
-            phase = "Running"
-        else:
-            phase = "Pending"
+        status, completion_time = controller_jobset_status_and_completion(jobset)
+        phase = _PHASE_BY_STATUS.get(status.value, "Pending")
 
         # Duration calculation
         duration = ""
-        start_time = status.start_time
-        completion_time = status.completion_time
+        conditions = jobset.get("status", {}).get("conditions", []) or []
+        all_times = [c.get("lastTransitionTime") for c in conditions if c.get("lastTransitionTime")]
+        start_time = _parse_timestamp(min(all_times)) if all_times else _parse_timestamp(metadata.get("creationTimestamp"))
         if start_time:
             dt_end = completion_time if completion_time else datetime.now(timezone.utc)
             total_seconds = int((dt_end - start_time).total_seconds())
@@ -65,12 +69,12 @@ def list_k8s_workflows(
                 duration = f"{minutes}:{seconds:02d}"
 
         created = ""
-        if metadata.creation_timestamp:
-            created = metadata.creation_timestamp.strftime("%Y-%m-%dT%H:%M:%SZ")
+        if metadata.get("creationTimestamp"):
+            created = metadata["creationTimestamp"]
 
         workflows.append(
             {
-                "name": metadata.name or "",
+                "name": metadata.get("name") or "",
                 "job_name": labels.get("seekr-chain/job-name", ""),
                 "user": labels.get("seekr-chain/user", ""),
                 "status": phase,
