@@ -24,9 +24,9 @@ Reliability features:
 Required environment variables:
     SEEKR_CHAIN_JOB_ASSET_PATH        Path where assets were extracted (e.g. /seekr-chain/assets)
     SEEKR_CHAIN_NAMESPACE             Kubernetes namespace for JobSets
-    SEEKR_CHAIN_CONTROLLER_JOB_NAME   Name of this controller Job (for ownerReferences)
-    SEEKR_CHAIN_CONTROLLER_JOB_UID    UID of this controller Job (injected via downward API
-                                      from batch.kubernetes.io/controller-uid pod label)
+    SEEKR_CHAIN_CONTROLLER_JOB_NAME   Name of this controller JobSet (for ownerReferences; its UID
+                                      is self-read at startup via the Kubernetes API, since the
+                                      JobSet has no downward-API-exposed pod label for it)
 
 Only depends on: Python stdlib + kubernetes + pyyaml
 """
@@ -167,8 +167,8 @@ def _emit_event(
                     "namespace": namespace,
                 },
                 "involvedObject": {
-                    "apiVersion": "batch/v1",
-                    "kind": "Job",
+                    "apiVersion": "jobset.x-k8s.io/v1alpha2",
+                    "kind": "JobSet",
                     "name": workflow_id,
                     "namespace": namespace,
                     "uid": job_uid,
@@ -284,14 +284,25 @@ def main() -> int:
     assets_path = os.environ["SEEKR_CHAIN_JOB_ASSET_PATH"]
     namespace = os.environ["SEEKR_CHAIN_NAMESPACE"]
     job_name = os.environ["SEEKR_CHAIN_CONTROLLER_JOB_NAME"]
-    job_uid = os.environ["SEEKR_CHAIN_CONTROLLER_JOB_UID"]
-    workflow_id = job_name  # controller Job name == workflow ID
+    workflow_id = job_name  # controller JobSet name == workflow ID
 
     _touch_heartbeat()
 
     kubernetes.config.load_incluster_config()
     k8s_custom = kubernetes.client.CustomObjectsApi()
     k8s_v1 = kubernetes.client.CoreV1Api()
+
+    # Self-read our own JobSet's UID. There's no downward-API field for a JobSet's
+    # UID (unlike a Job's controller-uid pod label), but jobset.x-k8s.io/jobsets:get
+    # is RBAC every ServiceAccount that can run this controller already has.
+    controller_jobset = k8s_custom.get_namespaced_custom_object(
+        group="jobset.x-k8s.io",
+        version="v1alpha2",
+        plural="jobsets",
+        namespace=namespace,
+        name=job_name,
+    )
+    job_uid = controller_jobset["metadata"]["uid"]
 
     # Load DAG definition from assets
     with open(os.path.join(assets_path, "dag.json")) as f:
@@ -300,13 +311,11 @@ def main() -> int:
     print(f"[controller] loaded DAG with {len(dag)} steps: {[s['name'] for s in dag]}", flush=True)
 
     # ownerReference so JobSets and the phases ConfigMap are cascade-deleted when
-    # this controller Job is deleted.
-    # job_uid comes from the downward API (batch.kubernetes.io/controller-uid label) —
-    # no API call or extra RBAC required.
+    # this controller JobSet is deleted.
     owner_ref = [
         {
-            "apiVersion": "batch/v1",
-            "kind": "Job",
+            "apiVersion": "jobset.x-k8s.io/v1alpha2",
+            "kind": "JobSet",
             "name": job_name,
             "uid": job_uid,
             "blockOwnerDeletion": True,
