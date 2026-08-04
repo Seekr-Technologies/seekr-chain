@@ -464,6 +464,13 @@ def controller_jobset_status_and_completion(jobset: dict) -> tuple[WorkflowStatu
         ]
         completion_time = _parse_timestamp(max(terminal_times)) if terminal_times else None
         if terminal_state == "Completed":
+            # The controller exits 0 on cancellation (so the JobSet isn't retried)
+            # and self-patches the true state as an annotation. A Completed JobSet
+            # carrying that marker is a deliberate cancellation, surfaced as
+            # TERMINATED rather than SUCCEEDED.
+            annotations = jobset.get("metadata", {}).get("annotations", {}) or {}
+            if annotations.get("seekr-chain/terminal-state") == "CANCELLED":
+                return WorkflowStatus.TERMINATED, completion_time
             return WorkflowStatus.SUCCEEDED, completion_time
         return WorkflowStatus.FAILED, completion_time
 
