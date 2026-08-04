@@ -10,7 +10,10 @@ matching the real CustomObjectsApi response shape.
 from dataclasses import asdict
 from types import SimpleNamespace
 
-from seekr_chain.backends.k8s.workflow_state import build_workflow_state
+from seekr_chain.backends.k8s.workflow_state import (
+    build_workflow_state,
+    controller_jobset_status_and_completion,
+)
 from seekr_chain.status import PodStatus, WorkflowStatus
 
 
@@ -120,3 +123,34 @@ def test_build_workflow_state_step_with_no_pods_still_appears():
     assert state.steps[0].name == "step-a"
     assert state.steps[0].roles == []
     assert state.steps[0].pod.status == PodStatus.PENDING
+
+
+class TestControllerJobsetTerminalStateMapping:
+    def _jobset(self, terminal_state, annotations=None):
+        return {
+            "metadata": {"annotations": annotations or {}},
+            "status": {"terminalState": terminal_state} if terminal_state else {"replicatedJobsStatus": []},
+        }
+
+    def test_completed_without_annotation_is_succeeded(self):
+        status, _ = controller_jobset_status_and_completion(self._jobset("Completed"))
+        assert status == WorkflowStatus.SUCCEEDED
+
+    def test_completed_with_cancelled_annotation_is_terminated(self):
+        jobset = self._jobset("Completed", annotations={"seekr-chain/terminal-state": "CANCELLED"})
+        status, _ = controller_jobset_status_and_completion(jobset)
+        assert status == WorkflowStatus.TERMINATED
+
+    def test_completed_with_other_annotation_value_is_succeeded(self):
+        jobset = self._jobset("Completed", annotations={"seekr-chain/terminal-state": "SOMETHING_ELSE"})
+        status, _ = controller_jobset_status_and_completion(jobset)
+        assert status == WorkflowStatus.SUCCEEDED
+
+    def test_failed_ignores_cancelled_annotation(self):
+        jobset = self._jobset("Failed", annotations={"seekr-chain/terminal-state": "CANCELLED"})
+        status, _ = controller_jobset_status_and_completion(jobset)
+        assert status == WorkflowStatus.FAILED
+
+    def test_no_terminal_state_no_active_is_pending(self):
+        status, _ = controller_jobset_status_and_completion(self._jobset(None))
+        assert status == WorkflowStatus.PENDING

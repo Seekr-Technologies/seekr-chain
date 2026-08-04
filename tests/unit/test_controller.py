@@ -343,6 +343,7 @@ def _run_main(
     event_sequences: list[list[dict]],
     existing_jobsets: list[str] | None = None,
     initial_phases: dict[str, str] | None = None,
+    return_mocks: bool = False,
 ):
     """Run controller.main() with a mocked environment and watch stream.
 
@@ -370,7 +371,16 @@ def _run_main(
     mock_watch_cls.return_value = mock_watch_instance
 
     mock_k8s = MagicMock()
-    mock_k8s.get_namespaced_custom_object.return_value = {"metadata": {"uid": "uid-123"}}
+
+    def _get_namespaced_custom_object_side_effect(*args, **kwargs):
+        # The controller self-reads its own JobSet (by env["SEEKR_CHAIN_CONTROLLER_JOB_NAME"])
+        # once at startup to learn its uid; any other name is a worker JobSet re-GET
+        # inside _jobset_completed_despite_suspend's suspend-vs-completion race check.
+        if kwargs.get("name") == env["SEEKR_CHAIN_CONTROLLER_JOB_NAME"]:
+            return {"metadata": {"uid": "uid-123"}}
+        return {"status": {}, "spec": {"suspend": True}}
+
+    mock_k8s.get_namespaced_custom_object.side_effect = _get_namespaced_custom_object_side_effect
     mock_k8s.create_namespaced_custom_object.return_value = {}
     if existing_jobsets:
         from kubernetes.client.exceptions import ApiException
@@ -385,6 +395,7 @@ def _run_main(
 
     mock_custom_api_cls = MagicMock(return_value=mock_k8s)
     mock_core_v1 = MagicMock()
+    mock_core_v1.list_namespaced_pod.return_value = MagicMock(items=[])
     mock_core_v1_cls = MagicMock(return_value=mock_core_v1)
 
     def _load_manifest_mock(_assets, name):
@@ -421,6 +432,9 @@ def _run_main(
     ):
         result = controller.main()
 
+    if return_mocks:
+        mocks = MagicMock(custom=mock_k8s, core_v1=mock_core_v1)
+        return result, mocks
     return result
 
 
@@ -516,12 +530,14 @@ class TestMainDiamondDag:
 
 class TestMainCancellation:
     def test_single_step_cancelled_exits(self):
-        """A JobSet suspended (chain cancel) with no terminalState must not hang."""
+        """A JobSet suspended (chain cancel) with no terminalState must not hang.
+        Exits 0 (not retried) — the CANCELLED annotation self-patched onto the
+        controller JobSet is what lets the status layer surface TERMINATED."""
         dag = [{"name": "a", "depends_on": []}]
         events = [
             [_make_event("a-js", terminal=None, rv="2", suspend=True)],
         ]
-        assert _run_main(dag, events) == 1
+        assert _run_main(dag, events) == 0
 
     def test_cascade_cancels_unsubmitted_dependent(self):
         """a is cancelled before b's dependency is satisfied — b must never be
@@ -533,7 +549,7 @@ class TestMainCancellation:
         events = [
             [_make_event("a-js", terminal=None, rv="2", suspend=True)],
         ]
-        assert _run_main(dag, events) == 1
+        assert _run_main(dag, events) == 0
 
     def test_diamond_partial_cancel_cascades_join_step(self):
         """a → b, a → c, b+c → d. b is cancelled, c succeeds — d must
@@ -552,7 +568,101 @@ class TestMainCancellation:
                 _make_event("c-js", "Completed", rv="4"),
             ],
         ]
-        assert _run_main(dag, events) == 1
+        assert _run_main(dag, events) == 0
+
+    def test_cancelled_marks_controller_terminal_state(self):
+        """A genuine cancellation must self-patch the CANCELLED annotation onto
+        the controller's own JobSet, not just exit 0 — that annotation is what
+        lets the status layer surface TERMINATED instead of SUCCEEDED."""
+        dag = [{"name": "a", "depends_on": []}]
+        events = [
+            [_make_event("a-js", terminal=None, rv="2", suspend=True)],
+        ]
+        result, mocks = _run_main(dag, events, return_mocks=True)
+        assert result == 0
+        mocks.custom.patch_namespaced_custom_object.assert_called_once()
+        _, kwargs = mocks.custom.patch_namespaced_custom_object.call_args
+        assert kwargs["name"] == "wf-abc"
+        assert kwargs["body"]["metadata"]["annotations"]["seekr-chain/terminal-state"] == "CANCELLED"
+
+    def test_suspend_after_completion_is_success_not_cancel(self):
+        """The suspend event can arrive before the JobSet's terminalState is
+        reconciled if chain cancel patches spec.suspend=true just after the
+        step's pods already exited 0. The controller must re-check pod phases
+        and record SUCCEEDED rather than wrongly cancelling a step that
+        actually finished — and must not self-patch a CANCELLED annotation."""
+        dag = [{"name": "a", "depends_on": []}]
+        events = [
+            [_make_event("a-js", terminal=None, rv="2", suspend=True)],
+        ]
+        with patch.object(
+            controller,
+            "_jobset_completed_despite_suspend",
+            return_value="Completed",
+        ):
+            result, mocks = _run_main(dag, events, return_mocks=True)
+        assert result == 0
+        mocks.custom.patch_namespaced_custom_object.assert_not_called()
+
+
+def _pod(phase: str):
+    p = MagicMock()
+    p.status.phase = phase
+    return p
+
+
+class TestJobsetCompletedDespiteSuspend:
+    def _call(self, jobset_status, pod_phases):
+        custom = MagicMock()
+        custom.get_namespaced_custom_object.return_value = {"status": jobset_status, "spec": {"suspend": True}}
+        core_v1 = MagicMock()
+        core_v1.list_namespaced_pod.return_value = MagicMock(items=[_pod(p) for p in pod_phases])
+        return controller._jobset_completed_despite_suspend(custom, core_v1, "ns", "wf", "a", "a-js")
+
+    def test_fresh_terminalstate_completed_wins(self):
+        assert self._call({"terminalState": "Completed"}, []) == "Completed"
+
+    def test_fresh_terminalstate_failed_wins(self):
+        assert self._call({"terminalState": "Failed"}, []) == "Failed"
+
+    def test_all_pods_succeeded_is_completed(self):
+        assert self._call({}, ["Succeeded", "Succeeded"]) == "Completed"
+
+    def test_no_pods_is_none(self):
+        assert self._call({}, []) is None
+
+    def test_running_pod_is_none(self):
+        assert self._call({}, ["Succeeded", "Running"]) is None
+
+    def test_failed_pod_without_active_is_failed(self):
+        assert self._call({}, ["Failed"]) == "Failed"
+
+    def test_failed_pod_with_running_is_none(self):
+        assert self._call({}, ["Failed", "Running"]) is None
+
+    def test_jobset_get_error_falls_back_to_pods(self):
+        from kubernetes.client.exceptions import ApiException
+
+        custom = MagicMock()
+        custom.get_namespaced_custom_object.side_effect = ApiException(status=500)
+        core_v1 = MagicMock()
+        core_v1.list_namespaced_pod.return_value = MagicMock(items=[_pod("Succeeded")])
+        assert controller._jobset_completed_despite_suspend(custom, core_v1, "ns", "wf", "a", "a-js") == "Completed"
+
+
+class TestMarkControllerTerminalState:
+    def test_patches_jobset_annotation(self):
+        custom = MagicMock()
+        controller._mark_controller_terminal_state(custom, "ns", "wf-abc", "CANCELLED")
+        _, kwargs = custom.patch_namespaced_custom_object.call_args
+        assert kwargs["name"] == "wf-abc"
+        assert kwargs["namespace"] == "ns"
+        assert kwargs["body"]["metadata"]["annotations"]["seekr-chain/terminal-state"] == "CANCELLED"
+
+    def test_best_effort_swallows_errors(self):
+        custom = MagicMock()
+        custom.patch_namespaced_custom_object.side_effect = RuntimeError("403 Forbidden")
+        controller._mark_controller_terminal_state(custom, "ns", "wf-abc", "CANCELLED")
 
 
 class TestMainWatchReconnect:
