@@ -27,15 +27,14 @@ class TestGetJobInfoError:
 class TestK8sWorkflowReconnect:
     def _make_workflow(self, id="test-id-abc123", datastore_root=None, k8s_status=200):
         """Create a K8sWorkflow with mocked k8s clients."""
-        mock_batch = MagicMock()
+        mock_custom = MagicMock()
         if k8s_status == 404:
-            mock_batch.read_namespaced_job.side_effect = ApiException(status=404)
+            mock_custom.get_namespaced_custom_object.side_effect = ApiException(status=404)
         elif k8s_status == 500:
-            mock_batch.read_namespaced_job.side_effect = ApiException(status=500)
+            mock_custom.get_namespaced_custom_object.side_effect = ApiException(status=500)
         else:
-            mock_job = MagicMock()
-            mock_job.metadata.annotations = {"seekr-chain/datastore-root": datastore_root} if datastore_root else {}
-            mock_batch.read_namespaced_job.return_value = mock_job
+            annotations = {"seekr-chain/datastore-root": datastore_root} if datastore_root else {}
+            mock_custom.get_namespaced_custom_object.return_value = {"metadata": {"annotations": annotations}}
 
         with (
             patch("seekr_chain.backends.k8s.k8s_workflow.k8s_utils") as mock_k8s_utils,
@@ -44,8 +43,7 @@ class TestK8sWorkflowReconnect:
         ):
             mock_k8s.config.list_kube_config_contexts.return_value = (None, {"context": {"namespace": "argo"}})
             mock_k8s_utils.get_core_v1_api.return_value = MagicMock()
-            mock_k8s_utils.get_custom_objects_api.return_value = MagicMock()
-            mock_k8s.client.BatchV1Api.return_value = mock_batch
+            mock_k8s_utils.get_custom_objects_api.return_value = mock_custom
             mock_boto3.client.return_value = MagicMock()
 
             return K8sWorkflow(id=id)
