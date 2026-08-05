@@ -57,7 +57,9 @@ def list_k8s_workflows(
         duration = ""
         conditions = jobset.get("status", {}).get("conditions", []) or []
         all_times = [c.get("lastTransitionTime") for c in conditions if c.get("lastTransitionTime")]
-        start_time = _parse_timestamp(min(all_times)) if all_times else _parse_timestamp(metadata.get("creationTimestamp"))
+        start_time = (
+            _parse_timestamp(min(all_times)) if all_times else _parse_timestamp(metadata.get("creationTimestamp"))
+        )
         if start_time:
             dt_end = completion_time if completion_time else datetime.now(timezone.utc)
             total_seconds = int((dt_end - start_time).total_seconds())

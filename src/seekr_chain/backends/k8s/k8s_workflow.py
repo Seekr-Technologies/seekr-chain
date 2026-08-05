@@ -264,9 +264,7 @@ class K8sWorkflow(Workflow):
 
         try:
             with (
-                workflow_state_watcher(
-                    self._k8s_custom, self._k8s_v1, self._namespace, self._id
-                ) as watcher,
+                workflow_state_watcher(self._k8s_custom, self._k8s_v1, self._namespace, self._id) as watcher,
                 maybe_live(plain=plain, console=console, refresh_per_second=4, transient=False) as live,
             ):
                 workflow_state = watcher.wait_for_first()
@@ -315,9 +313,7 @@ class K8sWorkflow(Workflow):
         plain = False
         try:
             with (
-                workflow_state_watcher(
-                    self._k8s_custom, self._k8s_v1, self._namespace, self._id
-                ) as watcher,
+                workflow_state_watcher(self._k8s_custom, self._k8s_v1, self._namespace, self._id) as watcher,
                 maybe_live(plain=plain, console=console, refresh_per_second=4, transient=False) as live,
             ):
                 workflow_state = watcher.wait_for_first()

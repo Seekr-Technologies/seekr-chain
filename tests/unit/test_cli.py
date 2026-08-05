@@ -331,7 +331,9 @@ class TestListWorkflows:
         list_workflows(user="alice")
 
         call_kwargs = mock_custom.list_namespaced_custom_object.call_args.kwargs
-        assert call_kwargs["label_selector"] == "seekr-chain/job-id,seekr-chain/is-controller=true,seekr-chain/user=alice"
+        assert (
+            call_kwargs["label_selector"] == "seekr-chain/job-id,seekr-chain/is-controller=true,seekr-chain/user=alice"
+        )
 
     @patch("seekr_chain.backends.k8s.list_workflows.kubernetes")
     def test_returns_job_name_and_user(self, mock_k8s):

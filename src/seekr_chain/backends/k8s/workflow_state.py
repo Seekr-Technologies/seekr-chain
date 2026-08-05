@@ -579,7 +579,9 @@ def list_pods(k8s_v1, namespace: str, workflow_id: str) -> tuple[list, str]:
     return resp.items, resp.metadata.resource_version or ""
 
 
-def build_workflow_state(workflow_id: str, controller_jobset: Optional[dict], jobsets: list[dict], pods: list) -> WorkflowState:
+def build_workflow_state(
+    workflow_id: str, controller_jobset: Optional[dict], jobsets: list[dict], pods: list
+) -> WorkflowState:
     """Build a ``WorkflowState`` from already-fetched controller JobSet /
     worker JobSet / Pod objects.
 
