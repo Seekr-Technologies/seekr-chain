@@ -531,13 +531,14 @@ class TestMainDiamondDag:
 class TestMainCancellation:
     def test_single_step_cancelled_exits(self):
         """A JobSet suspended (chain cancel) with no terminalState must not hang.
-        Exits 0 (not retried) — the CANCELLED annotation self-patched onto the
-        controller JobSet is what lets the status layer surface TERMINATED."""
+        Exits 1 — the controller self-suspends and self-patches the CANCELLED
+        annotation onto its own JobSet, which is what lets the status layer
+        surface TERMINATED instead of FAILED."""
         dag = [{"name": "a", "depends_on": []}]
         events = [
             [_make_event("a-js", terminal=None, rv="2", suspend=True)],
         ]
-        assert _run_main(dag, events) == 0
+        assert _run_main(dag, events) == 1
 
     def test_cascade_cancels_unsubmitted_dependent(self):
         """a is cancelled before b's dependency is satisfied — b must never be
@@ -549,7 +550,7 @@ class TestMainCancellation:
         events = [
             [_make_event("a-js", terminal=None, rv="2", suspend=True)],
         ]
-        assert _run_main(dag, events) == 0
+        assert _run_main(dag, events) == 1
 
     def test_diamond_partial_cancel_cascades_join_step(self):
         """a → b, a → c, b+c → d. b is cancelled, c succeeds — d must
@@ -568,22 +569,29 @@ class TestMainCancellation:
                 _make_event("c-js", "Completed", rv="4"),
             ],
         ]
-        assert _run_main(dag, events) == 0
+        assert _run_main(dag, events) == 1
 
     def test_cancelled_marks_controller_terminal_state(self):
         """A genuine cancellation must self-patch the CANCELLED annotation onto
-        the controller's own JobSet, not just exit 0 — that annotation is what
-        lets the status layer surface TERMINATED instead of SUCCEEDED."""
+        the controller's own JobSet and self-suspend it, then exit 1 — the
+        annotation is what lets the status layer surface TERMINATED instead of
+        FAILED, and the suspend is what stops a replacement controller pod
+        from spawning."""
         dag = [{"name": "a", "depends_on": []}]
         events = [
             [_make_event("a-js", terminal=None, rv="2", suspend=True)],
         ]
         result, mocks = _run_main(dag, events, return_mocks=True)
-        assert result == 0
-        mocks.custom.patch_namespaced_custom_object.assert_called_once()
-        _, kwargs = mocks.custom.patch_namespaced_custom_object.call_args
-        assert kwargs["name"] == "wf-abc"
-        assert kwargs["body"]["metadata"]["annotations"]["seekr-chain/terminal-state"] == "CANCELLED"
+        assert result == 1
+        assert mocks.custom.patch_namespaced_custom_object.call_count == 2
+        bodies = [kwargs["body"] for _, kwargs in mocks.custom.patch_namespaced_custom_object.call_args_list]
+        names = [kwargs["name"] for _, kwargs in mocks.custom.patch_namespaced_custom_object.call_args_list]
+        assert names == ["wf-abc", "wf-abc"]
+        assert any(
+            b.get("metadata", {}).get("annotations", {}).get("seekr-chain/terminal-state") == "CANCELLED"
+            for b in bodies
+        )
+        assert any(b.get("spec", {}).get("suspend") is True for b in bodies)
 
     def test_suspend_after_completion_is_success_not_cancel(self):
         """The suspend event can arrive before the JobSet's terminalState is
@@ -663,6 +671,21 @@ class TestMarkControllerTerminalState:
         custom = MagicMock()
         custom.patch_namespaced_custom_object.side_effect = RuntimeError("403 Forbidden")
         controller._mark_controller_terminal_state(custom, "ns", "wf-abc", "CANCELLED")
+
+
+class TestSuspendSelf:
+    def test_patches_jobset_suspend(self):
+        custom = MagicMock()
+        controller._suspend_self(custom, "ns", "wf-abc")
+        _, kwargs = custom.patch_namespaced_custom_object.call_args
+        assert kwargs["name"] == "wf-abc"
+        assert kwargs["namespace"] == "ns"
+        assert kwargs["body"]["spec"]["suspend"] is True
+
+    def test_best_effort_swallows_errors(self):
+        custom = MagicMock()
+        custom.patch_namespaced_custom_object.side_effect = RuntimeError("403 Forbidden")
+        controller._suspend_self(custom, "ns", "wf-abc")
 
 
 class TestMainWatchReconnect:

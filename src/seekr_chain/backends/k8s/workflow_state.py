@@ -445,6 +445,13 @@ def _collect_step_state(name, roles, jobset: dict) -> StepState:
 # ---------------------------------------------------------------------------
 
 
+def _terminal_time_for(conditions: list, state: str) -> Optional[datetime.datetime]:
+    terminal_times = [
+        c.get("lastTransitionTime") for c in conditions if c.get("type") == state and c.get("lastTransitionTime")
+    ]
+    return _parse_timestamp(max(terminal_times)) if terminal_times else None
+
+
 def controller_jobset_status_and_completion(jobset: dict) -> tuple[WorkflowStatus, Optional[datetime.datetime]]:
     """Map a controller JobSet's ``.status`` into ``(WorkflowStatus, completion_time)``.
 
@@ -453,22 +460,27 @@ def controller_jobset_status_and_completion(jobset: dict) -> tuple[WorkflowStatu
     ``completion_time`` is populated only for terminal states.
     """
     status = jobset.get("status", {})
+    spec = jobset.get("spec", {})
     terminal_state = status.get("terminalState")
     conditions = status.get("conditions", []) or []
+    annotations = jobset.get("metadata", {}).get("annotations", {}) or {}
+
+    # The controller self-suspends and self-patches this annotation on
+    # cancellation, then exits non-zero. Check suspend first — like
+    # `_jobset_step_pod()` does for worker JobSets — rather than requiring
+    # `status.terminalState == "Failed"`, since whether the underlying Job
+    # ever accumulates enough failures to set that is not guaranteed once
+    # suspend has already halted it.
+    if spec.get("suspend", False) and annotations.get("seekr-chain/terminal-state") == "CANCELLED":
+        completion_time = _terminal_time_for(conditions, terminal_state) if terminal_state else None
+        return WorkflowStatus.TERMINATED, completion_time
 
     if terminal_state in ("Completed", "Failed"):
-        terminal_times = [
-            c.get("lastTransitionTime")
-            for c in conditions
-            if c.get("type") == terminal_state and c.get("lastTransitionTime")
-        ]
-        completion_time = _parse_timestamp(max(terminal_times)) if terminal_times else None
+        completion_time = _terminal_time_for(conditions, terminal_state)
         if terminal_state == "Completed":
-            # The controller exits 0 on cancellation (so the JobSet isn't retried)
-            # and self-patches the true state as an annotation. A Completed JobSet
-            # carrying that marker is a deliberate cancellation, surfaced as
-            # TERMINATED rather than SUCCEEDED.
-            annotations = jobset.get("metadata", {}).get("annotations", {}) or {}
+            # Defensive: a Completed JobSet carrying the CANCELLED marker
+            # (e.g. a race where completion beat the suspend patch) is still
+            # a deliberate cancellation, not a success.
             if annotations.get("seekr-chain/terminal-state") == "CANCELLED":
                 return WorkflowStatus.TERMINATED, completion_time
             return WorkflowStatus.SUCCEEDED, completion_time

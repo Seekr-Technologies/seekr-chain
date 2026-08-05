@@ -126,11 +126,22 @@ def test_build_workflow_state_step_with_no_pods_still_appears():
 
 
 class TestControllerJobsetTerminalStateMapping:
-    def _jobset(self, terminal_state, annotations=None):
+    def _jobset(self, terminal_state, annotations=None, suspend=False):
         return {
             "metadata": {"annotations": annotations or {}},
+            "spec": {"suspend": suspend},
             "status": {"terminalState": terminal_state} if terminal_state else {"replicatedJobsStatus": []},
         }
+
+    def test_suspended_with_cancelled_annotation_is_terminated(self):
+        jobset = self._jobset(None, annotations={"seekr-chain/terminal-state": "CANCELLED"}, suspend=True)
+        status, _ = controller_jobset_status_and_completion(jobset)
+        assert status == WorkflowStatus.TERMINATED
+
+    def test_suspended_with_cancelled_annotation_and_terminal_state_is_terminated(self):
+        jobset = self._jobset("Failed", annotations={"seekr-chain/terminal-state": "CANCELLED"}, suspend=True)
+        status, _ = controller_jobset_status_and_completion(jobset)
+        assert status == WorkflowStatus.TERMINATED
 
     def test_completed_without_annotation_is_succeeded(self):
         status, _ = controller_jobset_status_and_completion(self._jobset("Completed"))

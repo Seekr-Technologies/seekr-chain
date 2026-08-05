@@ -243,9 +243,9 @@ def _mark_controller_terminal_state(k8s_custom, namespace: str, job_name: str, v
     """Record the workflow's true terminal state on the controller JobSet as an
     annotation. Best-effort — never raises.
 
-    The controller exits 0 on cancellation (so the JobSet isn't retried), which
-    would otherwise be indistinguishable from success. This annotation lets the
-    status layer map an exit-0 controller JobSet back to TERMINATED.
+    The controller exits non-zero on cancellation like any other non-success
+    outcome, so this annotation is what lets the status layer distinguish
+    CANCELLED from a genuine FAILED.
     """
     try:
         k8s_custom.patch_namespaced_custom_object(
@@ -258,6 +258,29 @@ def _mark_controller_terminal_state(k8s_custom, namespace: str, job_name: str, v
         )
     except Exception as exc:
         print(f"[controller] warning: could not mark terminal state {value!r}: {exc}", flush=True)
+
+
+def _suspend_self(k8s_custom, namespace: str, job_name: str) -> None:
+    """Suspend the controller's own JobSet. Best-effort — never raises.
+
+    Prevents the JobSet controller from spawning a replacement controller pod
+    after this process exits non-zero on cancellation. Suspend gates pod
+    creation independently of ``backoffLimit``, which is the mechanism we'd
+    otherwise need to zero out — but that field lives on the underlying
+    ``batch/v1`` Job, not the JobSet, and patching it directly would require
+    ``batch/jobs`` RBAC the Argo fallback ServiceAccount doesn't have.
+    """
+    try:
+        k8s_custom.patch_namespaced_custom_object(
+            group="jobset.x-k8s.io",
+            version="v1alpha2",
+            plural="jobsets",
+            name=job_name,
+            namespace=namespace,
+            body={"spec": {"suspend": True}},
+        )
+    except Exception as exc:
+        print(f"[controller] warning: could not suspend self: {exc}", flush=True)
 
 
 def _cascade_fail(dag: list[dict], phases: dict[str, str]) -> None:
@@ -588,11 +611,12 @@ def main() -> int:
 
     cancelled = [n for n, p in phases.items() if p == "CANCELLED"]
     if cancelled:
-        # Cancellation is an intentional terminal state, not an error. Exit 0 so
-        # the controller JobSet isn't retried into a restart storm, and record
-        # the true state on the JobSet so the status layer can still surface
-        # TERMINATED rather than SUCCEEDED.
+        # Record the true state on the JobSet so the status layer can surface
+        # TERMINATED rather than FAILED, then self-suspend so the JobSet
+        # controller doesn't spawn a replacement controller pod — suspend
+        # gates pod creation regardless of backoffLimit or our exit code.
         _mark_controller_terminal_state(k8s_custom, namespace, workflow_id, "CANCELLED")
+        _suspend_self(k8s_custom, namespace, workflow_id)
         _emit_event(
             k8s_v1,
             namespace,
@@ -602,7 +626,7 @@ def main() -> int:
             f"Workflow cancelled — cancelled steps: {cancelled}",
         )
         print(f"[controller] workflow CANCELLED — cancelled steps: {cancelled}", flush=True)
-        return 0
+        return 1
 
     _emit_event(
         k8s_v1,
