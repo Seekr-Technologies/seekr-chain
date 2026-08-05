@@ -343,6 +343,7 @@ def _run_main(
     event_sequences: list[list[dict]],
     existing_jobsets: list[str] | None = None,
     initial_phases: dict[str, str] | None = None,
+    return_mocks: bool = False,
 ):
     """Run controller.main() with a mocked environment and watch stream.
 
@@ -353,7 +354,6 @@ def _run_main(
         "SEEKR_CHAIN_JOB_ASSET_PATH": "/assets",
         "SEEKR_CHAIN_NAMESPACE": "ns",
         "SEEKR_CHAIN_CONTROLLER_JOB_NAME": "wf-abc",
-        "SEEKR_CHAIN_CONTROLLER_JOB_UID": "uid-123",
     }
 
     call_count = [0]
@@ -371,6 +371,16 @@ def _run_main(
     mock_watch_cls.return_value = mock_watch_instance
 
     mock_k8s = MagicMock()
+
+    def _get_namespaced_custom_object_side_effect(*args, **kwargs):
+        # The controller self-reads its own JobSet (by env["SEEKR_CHAIN_CONTROLLER_JOB_NAME"])
+        # once at startup to learn its uid; any other name is a worker JobSet re-GET
+        # inside _jobset_completed_despite_suspend's suspend-vs-completion race check.
+        if kwargs.get("name") == env["SEEKR_CHAIN_CONTROLLER_JOB_NAME"]:
+            return {"metadata": {"uid": "uid-123"}}
+        return {"status": {}, "spec": {"suspend": True}}
+
+    mock_k8s.get_namespaced_custom_object.side_effect = _get_namespaced_custom_object_side_effect
     mock_k8s.create_namespaced_custom_object.return_value = {}
     if existing_jobsets:
         from kubernetes.client.exceptions import ApiException
@@ -385,6 +395,7 @@ def _run_main(
 
     mock_custom_api_cls = MagicMock(return_value=mock_k8s)
     mock_core_v1 = MagicMock()
+    mock_core_v1.list_namespaced_pod.return_value = MagicMock(items=[])
     mock_core_v1_cls = MagicMock(return_value=mock_core_v1)
 
     def _load_manifest_mock(_assets, name):
@@ -421,6 +432,9 @@ def _run_main(
     ):
         result = controller.main()
 
+    if return_mocks:
+        mocks = MagicMock(custom=mock_k8s, core_v1=mock_core_v1)
+        return result, mocks
     return result
 
 
@@ -516,7 +530,10 @@ class TestMainDiamondDag:
 
 class TestMainCancellation:
     def test_single_step_cancelled_exits(self):
-        """A JobSet suspended (chain cancel) with no terminalState must not hang."""
+        """A JobSet suspended (chain cancel) with no terminalState must not hang.
+        Exits 1 — the controller self-suspends and self-patches the CANCELLED
+        annotation onto its own JobSet, which is what lets the status layer
+        surface TERMINATED instead of FAILED."""
         dag = [{"name": "a", "depends_on": []}]
         events = [
             [_make_event("a-js", terminal=None, rv="2", suspend=True)],
@@ -554,6 +571,122 @@ class TestMainCancellation:
         ]
         assert _run_main(dag, events) == 1
 
+    def test_cancelled_marks_controller_terminal_state(self):
+        """A genuine cancellation must self-patch the CANCELLED annotation onto
+        the controller's own JobSet and self-suspend it, then exit 1 — the
+        annotation is what lets the status layer surface TERMINATED instead of
+        FAILED, and the suspend is what stops a replacement controller pod
+        from spawning."""
+        dag = [{"name": "a", "depends_on": []}]
+        events = [
+            [_make_event("a-js", terminal=None, rv="2", suspend=True)],
+        ]
+        result, mocks = _run_main(dag, events, return_mocks=True)
+        assert result == 1
+        assert mocks.custom.patch_namespaced_custom_object.call_count == 2
+        bodies = [kwargs["body"] for _, kwargs in mocks.custom.patch_namespaced_custom_object.call_args_list]
+        names = [kwargs["name"] for _, kwargs in mocks.custom.patch_namespaced_custom_object.call_args_list]
+        assert names == ["wf-abc", "wf-abc"]
+        assert any(
+            b.get("metadata", {}).get("annotations", {}).get("seekr-chain/terminal-state") == "CANCELLED"
+            for b in bodies
+        )
+        assert any(b.get("spec", {}).get("suspend") is True for b in bodies)
+
+    def test_suspend_after_completion_is_success_not_cancel(self):
+        """The suspend event can arrive before the JobSet's terminalState is
+        reconciled if chain cancel patches spec.suspend=true just after the
+        step's pods already exited 0. The controller must re-check pod phases
+        and record SUCCEEDED rather than wrongly cancelling a step that
+        actually finished — and must not self-patch a CANCELLED annotation."""
+        dag = [{"name": "a", "depends_on": []}]
+        events = [
+            [_make_event("a-js", terminal=None, rv="2", suspend=True)],
+        ]
+        with patch.object(
+            controller,
+            "_jobset_completed_despite_suspend",
+            return_value="Completed",
+        ):
+            result, mocks = _run_main(dag, events, return_mocks=True)
+        assert result == 0
+        mocks.custom.patch_namespaced_custom_object.assert_not_called()
+
+
+def _pod(phase: str):
+    p = MagicMock()
+    p.status.phase = phase
+    return p
+
+
+class TestJobsetCompletedDespiteSuspend:
+    def _call(self, jobset_status, pod_phases):
+        custom = MagicMock()
+        custom.get_namespaced_custom_object.return_value = {"status": jobset_status, "spec": {"suspend": True}}
+        core_v1 = MagicMock()
+        core_v1.list_namespaced_pod.return_value = MagicMock(items=[_pod(p) for p in pod_phases])
+        return controller._jobset_completed_despite_suspend(custom, core_v1, "ns", "wf", "a", "a-js")
+
+    def test_fresh_terminalstate_completed_wins(self):
+        assert self._call({"terminalState": "Completed"}, []) == "Completed"
+
+    def test_fresh_terminalstate_failed_wins(self):
+        assert self._call({"terminalState": "Failed"}, []) == "Failed"
+
+    def test_all_pods_succeeded_is_completed(self):
+        assert self._call({}, ["Succeeded", "Succeeded"]) == "Completed"
+
+    def test_no_pods_is_none(self):
+        assert self._call({}, []) is None
+
+    def test_running_pod_is_none(self):
+        assert self._call({}, ["Succeeded", "Running"]) is None
+
+    def test_failed_pod_without_active_is_failed(self):
+        assert self._call({}, ["Failed"]) == "Failed"
+
+    def test_failed_pod_with_running_is_none(self):
+        assert self._call({}, ["Failed", "Running"]) is None
+
+    def test_jobset_get_error_falls_back_to_pods(self):
+        from kubernetes.client.exceptions import ApiException
+
+        custom = MagicMock()
+        custom.get_namespaced_custom_object.side_effect = ApiException(status=500)
+        core_v1 = MagicMock()
+        core_v1.list_namespaced_pod.return_value = MagicMock(items=[_pod("Succeeded")])
+        assert controller._jobset_completed_despite_suspend(custom, core_v1, "ns", "wf", "a", "a-js") == "Completed"
+
+
+class TestMarkControllerTerminalState:
+    def test_patches_jobset_annotation(self):
+        custom = MagicMock()
+        controller._mark_controller_terminal_state(custom, "ns", "wf-abc", "CANCELLED")
+        _, kwargs = custom.patch_namespaced_custom_object.call_args
+        assert kwargs["name"] == "wf-abc"
+        assert kwargs["namespace"] == "ns"
+        assert kwargs["body"]["metadata"]["annotations"]["seekr-chain/terminal-state"] == "CANCELLED"
+
+    def test_best_effort_swallows_errors(self):
+        custom = MagicMock()
+        custom.patch_namespaced_custom_object.side_effect = RuntimeError("403 Forbidden")
+        controller._mark_controller_terminal_state(custom, "ns", "wf-abc", "CANCELLED")
+
+
+class TestSuspendSelf:
+    def test_patches_jobset_suspend(self):
+        custom = MagicMock()
+        controller._suspend_self(custom, "ns", "wf-abc")
+        _, kwargs = custom.patch_namespaced_custom_object.call_args
+        assert kwargs["name"] == "wf-abc"
+        assert kwargs["namespace"] == "ns"
+        assert kwargs["body"]["spec"]["suspend"] is True
+
+    def test_best_effort_swallows_errors(self):
+        custom = MagicMock()
+        custom.patch_namespaced_custom_object.side_effect = RuntimeError("403 Forbidden")
+        controller._suspend_self(custom, "ns", "wf-abc")
+
 
 class TestMainWatchReconnect:
     def test_reconnects_after_generic_exception(self):
@@ -574,13 +707,13 @@ class TestMainWatchReconnect:
         mock_watch_cls.return_value = mock_watch_instance
 
         mock_k8s = MagicMock()
+        mock_k8s.get_namespaced_custom_object.return_value = {"metadata": {"uid": "uid-123"}}
         mock_k8s.create_namespaced_custom_object.return_value = {}
 
         env = {
             "SEEKR_CHAIN_JOB_ASSET_PATH": "/assets",
             "SEEKR_CHAIN_NAMESPACE": "ns",
             "SEEKR_CHAIN_CONTROLLER_JOB_NAME": "wf-abc",
-            "SEEKR_CHAIN_CONTROLLER_JOB_UID": "uid-123",
         }
 
         dag = [{"name": "a", "depends_on": []}]
@@ -628,13 +761,13 @@ class TestMainWatchReconnect:
         mock_watch_cls.return_value = mock_watch_instance
 
         mock_k8s = MagicMock()
+        mock_k8s.get_namespaced_custom_object.return_value = {"metadata": {"uid": "uid-123"}}
         mock_k8s.create_namespaced_custom_object.return_value = {}
 
         env = {
             "SEEKR_CHAIN_JOB_ASSET_PATH": "/assets",
             "SEEKR_CHAIN_NAMESPACE": "ns",
             "SEEKR_CHAIN_CONTROLLER_JOB_NAME": "wf-abc",
-            "SEEKR_CHAIN_CONTROLLER_JOB_UID": "uid-123",
         }
 
         dag = [{"name": "a", "depends_on": []}]
@@ -711,13 +844,13 @@ class TestMainControllerRetry:
         ]
 
         mock_custom = MagicMock()
+        mock_custom.get_namespaced_custom_object.return_value = {"metadata": {"uid": "uid-123"}}
         mock_custom.create_namespaced_custom_object.return_value = {}
 
         env = {
             "SEEKR_CHAIN_JOB_ASSET_PATH": "/assets",
             "SEEKR_CHAIN_NAMESPACE": "ns",
             "SEEKR_CHAIN_CONTROLLER_JOB_NAME": "wf-abc",
-            "SEEKR_CHAIN_CONTROLLER_JOB_UID": "uid-123",
         }
 
         call_count = [0]
@@ -784,13 +917,13 @@ class TestWatchTimeout:
         mock_watch_cls.return_value = mock_watch_instance
 
         mock_k8s = MagicMock()
+        mock_k8s.get_namespaced_custom_object.return_value = {"metadata": {"uid": "uid-123"}}
         mock_k8s.create_namespaced_custom_object.return_value = {}
 
         env = {
             "SEEKR_CHAIN_JOB_ASSET_PATH": "/assets",
             "SEEKR_CHAIN_NAMESPACE": "ns",
             "SEEKR_CHAIN_CONTROLLER_JOB_NAME": "wf-abc",
-            "SEEKR_CHAIN_CONTROLLER_JOB_UID": "uid-123",
         }
 
         with (
@@ -826,6 +959,7 @@ class TestTransientSubmitRetry:
 
         call_count = [0]
         mock_k8s = MagicMock()
+        mock_k8s.get_namespaced_custom_object.return_value = {"metadata": {"uid": "uid-123"}}
 
         def _create_side_effect(*args, **kwargs):
             call_count[0] += 1
@@ -858,7 +992,6 @@ class TestTransientSubmitRetry:
             "SEEKR_CHAIN_JOB_ASSET_PATH": "/assets",
             "SEEKR_CHAIN_NAMESPACE": "ns",
             "SEEKR_CHAIN_CONTROLLER_JOB_NAME": "wf-abc",
-            "SEEKR_CHAIN_CONTROLLER_JOB_UID": "uid-123",
         }
 
         with (

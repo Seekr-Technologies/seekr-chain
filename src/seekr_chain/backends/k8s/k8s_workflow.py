@@ -28,6 +28,7 @@ from seekr_chain.backends.k8s.workflow_state import (
     first_running_or_finished_pod,
     get_workflow_job_status,
     get_workflow_state,
+    read_controller_jobset,
 )
 from seekr_chain.constants import LOCAL_LOG_PATH
 from seekr_chain.live import maybe_live
@@ -114,7 +115,6 @@ class K8sWorkflow(Workflow):
         self._s3_client = s3_client
 
         self._k8s_v1 = k8s_utils.get_core_v1_api()
-        self._k8s_batch = k8s.client.BatchV1Api()
         self._k8s_custom = k8s_utils.get_custom_objects_api()
 
         if namespace is None:
@@ -122,16 +122,14 @@ class K8sWorkflow(Workflow):
             namespace = active_ctx["context"].get("namespace", "default")
         self._namespace = namespace
 
-        # Read datastore_root from the controller Job annotation. All other
+        # Read datastore_root from the controller JobSet annotation. All other
         # workflow-level metadata (name, status, timing, step count) is
         # populated on each ``WorkflowState`` snapshot rather than cached here.
+        controller_jobset = read_controller_jobset(self._k8s_custom, self._namespace, self._id)
         datastore_root = None
-        try:
-            job = self._k8s_batch.read_namespaced_job(name=self._id, namespace=self._namespace)
-            datastore_root = (job.metadata.annotations or {}).get("seekr-chain/datastore-root") or None
-        except ApiException as e:
-            if e.status != 404:
-                raise
+        if controller_jobset is not None:
+            annotations = controller_jobset.get("metadata", {}).get("annotations", {}) or {}
+            datastore_root = annotations.get("seekr-chain/datastore-root") or None
         self._job_info: JobInfo = get_job_info(self._id, datastore_root=datastore_root)
 
     @property
@@ -153,28 +151,28 @@ class K8sWorkflow(Workflow):
         return parse_logs(local_log_path, timestamps)
 
     def get_status(self) -> WorkflowStatus:
-        status, _ = get_workflow_job_status(self._k8s_batch, self._namespace, self._id)
+        status, _ = get_workflow_job_status(self._k8s_custom, self._namespace, self._id)
         return status
 
     def watch_controller_status(self):
-        """Yield WorkflowStatus on each change by watching only the controller Job.
+        """Yield WorkflowStatus on each change by watching only the controller JobSet.
 
         Deliberately separate from workflow_state_watcher() (see watched_state.py),
-        which watches the controller Job *and* JobSets *and* Pods to build a
-        full per-step/pod WorkflowState for the live follow()/attach() display.
-        This method only needs the controller Job's own status, and wait()
-        may be watching many jobs concurrently — one lightweight Job-only
+        which watches the controller JobSet *and* worker JobSets *and* Pods to
+        build a full per-step/pod WorkflowState for the live follow()/attach()
+        display. This method only needs the controller JobSet's own status,
+        and wait() may be watching many jobs concurrently — one lightweight
         watch per job keeps that cheap rather than paying for 3x the watches
         and list calls per job. Built on controller_status_watcher(), which
         shares its reconnect/backoff bookkeeping with workflow_state_watcher().
         """
         try:
-            with controller_status_watcher(self._k8s_batch, self._namespace, self._id) as watcher:
+            with controller_status_watcher(self._k8s_custom, self._namespace, self._id) as watcher:
                 last_status = None
                 status = watcher.wait_for_first()
                 while True:
                     if status is None:
-                        # Controller Job is gone — end the stream so callers
+                        # Controller JobSet is gone — end the stream so callers
                         # (e.g. wait._watch_to_completion) fall through to
                         # their get_status()-based fallback instead of hanging.
                         return
@@ -190,14 +188,14 @@ class K8sWorkflow(Workflow):
             raise
 
     def get_detailed_state(self) -> WorkflowState:
-        return get_workflow_state(self._k8s_custom, self._k8s_v1, self._k8s_batch, self._namespace, self._id)
+        return get_workflow_state(self._k8s_custom, self._k8s_v1, self._namespace, self._id)
 
     def format_state(self, workflow_state: WorkflowState) -> str:
         """Plain-text tabular rendering for CLI use."""
         return format_plain(workflow_state)
 
     def delete(self):
-        """Delete the controller Job, all worker JobSets, and the Secret."""
+        """Delete the controller JobSet, all worker JobSets, and the Secret."""
         # 1. Delete worker JobSets
         try:
             self._k8s_custom.delete_collection_namespaced_custom_object(
@@ -210,16 +208,19 @@ class K8sWorkflow(Workflow):
         except ApiException as e:
             logger.warning(f"Failed to delete JobSets for {self._id}: {e}")
 
-        # 2. Delete controller Job (propagate=Background cascades to the Job's pod)
+        # 2. Delete controller JobSet (propagate=Background cascades to its pod)
         try:
-            self._k8s_batch.delete_namespaced_job(
-                name=self._id,
+            self._k8s_custom.delete_namespaced_custom_object(
+                group="jobset.x-k8s.io",
+                version="v1alpha2",
+                plural="jobsets",
                 namespace=self._namespace,
+                name=self._id,
                 body=k8s.client.V1DeleteOptions(propagation_policy="Background"),
             )
         except ApiException as e:
             if e.status != 404:
-                logger.warning(f"Failed to delete Job {self._id}: {e}")
+                logger.warning(f"Failed to delete controller JobSet {self._id}: {e}")
 
         # 3. Delete the Secret
         try:
@@ -236,7 +237,7 @@ class K8sWorkflow(Workflow):
                 version="v1alpha2",
                 plural="jobsets",
                 namespace=self._namespace,
-                label_selector=f"seekr-chain/job-id={self._id}",
+                label_selector=f"seekr-chain/job-id={self._id},seekr-chain/is-controller!=true",
             ).get("items", [])
         except ApiException as e:
             logger.warning(f"Failed to list JobSets for {self._id}: {e}")
@@ -263,9 +264,7 @@ class K8sWorkflow(Workflow):
 
         try:
             with (
-                workflow_state_watcher(
-                    self._k8s_custom, self._k8s_v1, self._k8s_batch, self._namespace, self._id
-                ) as watcher,
+                workflow_state_watcher(self._k8s_custom, self._k8s_v1, self._namespace, self._id) as watcher,
                 maybe_live(plain=plain, console=console, refresh_per_second=4, transient=False) as live,
             ):
                 workflow_state = watcher.wait_for_first()
@@ -292,7 +291,7 @@ class K8sWorkflow(Workflow):
                                         )
                                     )
 
-                    # Wake up as soon as any watched resource (Job/JobSet/Pod) changes,
+                    # Wake up as soon as any watched resource (JobSet/Pod) changes,
                     # falling back to a 1 s timeout in case a change was missed.
                     watcher.wait_for_update(timeout=1.0)
                     workflow_state = watcher.latest()
@@ -314,9 +313,7 @@ class K8sWorkflow(Workflow):
         plain = False
         try:
             with (
-                workflow_state_watcher(
-                    self._k8s_custom, self._k8s_v1, self._k8s_batch, self._namespace, self._id
-                ) as watcher,
+                workflow_state_watcher(self._k8s_custom, self._k8s_v1, self._namespace, self._id) as watcher,
                 maybe_live(plain=plain, console=console, refresh_per_second=4, transient=False) as live,
             ):
                 workflow_state = watcher.wait_for_first()

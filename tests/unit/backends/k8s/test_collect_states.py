@@ -696,12 +696,12 @@ class TestListJobsets:
 # ---------------------------------------------------------------------------
 
 
-class _FakeBatchApi:
+class _FakeCustomStatusApi:
     def __init__(self, response=None, exc=None):
         self._response = response
         self._exc = exc
 
-    def read_namespaced_job_status(self, **kwargs):
+    def get_namespaced_custom_object_status(self, **kwargs):
         if self._exc:
             raise self._exc
         return self._response
@@ -709,22 +709,20 @@ class _FakeBatchApi:
 
 class TestGetWorkflowJobStatus:
     def test_404_returns_unknown(self):
-        """After ttlSecondsAfterFinished deletes the Job, status should be UNKNOWN."""
-        api = _FakeBatchApi(exc=ApiException(status=404))
+        """After ttlSecondsAfterFinished deletes the JobSet, status should be UNKNOWN."""
+        api = _FakeCustomStatusApi(exc=ApiException(status=404))
         status, dt = get_workflow_job_status(api, "ns", "wf-abc")
         assert status == WorkflowStatus.UNKNOWN
         assert dt is None
 
     def test_non_404_api_exception_raises(self):
-        api = _FakeBatchApi(exc=ApiException(status=403))
+        api = _FakeCustomStatusApi(exc=ApiException(status=403))
         with pytest.raises(ApiException):
             get_workflow_job_status(api, "ns", "wf-abc")
 
     def test_running_job(self):
-        from types import SimpleNamespace
-
-        job = SimpleNamespace(status=SimpleNamespace(succeeded=0, failed=0, active=1, completion_time=None))
-        api = _FakeBatchApi(response=job)
+        jobset = {"status": {"replicatedJobsStatus": [{"active": 1}]}}
+        api = _FakeCustomStatusApi(response=jobset)
         status, dt = get_workflow_job_status(api, "ns", "wf-abc")
         assert status == WorkflowStatus.RUNNING
         assert dt is None

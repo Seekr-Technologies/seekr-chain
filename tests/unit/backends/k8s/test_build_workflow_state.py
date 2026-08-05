@@ -1,33 +1,28 @@
 """
-Unit tests for build_workflow_state() — the pure Job/JobSet/Pod -> WorkflowState
-tree-builder shared by get_workflow_state() and workflow_state_watcher().
+Unit tests for build_workflow_state() — the pure controller-JobSet/worker-JobSet/Pod
+-> WorkflowState tree-builder shared by get_workflow_state() and workflow_state_watcher().
 
-Uses types.SimpleNamespace to build minimal fake K8s objects, mirroring
-test_collect_states.py's fixture style.
+Uses types.SimpleNamespace to build minimal fake K8s pod objects, mirroring
+test_collect_states.py's fixture style. The controller JobSet is dict-shaped,
+matching the real CustomObjectsApi response shape.
 """
 
 from dataclasses import asdict
 from types import SimpleNamespace
 
-from seekr_chain.backends.k8s.workflow_state import build_workflow_state
+from seekr_chain.backends.k8s.workflow_state import (
+    build_workflow_state,
+    controller_jobset_status_and_completion,
+)
 from seekr_chain.status import PodStatus, WorkflowStatus
 
 
-def _job(succeeded=0, failed=0, active=0, start_time=None, completion_time=None, labels=None, annotations=None):
-    return SimpleNamespace(
-        metadata=SimpleNamespace(
-            labels=labels or {},
-            annotations=annotations or {},
-            creation_timestamp=None,
-        ),
-        status=SimpleNamespace(
-            succeeded=succeeded,
-            failed=failed,
-            active=active,
-            start_time=start_time,
-            completion_time=completion_time,
-        ),
-    )
+def _controller_jobset(active=0, labels=None, annotations=None):
+    replicated_status = [{"active": active}] if active else []
+    return {
+        "metadata": {"labels": labels or {}, "annotations": annotations or {}},
+        "status": {"replicatedJobsStatus": replicated_status},
+    }
 
 
 def _jobset(name, step_name, suspend=False):
@@ -67,7 +62,7 @@ def _state_dict(state):
 
 
 def test_build_workflow_state_with_no_job_is_unknown():
-    state = build_workflow_state("wf-1", job=None, jobsets=[], pods=[])
+    state = build_workflow_state("wf-1", controller_jobset=None, jobsets=[], pods=[])
     assert _state_dict(state) == {
         "id": "wf-1",
         "name": None,
@@ -80,12 +75,12 @@ def test_build_workflow_state_with_no_job_is_unknown():
 
 
 def test_build_workflow_state_reads_job_metadata():
-    job = _job(
+    controller_jobset = _controller_jobset(
         active=1,
         labels={"seekr-chain/job-name": "my-job"},
         annotations={"seekr-chain/step-count": "2"},
     )
-    state = build_workflow_state("wf-1", job=job, jobsets=[], pods=[])
+    state = build_workflow_state("wf-1", controller_jobset=controller_jobset, jobsets=[], pods=[])
     assert _state_dict(state) == {
         "id": "wf-1",
         "name": "my-job",
@@ -98,14 +93,14 @@ def test_build_workflow_state_reads_job_metadata():
 
 
 def test_build_workflow_state_groups_jobsets_and_pods_by_step():
-    job = _job(active=1)
+    controller_jobset = _controller_jobset(active=1)
     jobsets = [_jobset("wf-1-step-a", "step-a"), _jobset("wf-1-step-b", "step-b")]
     pods = [
         _pod("wf-1-step-a-0", "step-a", role="worker"),
         _pod("wf-1-step-a-1", "step-a", role="worker"),
         _pod("wf-1-step-b-0", "step-b", role=None),
     ]
-    state = build_workflow_state("wf-1", job=job, jobsets=jobsets, pods=pods)
+    state = build_workflow_state("wf-1", controller_jobset=controller_jobset, jobsets=jobsets, pods=pods)
 
     steps_by_name = {s.name: s for s in state.steps}
     assert set(steps_by_name) == {"step-a", "step-b"}
@@ -121,10 +116,52 @@ def test_build_workflow_state_groups_jobsets_and_pods_by_step():
 
 
 def test_build_workflow_state_step_with_no_pods_still_appears():
-    job = _job(active=0)
+    controller_jobset = _controller_jobset(active=0)
     jobsets = [_jobset("wf-1-step-a", "step-a", suspend=True)]
-    state = build_workflow_state("wf-1", job=job, jobsets=jobsets, pods=[])
+    state = build_workflow_state("wf-1", controller_jobset=controller_jobset, jobsets=jobsets, pods=[])
     assert len(state.steps) == 1
     assert state.steps[0].name == "step-a"
     assert state.steps[0].roles == []
     assert state.steps[0].pod.status == PodStatus.PENDING
+
+
+class TestControllerJobsetTerminalStateMapping:
+    def _jobset(self, terminal_state, annotations=None, suspend=False):
+        return {
+            "metadata": {"annotations": annotations or {}},
+            "spec": {"suspend": suspend},
+            "status": {"terminalState": terminal_state} if terminal_state else {"replicatedJobsStatus": []},
+        }
+
+    def test_suspended_with_cancelled_annotation_is_terminated(self):
+        jobset = self._jobset(None, annotations={"seekr-chain/terminal-state": "CANCELLED"}, suspend=True)
+        status, _ = controller_jobset_status_and_completion(jobset)
+        assert status == WorkflowStatus.TERMINATED
+
+    def test_suspended_with_cancelled_annotation_and_terminal_state_is_terminated(self):
+        jobset = self._jobset("Failed", annotations={"seekr-chain/terminal-state": "CANCELLED"}, suspend=True)
+        status, _ = controller_jobset_status_and_completion(jobset)
+        assert status == WorkflowStatus.TERMINATED
+
+    def test_completed_without_annotation_is_succeeded(self):
+        status, _ = controller_jobset_status_and_completion(self._jobset("Completed"))
+        assert status == WorkflowStatus.SUCCEEDED
+
+    def test_completed_with_cancelled_annotation_is_terminated(self):
+        jobset = self._jobset("Completed", annotations={"seekr-chain/terminal-state": "CANCELLED"})
+        status, _ = controller_jobset_status_and_completion(jobset)
+        assert status == WorkflowStatus.TERMINATED
+
+    def test_completed_with_other_annotation_value_is_succeeded(self):
+        jobset = self._jobset("Completed", annotations={"seekr-chain/terminal-state": "SOMETHING_ELSE"})
+        status, _ = controller_jobset_status_and_completion(jobset)
+        assert status == WorkflowStatus.SUCCEEDED
+
+    def test_failed_ignores_cancelled_annotation(self):
+        jobset = self._jobset("Failed", annotations={"seekr-chain/terminal-state": "CANCELLED"})
+        status, _ = controller_jobset_status_and_completion(jobset)
+        assert status == WorkflowStatus.FAILED
+
+    def test_no_terminal_state_no_active_is_pending(self):
+        status, _ = controller_jobset_status_and_completion(self._jobset(None))
+        assert status == WorkflowStatus.PENDING

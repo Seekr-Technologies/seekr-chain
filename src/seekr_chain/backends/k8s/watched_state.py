@@ -7,11 +7,11 @@ Watch API streams feeding a shared in-memory cache.
 described by a ``WatchSpec``) and projects their caches into a snapshot via a
 ``project`` callback. Two factory functions configure it for the two use
 cases in this codebase: ``workflow_state_watcher()`` watches the controller
-Job *and* JobSets *and* Pods to build a full per-step/pod ``WorkflowState``
-for ``K8sWorkflow.follow()``/``attach()``; ``controller_status_watcher()``
-watches only the controller Job to back ``K8sWorkflow.watch_controller_status()``
-(used by ``wait()``, which may be watching many jobs concurrently and only
-needs the overall status).
+JobSet *and* worker JobSets *and* Pods to build a full per-step/pod
+``WorkflowState`` for ``K8sWorkflow.follow()``/``attach()``;
+``controller_status_watcher()`` watches only the controller JobSet to back
+``K8sWorkflow.watch_controller_status()`` (used by ``wait()``, which may be
+watching many jobs concurrently and only needs the overall status).
 
 Uses the standard Kubernetes "list-then-watch" pattern: one synchronous
 fetch to seed the cache and capture each resource's resourceVersion, then
@@ -35,10 +35,10 @@ from rich.console import Console
 from seekr_chain.backends.k8s.workflow_state import (
     WorkflowState,
     build_workflow_state,
-    job_status_and_completion,
+    controller_jobset_status_and_completion,
     list_jobsets,
     list_pods,
-    read_workflow_job,
+    read_controller_jobset,
 )
 from seekr_chain.status import WorkflowStatus
 
@@ -152,7 +152,7 @@ class WatchSpec:
 
     kind: str  # "job" | "jobsets" | "pods" — also the cache key and failure-tracking key
     seed: Callable[[], tuple[list, str]]  # synchronous list/read -> (objects, resourceVersion)
-    list_fn: Callable  # the streaming watch call, e.g. k8s_batch.list_namespaced_job
+    list_fn: Callable  # the streaming watch call, e.g. k8s_custom.list_namespaced_custom_object
     list_kwargs: dict  # selector kwargs for the stream (NOT timeout/resource_version — added per-attempt)
     key: Callable[[object], str]  # event object -> cache key (name)
     rv: Callable[[object], object]  # event object -> resourceVersion (falsy -> ignored)
@@ -174,30 +174,32 @@ def _dict_rv(obj):
     return obj.get("metadata", {}).get("resourceVersion")
 
 
-def _seed_controller_job(k8s_batch, namespace, workflow_id) -> tuple[list, str]:
-    """Seed the job cache from a single read, not a list.
+def _seed_controller_jobset(k8s_custom, namespace, workflow_id) -> tuple[list, str]:
+    """Seed the controller-JobSet cache from a single read, not a list.
 
-    Presented as a 0-or-1-element list so the controller Job is driven by the
-    same generic list-then-watch machinery as JobSets/Pods, without changing
-    the underlying ``read_workflow_job()`` 404-means-gone semantics that
-    ``watch_controller_status()`` depends on.
+    Presented as a 0-or-1-element list so the controller JobSet is driven by
+    the same generic list-then-watch machinery as worker JobSets/Pods,
+    without changing the underlying ``read_controller_jobset()``
+    404-means-gone semantics that ``watch_controller_status()`` depends on.
     """
-    job = read_workflow_job(k8s_batch, namespace, workflow_id)
-    if job is None:
+    jobset = read_controller_jobset(k8s_custom, namespace, workflow_id)
+    if jobset is None:
         return [], ""
-    return [job], job.metadata.resource_version
+    return [jobset], jobset.get("metadata", {}).get("resourceVersion", "")
 
 
 def _project_workflow_state(workflow_id, caches) -> WorkflowState:
-    job = next(iter(caches["job"].values()), None)
-    return build_workflow_state(workflow_id, job, list(caches["jobsets"].values()), list(caches["pods"].values()))
+    controller_jobset = next(iter(caches["job"].values()), None)
+    return build_workflow_state(
+        workflow_id, controller_jobset, list(caches["jobsets"].values()), list(caches["pods"].values())
+    )
 
 
 def _project_controller_status(caches) -> Optional[WorkflowStatus]:
-    job = next(iter(caches["job"].values()), None)
-    if job is None:
+    controller_jobset = next(iter(caches["job"].values()), None)
+    if controller_jobset is None:
         return None
-    return job_status_and_completion(job)[0]
+    return controller_jobset_status_and_completion(controller_jobset)[0]
 
 
 class ReconnectingWatcher:
@@ -212,7 +214,7 @@ class ReconnectingWatcher:
 
     Usage::
 
-        with workflow_state_watcher(k8s_custom, k8s_v1, k8s_batch, namespace, workflow_id) as w:
+        with workflow_state_watcher(k8s_custom, k8s_v1, namespace, workflow_id) as w:
             state = w.wait_for_first()
             while not state.status.is_finished():
                 render(state)
@@ -481,31 +483,36 @@ class ReconnectingWatcher:
                 self._stop.wait(delay)
 
 
-def _job_spec(k8s_batch, namespace, workflow_id) -> WatchSpec:
+def _controller_jobset_spec(k8s_custom, namespace, workflow_id) -> WatchSpec:
     return WatchSpec(
         kind="job",
-        seed=functools.partial(_seed_controller_job, k8s_batch, namespace, workflow_id),
-        list_fn=k8s_batch.list_namespaced_job,
-        list_kwargs=dict(namespace=namespace, field_selector=f"metadata.name={workflow_id}"),
-        key=_v1_name,
-        rv=_v1_rv,
+        seed=functools.partial(_seed_controller_jobset, k8s_custom, namespace, workflow_id),
+        list_fn=k8s_custom.list_namespaced_custom_object,
+        list_kwargs=dict(
+            group="jobset.x-k8s.io",
+            version="v1alpha2",
+            plural="jobsets",
+            namespace=namespace,
+            label_selector=f"seekr-chain/job-id={workflow_id},seekr-chain/is-controller=true",
+        ),
+        key=_dict_name,
+        rv=_dict_rv,
     )
 
 
 def workflow_state_watcher(
     k8s_custom,
     k8s_v1,
-    k8s_batch,
     namespace: str,
     workflow_id: str,
     max_attempts: int = _WATCH_MAX_ATTEMPTS,
 ) -> ReconnectingWatcher:
     """Build a ``ReconnectingWatcher`` that maintains a live ``WorkflowState``
-    for ``K8sWorkflow.follow()``/``attach()`` by watching the controller Job,
-    JobSets, and worker Pods.
+    for ``K8sWorkflow.follow()``/``attach()`` by watching the controller
+    JobSet, worker JobSets, and worker Pods.
     """
     specs = [
-        _job_spec(k8s_batch, namespace, workflow_id),
+        _controller_jobset_spec(k8s_custom, namespace, workflow_id),
         WatchSpec(
             kind="jobsets",
             seed=functools.partial(list_jobsets, k8s_custom, namespace, workflow_id),
@@ -541,24 +548,24 @@ def workflow_state_watcher(
 
 
 def controller_status_watcher(
-    k8s_batch,
+    k8s_custom,
     namespace: str,
     workflow_id: str,
     max_attempts: int = _WATCH_MAX_ATTEMPTS,
 ) -> ReconnectingWatcher:
     """Build a ``ReconnectingWatcher`` that maintains a live ``WorkflowStatus``
     for ``K8sWorkflow.watch_controller_status()`` by watching only the
-    controller Job.
+    controller JobSet.
 
     Deliberately lighter than ``workflow_state_watcher()``:
     ``watch_controller_status()`` (used by ``wait()``, which may be watching
-    many jobs concurrently) only needs the controller Job's own status, not a
-    full per-step/pod ``WorkflowState`` — one watch here instead of three
-    keeps that cheap.
+    many jobs concurrently) only needs the controller JobSet's own status,
+    not a full per-step/pod ``WorkflowState`` — one watch here instead of
+    three keeps that cheap.
     """
     return ReconnectingWatcher(
         label=workflow_id,
-        specs=[_job_spec(k8s_batch, namespace, workflow_id)],
+        specs=[_controller_jobset_spec(k8s_custom, namespace, workflow_id)],
         project=_project_controller_status,
         max_attempts=max_attempts,
     )

@@ -24,9 +24,9 @@ Reliability features:
 Required environment variables:
     SEEKR_CHAIN_JOB_ASSET_PATH        Path where assets were extracted (e.g. /seekr-chain/assets)
     SEEKR_CHAIN_NAMESPACE             Kubernetes namespace for JobSets
-    SEEKR_CHAIN_CONTROLLER_JOB_NAME   Name of this controller Job (for ownerReferences)
-    SEEKR_CHAIN_CONTROLLER_JOB_UID    UID of this controller Job (injected via downward API
-                                      from batch.kubernetes.io/controller-uid pod label)
+    SEEKR_CHAIN_CONTROLLER_JOB_NAME   Name of this controller JobSet (for ownerReferences; its UID
+                                      is self-read at startup via the Kubernetes API, since the
+                                      JobSet has no downward-API-exposed pod label for it)
 
 Only depends on: Python stdlib + kubernetes + pyyaml
 """
@@ -167,8 +167,8 @@ def _emit_event(
                     "namespace": namespace,
                 },
                 "involvedObject": {
-                    "apiVersion": "batch/v1",
-                    "kind": "Job",
+                    "apiVersion": "jobset.x-k8s.io/v1alpha2",
+                    "kind": "JobSet",
                     "name": workflow_id,
                     "namespace": namespace,
                     "uid": job_uid,
@@ -184,6 +184,103 @@ def _emit_event(
         )
     except Exception as exc:
         print(f"[controller] warning: could not emit event {reason!r}: {exc}", flush=True)
+
+
+def _jobset_completed_despite_suspend(
+    k8s_custom,
+    k8s_v1,
+    namespace: str,
+    workflow_id: str,
+    step_name: str,
+    js_name: str,
+) -> str | None:
+    """Disambiguate a bare ``suspend=true`` event from a completion the JobSet
+    status hasn't reconciled yet.
+
+    ``chain cancel`` patches ``spec.suspend=true`` on every JobSet. If it fires
+    just after the worker pods exit 0 — before the JobSet controller writes
+    ``status.terminalState`` — the watch delivers the suspend event first and the
+    caller would wrongly record CANCELLED, dropping the real completion. Re-check
+    the authoritative signals: a fresh JobSet GET (the watch event may be stale),
+    then the worker pods' own phases (more reliable than the JobSet status, which
+    is exactly what lags here).
+
+    Returns ``"Completed"`` / ``"Failed"`` if the step actually finished, else
+    ``None`` (a genuine mid-flight cancellation).
+    """
+    try:
+        js = k8s_custom.get_namespaced_custom_object(
+            group="jobset.x-k8s.io",
+            version="v1alpha2",
+            plural="jobsets",
+            namespace=namespace,
+            name=js_name,
+        )
+        terminal = js.get("status", {}).get("terminalState") or None
+        if terminal in ("Completed", "Failed"):
+            return terminal
+    except Exception as exc:
+        print(f"[controller] warning: could not re-read JobSet {js_name!r}: {exc}", flush=True)
+
+    try:
+        pods = k8s_v1.list_namespaced_pod(
+            namespace=namespace,
+            label_selector=f"seekr-chain/job-id={workflow_id},seekr-chain/step={step_name}",
+        ).items
+    except Exception as exc:
+        print(f"[controller] warning: could not list pods for step={step_name!r}: {exc}", flush=True)
+        return None
+
+    phases = [p.status.phase for p in pods]
+    if phases and all(ph == "Succeeded" for ph in phases):
+        return "Completed"
+    if "Failed" in phases and not any(ph in ("Pending", "Running", None) for ph in phases):
+        return "Failed"
+    return None
+
+
+def _mark_controller_terminal_state(k8s_custom, namespace: str, job_name: str, value: str) -> None:
+    """Record the workflow's true terminal state on the controller JobSet as an
+    annotation. Best-effort — never raises.
+
+    The controller exits non-zero on cancellation like any other non-success
+    outcome, so this annotation is what lets the status layer distinguish
+    CANCELLED from a genuine FAILED.
+    """
+    try:
+        k8s_custom.patch_namespaced_custom_object(
+            group="jobset.x-k8s.io",
+            version="v1alpha2",
+            plural="jobsets",
+            name=job_name,
+            namespace=namespace,
+            body={"metadata": {"annotations": {"seekr-chain/terminal-state": value}}},
+        )
+    except Exception as exc:
+        print(f"[controller] warning: could not mark terminal state {value!r}: {exc}", flush=True)
+
+
+def _suspend_self(k8s_custom, namespace: str, job_name: str) -> None:
+    """Suspend the controller's own JobSet. Best-effort — never raises.
+
+    Prevents the JobSet controller from spawning a replacement controller pod
+    after this process exits non-zero on cancellation. Suspend gates pod
+    creation independently of ``backoffLimit``, which is the mechanism we'd
+    otherwise need to zero out — but that field lives on the underlying
+    ``batch/v1`` Job, not the JobSet, and patching it directly would require
+    ``batch/jobs`` RBAC the Argo fallback ServiceAccount doesn't have.
+    """
+    try:
+        k8s_custom.patch_namespaced_custom_object(
+            group="jobset.x-k8s.io",
+            version="v1alpha2",
+            plural="jobsets",
+            name=job_name,
+            namespace=namespace,
+            body={"spec": {"suspend": True}},
+        )
+    except Exception as exc:
+        print(f"[controller] warning: could not suspend self: {exc}", flush=True)
 
 
 def _cascade_fail(dag: list[dict], phases: dict[str, str]) -> None:
@@ -284,14 +381,25 @@ def main() -> int:
     assets_path = os.environ["SEEKR_CHAIN_JOB_ASSET_PATH"]
     namespace = os.environ["SEEKR_CHAIN_NAMESPACE"]
     job_name = os.environ["SEEKR_CHAIN_CONTROLLER_JOB_NAME"]
-    job_uid = os.environ["SEEKR_CHAIN_CONTROLLER_JOB_UID"]
-    workflow_id = job_name  # controller Job name == workflow ID
+    workflow_id = job_name  # controller JobSet name == workflow ID
 
     _touch_heartbeat()
 
     kubernetes.config.load_incluster_config()
     k8s_custom = kubernetes.client.CustomObjectsApi()
     k8s_v1 = kubernetes.client.CoreV1Api()
+
+    # Self-read our own JobSet's UID. There's no downward-API field for a JobSet's
+    # UID (unlike a Job's controller-uid pod label), but jobset.x-k8s.io/jobsets:get
+    # is RBAC every ServiceAccount that can run this controller already has.
+    controller_jobset = k8s_custom.get_namespaced_custom_object(
+        group="jobset.x-k8s.io",
+        version="v1alpha2",
+        plural="jobsets",
+        namespace=namespace,
+        name=job_name,
+    )
+    job_uid = controller_jobset["metadata"]["uid"]
 
     # Load DAG definition from assets
     with open(os.path.join(assets_path, "dag.json")) as f:
@@ -300,13 +408,11 @@ def main() -> int:
     print(f"[controller] loaded DAG with {len(dag)} steps: {[s['name'] for s in dag]}", flush=True)
 
     # ownerReference so JobSets and the phases ConfigMap are cascade-deleted when
-    # this controller Job is deleted.
-    # job_uid comes from the downward API (batch.kubernetes.io/controller-uid label) —
-    # no API call or extra RBAC required.
+    # this controller JobSet is deleted.
     owner_ref = [
         {
-            "apiVersion": "batch/v1",
-            "kind": "Job",
+            "apiVersion": "jobset.x-k8s.io/v1alpha2",
+            "kind": "JobSet",
             "name": job_name,
             "uid": job_uid,
             "blockOwnerDeletion": True,
@@ -410,21 +516,54 @@ def main() -> int:
                             event_type="Warning",
                         )
                     elif suspended:
-                        # Suspended without a terminalState means `chain cancel` (or
-                        # any other spec.suspend=true patch) stopped this JobSet — not
-                        # a normal completion. Treat it as terminal so the DAG loop
-                        # below can exit instead of waiting forever for a
-                        # terminalState that will never arrive.
-                        phases[step_name] = "CANCELLED"
-                        print(f"[controller] step={step_name!r} CANCELLED", flush=True)
-                        _emit_event(
-                            k8s_v1,
-                            namespace,
-                            workflow_id,
-                            job_uid,
-                            "StepCancelled",
-                            f"Step {step_name!r} was cancelled",
+                        # Suspended without a terminalState usually means `chain cancel`
+                        # stopped this JobSet. But the suspend event can also race ahead
+                        # of a completion the JobSet status hasn't reconciled yet — so
+                        # re-check the authoritative signals before committing CANCELLED
+                        # (which is terminal and would drop the later completion event).
+                        actual = _jobset_completed_despite_suspend(
+                            k8s_custom, k8s_v1, namespace, workflow_id, step_name, js_name
                         )
+                        if actual == "Completed":
+                            phases[step_name] = "SUCCEEDED"
+                            print(
+                                f"[controller] step={step_name!r} SUCCEEDED (completed before suspend took effect)",
+                                flush=True,
+                            )
+                            _emit_event(
+                                k8s_v1,
+                                namespace,
+                                workflow_id,
+                                job_uid,
+                                "StepSucceeded",
+                                f"Step {step_name!r} completed successfully",
+                            )
+                        elif actual == "Failed":
+                            phases[step_name] = "FAILED"
+                            print(f"[controller] step={step_name!r} FAILED", flush=True)
+                            _emit_event(
+                                k8s_v1,
+                                namespace,
+                                workflow_id,
+                                job_uid,
+                                "StepFailed",
+                                f"Step {step_name!r} failed",
+                                event_type="Warning",
+                            )
+                        else:
+                            # Genuine mid-flight cancellation. Treat it as terminal so the
+                            # DAG loop below can exit instead of waiting forever for a
+                            # terminalState that will never arrive.
+                            phases[step_name] = "CANCELLED"
+                            print(f"[controller] step={step_name!r} CANCELLED", flush=True)
+                            _emit_event(
+                                k8s_v1,
+                                namespace,
+                                workflow_id,
+                                job_uid,
+                                "StepCancelled",
+                                f"Step {step_name!r} was cancelled",
+                            )
                     else:
                         continue
 
@@ -472,6 +611,12 @@ def main() -> int:
 
     cancelled = [n for n, p in phases.items() if p == "CANCELLED"]
     if cancelled:
+        # Record the true state on the JobSet so the status layer can surface
+        # TERMINATED rather than FAILED, then self-suspend so the JobSet
+        # controller doesn't spawn a replacement controller pod — suspend
+        # gates pod creation regardless of backoffLimit or our exit code.
+        _mark_controller_terminal_state(k8s_custom, namespace, workflow_id, "CANCELLED")
+        _suspend_self(k8s_custom, namespace, workflow_id)
         _emit_event(
             k8s_v1,
             namespace,
