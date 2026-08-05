@@ -237,7 +237,7 @@ class K8sWorkflow(Workflow):
                 version="v1alpha2",
                 plural="jobsets",
                 namespace=self._namespace,
-                label_selector=f"seekr-chain/job-id={self._id}",
+                label_selector=f"seekr-chain/job-id={self._id},seekr-chain/is-controller!=true",
             ).get("items", [])
         except ApiException as e:
             logger.warning(f"Failed to list JobSets for {self._id}: {e}")

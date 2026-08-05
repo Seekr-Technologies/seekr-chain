@@ -152,7 +152,7 @@ class WatchSpec:
 
     kind: str  # "job" | "jobsets" | "pods" — also the cache key and failure-tracking key
     seed: Callable[[], tuple[list, str]]  # synchronous list/read -> (objects, resourceVersion)
-    list_fn: Callable  # the streaming watch call, e.g. k8s_batch.list_namespaced_job
+    list_fn: Callable  # the streaming watch call, e.g. k8s_custom.list_namespaced_custom_object
     list_kwargs: dict  # selector kwargs for the stream (NOT timeout/resource_version — added per-attempt)
     key: Callable[[object], str]  # event object -> cache key (name)
     rv: Callable[[object], object]  # event object -> resourceVersion (falsy -> ignored)
@@ -214,7 +214,7 @@ class ReconnectingWatcher:
 
     Usage::
 
-        with workflow_state_watcher(k8s_custom, k8s_v1, k8s_batch, namespace, workflow_id) as w:
+        with workflow_state_watcher(k8s_custom, k8s_v1, namespace, workflow_id) as w:
             state = w.wait_for_first()
             while not state.status.is_finished():
                 render(state)

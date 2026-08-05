@@ -80,3 +80,40 @@ class TestK8sWorkflowReconnect:
         with no_dotenv(), no_toml_files():
             with pytest.raises(ApiException):
                 self._make_workflow(k8s_status=500)
+
+
+class TestK8sWorkflowCancel:
+    def _make_workflow(self, mock_custom, id="test-id-abc123"):
+        mock_custom.get_namespaced_custom_object.return_value = {"metadata": {"annotations": {}}}
+        with (
+            patch("seekr_chain.backends.k8s.k8s_workflow.k8s_utils") as mock_k8s_utils,
+            patch("seekr_chain.backends.k8s.k8s_workflow.boto3") as mock_boto3,
+            patch("seekr_chain.backends.k8s.k8s_workflow.k8s") as mock_k8s,
+        ):
+            mock_k8s.config.list_kube_config_contexts.return_value = (None, {"context": {"namespace": "argo"}})
+            mock_k8s_utils.get_core_v1_api.return_value = MagicMock()
+            mock_k8s_utils.get_custom_objects_api.return_value = mock_custom
+            mock_boto3.client.return_value = MagicMock()
+            return K8sWorkflow(id=id)
+
+    def test_excludes_controller_jobset_from_suspend(self, monkeypatch):
+        """cancel() must never suspend the controller's own JobSet — the label
+        selector matches worker JobSets only, since suspending the controller
+        pod would kill it before it can cascade-cancel dependents or self-patch
+        the CANCELLED annotation."""
+        monkeypatch.setenv("SEEKRCHAIN_DATASTORE_ROOT", "s3://bucket/")
+        mock_custom = MagicMock()
+        mock_custom.list_namespaced_custom_object.return_value = {
+            "items": [{"metadata": {"name": "test-id-abc123-step-a"}}],
+        }
+        with no_dotenv(), no_toml_files():
+            workflow = self._make_workflow(mock_custom)
+
+        workflow.cancel()
+
+        _, list_kwargs = mock_custom.list_namespaced_custom_object.call_args
+        assert list_kwargs["label_selector"] == "seekr-chain/job-id=test-id-abc123,seekr-chain/is-controller!=true"
+        mock_custom.patch_namespaced_custom_object.assert_called_once()
+        _, patch_kwargs = mock_custom.patch_namespaced_custom_object.call_args
+        assert patch_kwargs["name"] == "test-id-abc123-step-a"
+        assert patch_kwargs["body"] == {"spec": {"suspend": True}}
