@@ -1,3 +1,4 @@
+import os
 from pathlib import Path
 
 import pytest
@@ -636,3 +637,51 @@ class TestCopyFiltered:
 
         assert not (dst / "link.txt").is_symlink()
         assert (dst / "link.txt").read_text() == "real content"
+
+
+def _entered_dirs(root: Path, monkeypatch) -> set[str]:
+    """Record every directory os.walk descends into, relative to root."""
+    entered = set()
+    real_walk = os.walk
+
+    def spy_walk(top, *args, **kwargs):
+        for walk_root, dirs, files in real_walk(top, *args, **kwargs):
+            entered.add(str(Path(walk_root).relative_to(root)))
+            yield walk_root, dirs, files
+
+    monkeypatch.setattr("seekr_chain.symlink.os.walk", spy_walk)
+    return entered
+
+
+class TestTraversalPruning:
+    """Directory-level pruning is a perf optimization the file-tree assertions
+    elsewhere in this file can't catch a regression on - assert directly that
+    unwanted subdirectories are never entered by os.walk."""
+
+    def test_excluded_directory_never_entered(self, tmp_path, monkeypatch):
+        src = tmp_path / "src"
+        dst = tmp_path / "dst"
+        _populate(src, {"keep.py": ["a"], ".venv": {"junk": {"deep.py": ["b"]}}})
+
+        entered = _entered_dirs(src, monkeypatch)
+        copy_filtered(src, dst, include=None, exclude=[".venv"])
+
+        assert not any(d == ".venv" or d.startswith(".venv/") for d in entered)
+        assert _real_tree_to_dict(dst) == {"keep.py": ["a"]}
+
+    def test_non_included_directory_never_entered(self, tmp_path, monkeypatch):
+        src = tmp_path / "src"
+        dst = tmp_path / "dst"
+        _populate(
+            src,
+            {
+                "src": {"top.py": ["c"], "sub": {"main.py": ["a"]}},
+                "notebooks": {"huge": {"data.ipynb": ["b"]}},
+            },
+        )
+
+        entered = _entered_dirs(src, monkeypatch)
+        copy_filtered(src, dst, include=["src/**/*"], exclude=None)
+
+        assert not any(d == "notebooks" or d.startswith("notebooks/") for d in entered)
+        assert _real_tree_to_dict(dst) == {"src": {"top.py": ["c"], "sub": {"main.py": ["a"]}}}

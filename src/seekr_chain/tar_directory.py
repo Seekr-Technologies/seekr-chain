@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 
-import fnmatch
 import os
 import tarfile
 from pathlib import Path
 from typing import List, Optional
+
+from seekr_chain.glob_match import fnmatch_glob
 
 
 def _path_boundary_match(relpath: str, needle: str) -> bool:
@@ -116,19 +117,19 @@ def _matches_patterns(
             # Anchored: match from archive root.
             if anchored:
                 needle = "/" + pat_no_anchor
-                if fnmatch.fnmatch(relpath, needle):
+                if fnmatch_glob(relpath, needle):
                     return True
             else:
                 # Unanchored path pattern: allow it to appear anywhere in the relpath.
                 # We do this by trying boundary placements.
                 needle = "/" + pat_no_anchor
-                if fnmatch.fnmatch(relpath, needle):
+                if fnmatch_glob(relpath, needle):
                     return True
-                if fnmatch.fnmatch(relpath, "*/" + pat_no_anchor):
+                if fnmatch_glob(relpath, "*/" + pat_no_anchor):
                     return True
         else:
             # Name-only: match basename
-            if fnmatch.fnmatch(fname, pat_no_anchor):
+            if fnmatch_glob(fname, pat_no_anchor):
                 return True
 
     return False

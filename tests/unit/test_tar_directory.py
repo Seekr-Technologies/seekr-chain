@@ -185,6 +185,12 @@ class TestTarDirectory:
                 {"src": {"a.py": ["1"]}, "c": {"src": {"b.py": ["2"]}}},
                 id="unanchored-dir-subtree-src",
             ),
+            pytest.param(
+                {"src": {"top.py": ["1"], "sub": {"nested.py": ["2"]}}, "keep": ["ok"]},
+                ["src/**/*"],
+                {"src": {"top.py": ["1"], "sub": {"nested.py": ["2"]}}},
+                id="globstar-matches-zero-and-nested",
+            ),
         ],
     )
     def test_tar_include_only(self, contents, include, expected, tmp_path):

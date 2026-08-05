@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 
+import codecs
 import logging
 import os
 import shutil
@@ -56,8 +57,12 @@ def _spawn_follow_pod_thread(k8s_v1, name, namespace, step_name, role_name, job_
                 _preload_content=False,
                 timestamps=False,
             )
-            for line in stream:
-                print(f"{prefix}{line.decode('utf-8').rstrip()}")
+            decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
+            for chunk in stream:
+                text = decoder.decode(chunk)
+                if text:
+                    for line in text.splitlines():
+                        print(f"{prefix}{line}")
         except Exception as e:
             print(f"[ERROR] Following logs from {name}/{container_name}: {e}")
 
