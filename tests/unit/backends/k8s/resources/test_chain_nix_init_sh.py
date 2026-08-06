@@ -148,7 +148,39 @@ class TestChainNixInit:
 
         assert result.returncode == 0, result.stderr
         assert "chain-nix-init summary" in result.stdout
-        assert "total wall time" in result.stdout
+        assert "chain-nix-init phase timing" in result.stdout
+
+    def test_phase_timing_attributes_every_phase(self, tmp_path):
+        """The banner's own Duration covers only the pull, so a container that
+        takes 8s to move 2s of data looks unexplained. Every phase has to be
+        named and summed, or the gap has nowhere to show up."""
+        result = _run_init(
+            tmp_path,
+            [_make_fake_nix(tmp_path), _make_real_bin_dir(tmp_path, real_du=True)],
+        )
+
+        assert result.returncode == 0, result.stderr
+        for phase in (
+            "bootstrap",
+            "nix.conf setup",
+            "pre-pull store size (du)",
+            "closure pull",
+            "summary stats (nix path-info)",
+            "nix-gc",
+            "TOTAL (kubelet-visible)",
+        ):
+            assert phase in result.stdout, f"{phase!r} missing from phase timing"
+
+    def test_phase_timing_stages_match_the_trap(self, tmp_path):
+        """The trap's stage name and the timing buckets come from one `stage`
+        call each. A phase advanced by assigning STAGE directly would be
+        reported by the trap but never timed."""
+        script = SCRIPT.read_text()
+        # Assignments are legal only inside stage() itself, and for the
+        # within-phase detail the pull loop adds per attempt.
+        allowed = {'STAGE="$1"', 'STAGE="startup"', 'STAGE="closure pull, attempt $i/$COPY_ATTEMPTS"'}
+        found = {line.strip() for line in script.splitlines() if line.strip().startswith("STAGE=")}
+        assert found <= allowed, f"advance phases with `stage <name>`, not: {found - allowed}"
 
     def test_failing_du_does_not_fail_the_pod(self, tmp_path):
         """``du`` only feeds a number in the summary banner -- its exit status
@@ -165,7 +197,7 @@ class TestChainNixInit:
 
         assert result.returncode == 0, result.stderr
         assert "chain-nix-init summary" in result.stdout
-        assert "total wall time" in result.stdout
+        assert "chain-nix-init phase timing" in result.stdout
 
     def test_failing_path_info_does_not_fail_the_pod_but_warns(self, tmp_path):
         """Unlike ``du``, a failing ``nix path-info`` after a successful pull

@@ -49,28 +49,49 @@ NIX_ROOT="${SEEKR_CHAIN_NIX_ROOT:-/nix}"
 NIX_CONF="${SEEKR_CHAIN_NIX_CONF:-/etc/nix/nix.conf}"
 RESOURCE_DIR="${SEEKR_CHAIN_RESOURCE_DIR:-/seekr-chain/resources}"
 
+# Wall-clock accounting: the pull's own "Duration" summary below only
+# brackets run_copy() -- it doesn't cover the bootstrap copy that runs
+# before it, the store-size walks, or nix-gc.sh that runs after, all of
+# which count toward this container's real lifetime as seen by kubelet.
+# The per-phase breakdown printed at the end attributes every second, so
+# a gap between kubelet's container-start/stop timestamps and the pull's
+# own reported Duration is never a mystery.
+SCRIPT_START_TIME=$(date +%s)
+
 # `set -e` exits silently, which in kubectl looks identical to a dozen
-# other failure modes. This trap names the stage instead. Keep STAGE
-# updated as the script advances -- `$LINENO` would be more precise but
-# isn't dependable under busybox ash, which `command: ["/bin/sh"]`
-# resolves to in the runner image.
+# other failure modes. This trap names the stage instead -- `$LINENO`
+# would be more precise but isn't dependable under busybox ash, which
+# `command: ["/bin/sh"]` resolves to in the runner image.
+#
+# Advance phases with `stage <name>`, never by assigning STAGE directly:
+# that keeps the trap's label and the timing breakdown from drifting
+# apart. Assign STAGE on its own only to add detail *within* a phase
+# (the pull loop does this per attempt); the phase is still recorded
+# under the name its `stage` call gave it.
 STAGE="startup"
+STAGE_LABEL="startup"
+STAGE_START=$SCRIPT_START_TIME
+PHASE_TIMES=""
+
+stage() {
+  local now
+  now=$(date +%s)
+  # One "label|seconds" record per line, consumed by awk at the end.
+  PHASE_TIMES="${PHASE_TIMES}${STAGE_LABEL}|$((now - STAGE_START))
+"
+  STAGE="$1"
+  STAGE_LABEL="$1"
+  STAGE_START=$now
+}
+
 trap 'rc=$?; if [ "$rc" -ne 0 ]; then
   echo "chain-nix-init: FAILED (exit $rc) during stage: $STAGE" >&2
 fi' EXIT
 
-# Wall-clock accounting: the pull's own "Duration" summary below only
-# brackets run_copy() -- it doesn't cover the bootstrap copy that runs
-# before it or nix-gc.sh that runs after, both of which count toward
-# this container's real lifetime as seen by kubelet. Print an explicit
-# total at the end so a gap between kubelet's container-start/stop
-# timestamps and the pull's own reported Duration is never a mystery.
-SCRIPT_START_TIME=$(date +%s)
-
-STAGE="bootstrap (/nix seed from /nix-baked)"
+stage "bootstrap"
 sh "$RESOURCE_DIR/nix-bootstrap.sh"
 
-STAGE="nix.conf setup"
+stage "nix.conf setup"
 {
   echo 'experimental-features = nix-command flakes'
   echo 'sandbox = false'
@@ -149,7 +170,7 @@ closure_stat() {
   fi
 }
 
-STAGE="pre-pull store size"
+stage "pre-pull store size (du)"
 SIZE_BEFORE=$(dir_size_bytes)
 START_TIME=$(date +%s)
 
@@ -245,9 +266,12 @@ run_copy() {
   return $rc
 }
 
+stage "closure pull"
 i=0
 while [ $i -lt $COPY_ATTEMPTS ]; do
   i=$((i + 1))
+  # Detail within the pull phase, so assign STAGE rather than calling
+  # stage() -- retries should not each open a new timing bucket.
   STAGE="closure pull, attempt $i/$COPY_ATTEMPTS"
   echo "Attempt $i/$COPY_ATTEMPTS: pulling closure $SEEKR_CHAIN_NIX_CLOSURE from $SEEKR_CHAIN_NIX_STORE..."
   if run_copy; then
@@ -269,7 +293,7 @@ done
 # already on the node and the pod's workload can run regardless of what
 # these numbers say -- so nothing below may abort the script. That is the
 # whole reason dir_size_bytes/closure_stat exist.
-STAGE="pull summary"
+stage "summary stats (nix path-info)"
 END_TIME=$(date +%s)
 DURATION=$((END_TIME - START_TIME))
 
@@ -345,9 +369,24 @@ EOF
 # `|| true`: GC failures shouldn't fail the pod — pulling the closure
 # succeeded, the user's pod should run. Worst case is the store stays
 # oversize until the next pod cleans it.
-STAGE="nix-gc"
+stage "nix-gc"
 export SEEKR_CHAIN_NIX_STORE_CURRENT_BYTES=$SIZE_AFTER
 sh "$RESOURCE_DIR/nix-gc.sh" || true
 
-STAGE="done"
-echo "chain-nix-init total wall time: $(($(date +%s) - SCRIPT_START_TIME))s (bootstrap + pull + gc)"
+stage "done"
+
+# Per-phase breakdown. The pull's own "Duration" above covers only
+# run_copy(); this covers everything kubelet sees, so the two can differ
+# by a lot. When they do, the culprit is usually one of the whole-store
+# `du` walks or the post-pull `nix path-info` over the closure graph --
+# both scale with the store, not with how much was actually transferred,
+# and both get slower as peer pods contend for the same disk.
+#
+# Resolution is whole seconds (`date +%s` is all POSIX sh gives us), so
+# sub-second phases read as 0s. Good enough to spot which phase ate the
+# time; not a profiler.
+TOTAL_S=$(($(date +%s) - SCRIPT_START_TIME))
+echo
+echo "chain-nix-init phase timing"
+printf '%s' "$PHASE_TIMES" | awk -F'|' '{ printf "  %-32s %4ds\n", $1, $2 }'
+printf '  %-32s %4ds\n' "TOTAL (kubelet-visible)" "$TOTAL_S"
