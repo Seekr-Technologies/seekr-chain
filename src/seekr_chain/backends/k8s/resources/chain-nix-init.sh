@@ -33,20 +33,13 @@
 # extension supported by ash/dash/bash alike despite not being
 # POSIX-specified -- verified directly against dash.
 #
-# Deliberately NOT `pipefail`. This script used to set it, and that was
-# the direct cause of a production incident: every one of the cosmetic
-# `$(du -sk /nix | awk ...)` / `$(nix path-info ... | wc -l)` stats below
-# has a right-hand side that always succeeds, so `pipefail` was the only
-# thing propagating a LEFT-hand failure -- and the `2>/dev/null` on those
-# left-hand sides threw away the reason. A transient non-zero `du` (peer
-# pods on a shared /nix mutate it while we walk it) therefore killed the
-# init container with exit 1 and no output whatsoever, on a measurement
-# whose only job is to print a number in the summary banner below. Five
-# pods died that way on one node before anyone could see why. The other
-# five resource scripts all use plain `set -e` / `set -eu`; this one is
-# now consistent with them. Nothing here needs pipefail: the one command
-# whose failure actually matters (`nix copy`) is backgrounded and reaped
-# via `wait $nix_pid`, not run in a pipeline.
+# Do NOT add `pipefail`. The cosmetic `du`/`path-info | awk` stats below
+# have right-hand sides that always succeed, so pipefail is the only
+# thing that would propagate a left-hand failure -- and a `du` over a
+# shared /nix goes non-zero whenever a peer pod mutates it mid-walk. That
+# kills the init container over a number printed in a banner. Nothing
+# here needs pipefail: `nix copy`, the one command whose failure matters,
+# is backgrounded and reaped via `wait $nix_pid`, not piped.
 set -eu
 
 # Overridable so tests can point the script at throwaway paths instead of
@@ -56,15 +49,11 @@ NIX_ROOT="${SEEKR_CHAIN_NIX_ROOT:-/nix}"
 NIX_CONF="${SEEKR_CHAIN_NIX_CONF:-/etc/nix/nix.conf}"
 RESOURCE_DIR="${SEEKR_CHAIN_RESOURCE_DIR:-/seekr-chain/resources}"
 
-# Fail loud. The incident described above was invisible precisely because
-# `set -e` exits silently: kubectl showed exit 1 and an empty log, which
-# is indistinguishable from a dozen other failure modes. This trap makes
-# that impossible -- every non-zero exit from here on names the stage it
-# died in. STAGE is updated as the script advances.
-#
-# `$LINENO` would be more precise but is not dependable under busybox
-# ash (which `command: ["/bin/sh"]` resolves to in the runner image), so
-# a coarse hand-maintained stage name it is.
+# `set -e` exits silently, which in kubectl looks identical to a dozen
+# other failure modes. This trap names the stage instead. Keep STAGE
+# updated as the script advances -- `$LINENO` would be more precise but
+# isn't dependable under busybox ash, which `command: ["/bin/sh"]`
+# resolves to in the runner image.
 STAGE="startup"
 trap 'rc=$?; if [ "$rc" -ne 0 ]; then
   echo "chain-nix-init: FAILED (exit $rc) during stage: $STAGE" >&2
@@ -125,34 +114,29 @@ export AWS_CONNECT_TIMEOUT=10000
 
 LOG=/tmp/nix-init.log
 
-# On-disk size of $NIX_ROOT in bytes, best-effort. Every caller of this
-# uses the result for the summary banner or the stall watchdog -- never
-# for a correctness decision -- so a failed measurement must degrade to
-# "0", never abort the pod.
+# On-disk size of $NIX_ROOT in bytes, best-effort. Callers use this for
+# the summary banner and the stall watchdog, never for a correctness
+# decision, so a failed measurement degrades to "0" rather than aborting.
 #
 # `du`'s exit status is discarded on purpose: on a shared hostPath /nix
 # it goes non-zero whenever a peer pod renames or deletes an entry out
-# from under the walk (seekr-nix's atomic-restore tmp/trash churn does
-# exactly that), and busybox's du is markedly less forgiving about a
-# vanished entry mid-walk than GNU's. That says nothing about whether
-# OUR closure is fine. `{ ...; } | awk` (rather than a bare pipeline)
-# means the substitution's status is awk's, so this stays safe even if
-# some future edit reintroduces pipefail.
+# from under the walk, and busybox's du is much less forgiving about that
+# than GNU's. It says nothing about whether our closure is fine. Keep the
+# `{ ...; } | awk` shape -- it makes the substitution's status awk's, so
+# this survives someone reintroducing pipefail.
 #
-# du's stderr goes to $LOG rather than /dev/null so the reason is
-# recoverable after the fact -- the incident that motivated this was
-# unresolvable partly because that output was being thrown away.
+# stderr goes to $LOG, not /dev/null: when this does fail, the reason
+# needs to be recoverable.
 dir_size_bytes() {
   { du -sk "$NIX_ROOT" 2>>"$LOG" || true; } \
     | awk 'BEGIN{kb=0} {kb=$1+0} END{print kb*1024}'
 }
 
 # `nix path-info` wrapper for the summary stats. Same never-fatal
-# contract as dir_size_bytes, but NOT silent: unlike du, a non-zero exit
-# here is genuinely interesting -- after a pull that reported success it
-# means the closure isn't fully registered in the local DB, which is a
-# real problem worth investigating. Tolerated so it can't kill a pod
-# whose workload would otherwise run fine; warned about so it can't hide.
+# contract as dir_size_bytes, but NOT silent: a non-zero exit here means
+# the closure isn't fully registered in the local DB, which is a real
+# problem. Tolerated so it can't kill a pod whose workload would run
+# fine; warned about so it can't hide.
 #
 # "$@" is the path-info argument list; the caller pipes our stdout into
 # whatever reducer it wants (awk, wc -l).

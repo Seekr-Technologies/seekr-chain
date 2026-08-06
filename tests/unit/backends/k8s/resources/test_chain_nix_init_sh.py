@@ -7,16 +7,12 @@ and (where the test needs it) fake ``du`` binaries. Same dependency-injection-
 at-the-process-boundary approach as ``test_nix_gc_sh.py``: every assertion is
 about exit code and stdout/stderr given a filesystem state and env vars.
 
-The centre of gravity here is the incident these tests exist to prevent. This
-script used to run under ``set -euo pipefail`` while computing purely cosmetic
-summary numbers via ``$(du -sk /nix 2>/dev/null | awk ...)``. Because ``awk``
-always succeeds, ``pipefail`` was the sole thing propagating a ``du`` failure,
-and ``2>/dev/null`` discarded the reason -- so a transient non-zero ``du``
-(routine on a hostPath ``/nix`` that peer pods are mutating) killed the init
-container with exit 1 and an empty log. Five pods died that way on one node.
-
-``test_failing_du_does_not_fail_the_pod`` is the regression test for exactly
-that; the rest fence off the same shape elsewhere in the script.
+The contract under test: nothing the script computes for its summary banner may
+ever fail the pod. Those stats are ``cmd | awk``-shaped, and their right-hand
+sides always succeed, so under ``pipefail`` a transient non-zero ``du`` -- routine
+on a hostPath ``/nix`` that peer pods are mutating -- would abort the init
+container over a cosmetic number. ``test_failing_du_does_not_fail_the_pod``
+pins that down; the rest fence off the same shape elsewhere.
 """
 
 import shutil
@@ -155,9 +151,9 @@ class TestChainNixInit:
         assert "total wall time" in result.stdout
 
     def test_failing_du_does_not_fail_the_pod(self, tmp_path):
-        """The incident, reproduced. ``du`` is used only to print a number in
-        the summary banner -- its exit status says nothing about whether the
-        closure is usable, so it must never abort the container."""
+        """``du`` only feeds a number in the summary banner -- its exit status
+        says nothing about whether the closure is usable, so it must never
+        abort the container."""
         result = _run_init(
             tmp_path,
             [
@@ -173,8 +169,8 @@ class TestChainNixInit:
 
     def test_failing_path_info_does_not_fail_the_pod_but_warns(self, tmp_path):
         """Unlike ``du``, a failing ``nix path-info`` after a successful pull
-        can mean the closure isn't fully registered. Tolerated -- the pod's
-        workload should still run -- but never silent."""
+        can mean the closure isn't fully registered. Tolerated so the pod's
+        workload still runs, but never silent."""
         result = _run_init(
             tmp_path,
             [
@@ -189,10 +185,10 @@ class TestChainNixInit:
         assert "not fully registered" in result.stderr
 
     def test_genuine_pull_failure_still_fails_and_names_the_stage(self, tmp_path):
-        """The flip side: hardening the cosmetic stats must not have made real
-        failures survivable. And when one happens, the trap must say where --
-        the whole reason the original incident took so long to diagnose is that
-        exit 1 arrived with an empty log."""
+        """The flip side of the above: tolerating cosmetic failures must not
+        make real ones survivable. And a real one has to say where it died --
+        a bare exit 1 with an empty log is indistinguishable from anything
+        else that can kill this container."""
         result = _run_init(
             tmp_path,
             [
@@ -206,8 +202,9 @@ class TestChainNixInit:
         assert "chain-nix-init: FAILED (exit 1) during stage: closure pull" in result.stderr
 
     def test_du_stderr_is_preserved_not_discarded(self, tmp_path):
-        """``2>/dev/null`` on the original ``du`` is half of why the incident
-        was undiagnosable. The reason has to land somewhere recoverable."""
+        """Tolerating a ``du`` failure is only safe if the reason survives
+        somewhere. Discarding it to /dev/null makes the tolerance
+        indistinguishable from ignorance."""
         log = tmp_path / "nix-init.log"
         result = _run_init(
             tmp_path,
@@ -231,9 +228,9 @@ class TestChainNixInit:
 
 class TestNoPipefail:
     def test_script_does_not_set_pipefail(self):
-        """A guard on the specific footgun, not just its current instances. Any
-        future ``cmd | awk`` added to this script is safe by default only for
-        as long as pipefail stays off."""
+        """A guard on the footgun itself, not just today's instances: any
+        ``cmd | awk`` added to this script is safe by default only for as
+        long as pipefail stays off."""
         assert "pipefail" not in _uncommented(SCRIPT)
 
     @pytest.mark.parametrize("script", ["nix-gc.sh", "nix-bootstrap.sh", "nix-build.sh"])
