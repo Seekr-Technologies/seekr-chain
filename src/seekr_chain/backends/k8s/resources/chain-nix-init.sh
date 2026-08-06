@@ -32,7 +32,43 @@
 # run_copy() and its watchdog subshell) is a de facto standard
 # extension supported by ash/dash/bash alike despite not being
 # POSIX-specified -- verified directly against dash.
-set -euo pipefail
+#
+# Deliberately NOT `pipefail`. This script used to set it, and that was
+# the direct cause of a production incident: every one of the cosmetic
+# `$(du -sk /nix | awk ...)` / `$(nix path-info ... | wc -l)` stats below
+# has a right-hand side that always succeeds, so `pipefail` was the only
+# thing propagating a LEFT-hand failure -- and the `2>/dev/null` on those
+# left-hand sides threw away the reason. A transient non-zero `du` (peer
+# pods on a shared /nix mutate it while we walk it) therefore killed the
+# init container with exit 1 and no output whatsoever, on a measurement
+# whose only job is to print a number in the summary banner below. Five
+# pods died that way on one node before anyone could see why. The other
+# five resource scripts all use plain `set -e` / `set -eu`; this one is
+# now consistent with them. Nothing here needs pipefail: the one command
+# whose failure actually matters (`nix copy`) is backgrounded and reaped
+# via `wait $nix_pid`, not run in a pipeline.
+set -eu
+
+# Overridable so tests can point the script at throwaway paths instead of
+# the real mounts; unset in production. Same idea as nix-gc.sh's and
+# nix-bootstrap.sh's SEEKR_CHAIN_NIX_ROOT.
+NIX_ROOT="${SEEKR_CHAIN_NIX_ROOT:-/nix}"
+NIX_CONF="${SEEKR_CHAIN_NIX_CONF:-/etc/nix/nix.conf}"
+RESOURCE_DIR="${SEEKR_CHAIN_RESOURCE_DIR:-/seekr-chain/resources}"
+
+# Fail loud. The incident described above was invisible precisely because
+# `set -e` exits silently: kubectl showed exit 1 and an empty log, which
+# is indistinguishable from a dozen other failure modes. This trap makes
+# that impossible -- every non-zero exit from here on names the stage it
+# died in. STAGE is updated as the script advances.
+#
+# `$LINENO` would be more precise but is not dependable under busybox
+# ash (which `command: ["/bin/sh"]` resolves to in the runner image), so
+# a coarse hand-maintained stage name it is.
+STAGE="startup"
+trap 'rc=$?; if [ "$rc" -ne 0 ]; then
+  echo "chain-nix-init: FAILED (exit $rc) during stage: $STAGE" >&2
+fi' EXIT
 
 # Wall-clock accounting: the pull's own "Duration" summary below only
 # brackets run_copy() -- it doesn't cover the bootstrap copy that runs
@@ -42,8 +78,10 @@ set -euo pipefail
 # timestamps and the pull's own reported Duration is never a mystery.
 SCRIPT_START_TIME=$(date +%s)
 
-sh /seekr-chain/resources/nix-bootstrap.sh
+STAGE="bootstrap (/nix seed from /nix-baked)"
+sh "$RESOURCE_DIR/nix-bootstrap.sh"
 
+STAGE="nix.conf setup"
 {
   echo 'experimental-features = nix-command flakes'
   echo 'sandbox = false'
@@ -75,7 +113,7 @@ sh /seekr-chain/resources/nix-bootstrap.sh
   # nothing and every path-info call above would keep paying the
   # substituter-probe tax this exists to avoid.
   echo 'substituters ='
-} >> /etc/nix/nix.conf
+} >> "$NIX_CONF"
 
 # aws-sdk-cpp timeouts. These ARE honored on s3:// substituters (where
 # nix's internal stalled-download-timeout doesn't reach). 10 min per
@@ -86,7 +124,49 @@ export AWS_REQUEST_TIMEOUT=600000
 export AWS_CONNECT_TIMEOUT=10000
 
 LOG=/tmp/nix-init.log
-SIZE_BEFORE=$(du -sk /nix 2>/dev/null | awk 'BEGIN{kb=0} {kb=$1+0} END{print kb*1024}')
+
+# On-disk size of $NIX_ROOT in bytes, best-effort. Every caller of this
+# uses the result for the summary banner or the stall watchdog -- never
+# for a correctness decision -- so a failed measurement must degrade to
+# "0", never abort the pod.
+#
+# `du`'s exit status is discarded on purpose: on a shared hostPath /nix
+# it goes non-zero whenever a peer pod renames or deletes an entry out
+# from under the walk (seekr-nix's atomic-restore tmp/trash churn does
+# exactly that), and busybox's du is markedly less forgiving about a
+# vanished entry mid-walk than GNU's. That says nothing about whether
+# OUR closure is fine. `{ ...; } | awk` (rather than a bare pipeline)
+# means the substitution's status is awk's, so this stays safe even if
+# some future edit reintroduces pipefail.
+#
+# du's stderr goes to $LOG rather than /dev/null so the reason is
+# recoverable after the fact -- the incident that motivated this was
+# unresolvable partly because that output was being thrown away.
+dir_size_bytes() {
+  { du -sk "$NIX_ROOT" 2>>"$LOG" || true; } \
+    | awk 'BEGIN{kb=0} {kb=$1+0} END{print kb*1024}'
+}
+
+# `nix path-info` wrapper for the summary stats. Same never-fatal
+# contract as dir_size_bytes, but NOT silent: unlike du, a non-zero exit
+# here is genuinely interesting -- after a pull that reported success it
+# means the closure isn't fully registered in the local DB, which is a
+# real problem worth investigating. Tolerated so it can't kill a pod
+# whose workload would otherwise run fine; warned about so it can't hide.
+#
+# "$@" is the path-info argument list; the caller pipes our stdout into
+# whatever reducer it wants (awk, wc -l).
+closure_stat() {
+  if ! nix path-info "$@" 2>>"$LOG"; then
+    echo "[chain-nix-init] warning: 'nix path-info $*' failed;" \
+         "summary numbers below are incomplete. This can mean the" \
+         "closure is not fully registered in the local nix DB --" \
+         "see $LOG." >&2
+  fi
+}
+
+STAGE="pre-pull store size"
+SIZE_BEFORE=$(dir_size_bytes)
 START_TIME=$(date +%s)
 
 # Watchdog: monitors /nix size growth. If size doesn't change
@@ -103,8 +183,10 @@ WATCHDOG_MAX_S=1800
 COPY_ATTEMPTS=3
 
 # Set to 1 by run_copy when the closure is already fully present locally
-# (and we skip the s3 fetch). Used by the summary block to short-circuit
-# expensive nix path-info calls that we don't need on a no-op pull.
+# (and we skip the s3 fetch). Used by the summary block to skip the
+# post-pull `du` over the whole store: on a no-op pull the size cannot
+# have changed, so re-walking a 100+ GiB tree to learn that would be
+# pure waste (and, on a shared node, pure I/O contention with peers).
 FAST_PATH=0
 
 run_copy() {
@@ -144,12 +226,12 @@ run_copy() {
 
   (
     local start=$(date +%s)
-    local last_size=$(du -sk /nix 2>/dev/null | awk 'BEGIN{kb=0} {kb=$1+0} END{print kb*1024}')
+    local last_size=$(dir_size_bytes)
     local stall_at=$start
     while kill -0 $nix_pid 2>/dev/null; do
       sleep 30
       local now=$(date +%s)
-      local cur_size=$(du -sk /nix 2>/dev/null | awk 'BEGIN{kb=0} {kb=$1+0} END{print kb*1024}')
+      local cur_size=$(dir_size_bytes)
       if [ "$cur_size" != "$last_size" ]; then
         stall_at=$now
         last_size=$cur_size
@@ -182,6 +264,7 @@ run_copy() {
 i=0
 while [ $i -lt $COPY_ATTEMPTS ]; do
   i=$((i + 1))
+  STAGE="closure pull, attempt $i/$COPY_ATTEMPTS"
   echo "Attempt $i/$COPY_ATTEMPTS: pulling closure $SEEKR_CHAIN_NIX_CLOSURE from $SEEKR_CHAIN_NIX_STORE..."
   if run_copy; then
     break
@@ -197,6 +280,12 @@ done
 # Pull summary. Distinguishes "had it already" (hostPath warm cache) from
 # "pulled fresh from s3" so the wow moment of "5 GB closure, 0.4s startup"
 # is visible directly in the log.
+#
+# Everything from here to the banner is presentation only. The closure is
+# already on the node and the pod's workload can run regardless of what
+# these numbers say -- so nothing below may abort the script. That is the
+# whole reason dir_size_bytes/closure_stat exist.
+STAGE="pull summary"
 END_TIME=$(date +%s)
 DURATION=$((END_TIME - START_TIME))
 
@@ -207,33 +296,24 @@ PATHS_PULLED=${PATHS_PULLED:-0}
 
 if [ "$FAST_PATH" = "1" ]; then
   # Closure was fully present: by construction PATHS_PULLED=0, no bytes
-  # transferred, no disk delta. Skip the post-pull du AND the path-info
-  # walk over the closure graph — neither informs the summary in a way
-  # the user can't already see from the "fully present" log line.
+  # transferred, no disk delta. Skip the post-pull du — it could only
+  # report the number we already have.
   SIZE_AFTER=$SIZE_BEFORE
   BYTES_PULLED=0
-  # Track the count for the summary header. path-info --recursive on a
-  # fully-local closure is ~1s; cheap relative to what we just saved.
-  CLOSURE_PATHS=$(nix path-info \
-                    --recursive "$SEEKR_CHAIN_NIX_CLOSURE" 2>/dev/null | wc -l)
-  CLOSURE_PATHS=${CLOSURE_PATHS:-0}
-  CLOSURE_SIZE=$(nix path-info \
-                   --closure-size "$SEEKR_CHAIN_NIX_CLOSURE" 2>/dev/null \
-                   | awk '{print $2+0}')
-  CLOSURE_SIZE=${CLOSURE_SIZE:-0}
 else
-  SIZE_AFTER=$(du -sk /nix 2>/dev/null | awk 'BEGIN{kb=0} {kb=$1+0} END{print kb*1024}')
+  SIZE_AFTER=$(dir_size_bytes)
   BYTES_PULLED=$((SIZE_AFTER - SIZE_BEFORE))
   if [ "$BYTES_PULLED" -lt 0 ]; then BYTES_PULLED=0; fi
-
-  CLOSURE_PATHS=$(nix path-info \
-                    --recursive "$SEEKR_CHAIN_NIX_CLOSURE" 2>/dev/null | wc -l)
-  CLOSURE_PATHS=${CLOSURE_PATHS:-0}
-  CLOSURE_SIZE=$(nix path-info \
-                   --closure-size "$SEEKR_CHAIN_NIX_CLOSURE" 2>/dev/null \
-                   | awk '{print $2+0}')
-  CLOSURE_SIZE=${CLOSURE_SIZE:-0}
 fi
+
+# Identical in both branches (on the fast path, path-info --recursive over
+# a fully-local closure is ~1s -- cheap relative to the s3 fetch we just
+# skipped), so it lives outside the if rather than being duplicated.
+CLOSURE_PATHS=$(closure_stat --recursive "$SEEKR_CHAIN_NIX_CLOSURE" | wc -l)
+CLOSURE_PATHS=${CLOSURE_PATHS:-0}
+CLOSURE_SIZE=$(closure_stat --closure-size "$SEEKR_CHAIN_NIX_CLOSURE" \
+                 | awk '{print $2+0}')
+CLOSURE_SIZE=${CLOSURE_SIZE:-0}
 
 PATHS_HIT=$((CLOSURE_PATHS - PATHS_PULLED))
 if [ "$PATHS_HIT" -lt 0 ]; then PATHS_HIT=0; fi
@@ -281,7 +361,9 @@ EOF
 # `|| true`: GC failures shouldn't fail the pod — pulling the closure
 # succeeded, the user's pod should run. Worst case is the store stays
 # oversize until the next pod cleans it.
+STAGE="nix-gc"
 export SEEKR_CHAIN_NIX_STORE_CURRENT_BYTES=$SIZE_AFTER
-sh /seekr-chain/resources/nix-gc.sh || true
+sh "$RESOURCE_DIR/nix-gc.sh" || true
 
+STAGE="done"
 echo "chain-nix-init total wall time: $(($(date +%s) - SCRIPT_START_TIME))s (bootstrap + pull + gc)"

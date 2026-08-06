@@ -28,7 +28,12 @@ MAX_BYTES="${SEEKR_CHAIN_NIX_STORE_MAX_BYTES:-53687091200}"  # 50 GiB
 
 CURRENT_BYTES="${SEEKR_CHAIN_NIX_STORE_CURRENT_BYTES:-}"
 if [ -z "$CURRENT_BYTES" ]; then
-  CURRENT_BYTES=$(du -sk "$NIX_ROOT" 2>/dev/null | awk '{print $1 * 1024}')
+    # `|| true` and the `${:-0}` below: du goes non-zero when a peer pod
+  # renames or deletes an entry out from under the walk on a shared
+  # hostPath store. That must not abort GC — and must REALLY not abort
+  # it if this script ever gains `pipefail`, which is exactly how the
+  # equivalent line in chain-nix-init.sh took down five pods.
+  CURRENT_BYTES=$({ du -sk "$NIX_ROOT" 2>/dev/null || true; } | awk '{print $1 * 1024}')
 fi
 CURRENT_BYTES=${CURRENT_BYTES:-0}
 
@@ -91,7 +96,7 @@ echo "[nix-gc] running 'nix store gc --max $OVERAGE'"
 # contention, etc.) doesn't fail the init container.
 nix store gc --max "$OVERAGE" 2>&1 || true
 
-FINAL_BYTES=$(du -sk "$NIX_ROOT" 2>/dev/null | awk '{print $1 * 1024}')
+FINAL_BYTES=$({ du -sk "$NIX_ROOT" 2>/dev/null || true; } | awk '{print $1 * 1024}')
 FINAL_BYTES=${FINAL_BYTES:-0}
 FREED=$((CURRENT_BYTES - FINAL_BYTES))
 echo "[nix-gc] freed $(($FREED / 1048576)) MiB; store now $(($FINAL_BYTES / 1048576)) MiB / $(($MAX_BYTES / 1048576)) MiB budget"
