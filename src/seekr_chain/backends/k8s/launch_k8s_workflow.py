@@ -8,12 +8,10 @@ import shutil
 import tempfile
 from pathlib import Path
 
-import boto3
 import dotenv
 import kubernetes
-from botocore.client import BaseClient
 
-from seekr_chain import WorkflowConfig, constants, k8s_utils, s3_utils, utils
+from seekr_chain import WorkflowConfig, constants, k8s_utils, remote_fs, utils
 from seekr_chain.backends.k8s.job_info import JobInfo, _resolve_datastore_root, get_job_info
 from seekr_chain.backends.k8s.jobset import _INIT_IMAGE, create_jobset_manifest
 from seekr_chain.backends.k8s.parse_logs import DATA_SCHEMA_VERSION
@@ -150,12 +148,11 @@ def _create_workflow_secrets(config: WorkflowConfig, workflow_name: str, s3_cred
     return out
 
 
-def _get_s3_client_and_creds() -> tuple[BaseClient, dict]:
+def _get_s3_creds() -> dict:
     from botocore.exceptions import NoCredentialsError, PartialCredentialsError
 
     try:
-        client = boto3.client("s3")
-        creds = client._get_credentials()
+        creds = remote_fs._get_s3_client()._get_credentials()
         if creds is None:
             raise NoCredentialsError()
         creds_dict = {"aws_access_key_id": creds.access_key, "aws_secret_access_key": creds.secret_key}
@@ -168,13 +165,12 @@ def _get_s3_client_and_creds() -> tuple[BaseClient, dict]:
             "  - Use an IAM instance profile"
         ) from e
 
-    return client, creds_dict
+    return creds_dict
 
 
 def _package_assets(
     config: WorkflowConfig,
     args: dict | None,
-    s3_client: BaseClient,
     job_info: JobInfo,
     staging_dir: Path,
     workflow_name: str,
@@ -240,26 +236,27 @@ def _package_assets(
         logger.info(f"Packaging assets from staging dir: {staging_dir}")
         tar_directory(staging_dir, tarpath)
         logger.info(f"Uploading assets to {dest} ({utils.format_bytes(tarpath.stat().st_size)})")
-        s3_utils.upload_file(tarpath, dest, s3_client)
+        remote_fs.upload(tarpath, dest)
 
 
-def _generate_job_info(s3_client: BaseClient, datastore_root: str = None) -> JobInfo:
+def _generate_job_info(datastore_root: str = None) -> JobInfo:
     n = 6
     job_info = None
     while workflow_id := utils.generate_id(n):
         job_info = get_job_info(workflow_id, datastore_root=datastore_root)
-        if not s3_utils.is_dir(job_info["s3_path"], s3_client):
+        if not remote_fs.exists(job_info["s3_path"]):
             break
         else:
             n += 1
 
     if job_info is None:
         raise ValueError("Unable to generate job id!")
-    s3_utils.touch(job_info["remote_sentinel"], s3_client)
+    with tempfile.NamedTemporaryFile() as sentinel_file:
+        remote_fs.upload(sentinel_file.name, job_info["remote_sentinel"])
     with tempfile.NamedTemporaryFile() as tmpfile:
         with open(tmpfile.name, "w") as f:
             f.write(DATA_SCHEMA_VERSION)
-        s3_utils.upload_file(tmpfile.name, job_info["remote_version_path"], s3_client)
+        remote_fs.upload(tmpfile.name, job_info["remote_version_path"])
     return job_info
 
 
@@ -434,10 +431,10 @@ def launch_k8s_workflow(
 
         config = resolve_nix_steps(config, staged_code_dir=local_code_dest)
 
-        s3_client, s3_creds = _get_s3_client_and_creds()
+        s3_creds = _get_s3_creds()
 
         datastore_root = _resolve_datastore_root()
-        job_info = _generate_job_info(s3_client, datastore_root=datastore_root)
+        job_info = _generate_job_info(datastore_root=datastore_root)
         workflow_id = job_info["id"]
 
         workflow_secrets = _create_workflow_secrets(config, workflow_id, s3_creds)
@@ -452,7 +449,6 @@ def launch_k8s_workflow(
         _package_assets(
             config=config,
             args=args,
-            s3_client=s3_client,
             job_info=job_info,
             staging_dir=staging_dir,
             workflow_name=workflow_id,

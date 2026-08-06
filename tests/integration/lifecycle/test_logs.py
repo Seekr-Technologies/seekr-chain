@@ -1,9 +1,20 @@
 import seekr_chain
 from seekr_chain import K8sWorkflow as ArgoWorkflow
-from seekr_chain import s3_utils
+from seekr_chain import remote_fs
 from seekr_chain._testing import assert_nested_match
 
 TS_REGEX = r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}.\d{6}Z"
+
+
+def _list_s3(prefix: str, s3_client) -> list[str]:
+    """List every object key under `prefix`, as full s3:// URIs."""
+    bucket, key_prefix = remote_fs.parse_uri(prefix)
+    paginator = s3_client.get_paginator("list_objects_v2")
+    return [
+        f"s3://{bucket}/{obj['Key']}"
+        for page in paginator.paginate(Bucket=bucket, Prefix=key_prefix)
+        for obj in page.get("Contents", [])
+    ]
 
 
 class TestLogs:
@@ -76,10 +87,7 @@ class TestLogs:
 
         # Also test structure of remote dir
         contents = sorted(
-            [
-                item.removeprefix(job._job_info["s3_path"])
-                for item in s3_utils.glob(job._job_info["s3_path"], "**/*", s3_client)
-            ]
+            [item.removeprefix(job._job_info["s3_path"]) for item in _list_s3(job._job_info["s3_path"], s3_client)]
         )
         expected_s3 = [
             "/.sentinel",
@@ -140,10 +148,7 @@ class TestLogs:
 
         # Also test structure of remote dir
         contents = sorted(
-            [
-                item.removeprefix(job._job_info["s3_path"])
-                for item in s3_utils.glob(job._job_info["s3_path"], "**/*", s3_client)
-            ]
+            [item.removeprefix(job._job_info["s3_path"]) for item in _list_s3(job._job_info["s3_path"], s3_client)]
         )
         expected = [
             "/.sentinel",
@@ -211,10 +216,7 @@ class TestLogs:
 
         # Also test structure of remote dir
         contents = sorted(
-            [
-                item.removeprefix(job._job_info["s3_path"])
-                for item in s3_utils.glob(job._job_info["s3_path"], "**/*", s3_client)
-            ]
+            [item.removeprefix(job._job_info["s3_path"]) for item in _list_s3(job._job_info["s3_path"], s3_client)]
         )
         expected = [
             "/.sentinel",

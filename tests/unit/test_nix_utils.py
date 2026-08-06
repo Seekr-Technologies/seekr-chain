@@ -1,8 +1,8 @@
 """Unit tests for seekr_chain.nix_utils.
 
 Tested without invoking the real ``nix`` binary — eval is integration-tested
-elsewhere. These cover the pure-Python helpers and the s3 existence check
-with a fake boto3 client.
+elsewhere. These cover the pure-Python helpers and the closure existence
+check with a mocked remote_fs.
 """
 
 from __future__ import annotations
@@ -81,25 +81,16 @@ class TestEvalClosurePath:
 
 
 class TestClosureExists:
-    """Cover the s3:// path with a fake boto3 client.
+    """Cover URL construction; remote_fs.exists itself has its own tests."""
 
-    The seekr_chain.s3_utils.exists function is exercised by its own tests;
-    here we just verify our URL construction and the path through.
-    """
-
-    def test_s3_uri_hits_s3_utils(self, monkeypatch):
-        # Capture the URI passed to s3_utils.exists
+    def test_s3_uri_hits_remote_fs(self, monkeypatch):
         seen = {}
 
-        def fake_exists(uri: str, client):
+        def fake_exists(uri: str):
             seen["uri"] = uri
             return True
 
-        monkeypatch.setattr("seekr_chain.s3_utils.exists", fake_exists)
-        monkeypatch.setattr(
-            "boto3.client",
-            lambda service: object(),  # opaque stand-in
-        )
+        monkeypatch.setattr("seekr_chain.remote_fs.exists", fake_exists)
 
         ok = closure_exists(
             "s3://my-bucket/nix-cache",
@@ -112,10 +103,9 @@ class TestClosureExists:
     def test_s3_uri_trailing_slash_normalized(self, monkeypatch):
         seen = {}
         monkeypatch.setattr(
-            "seekr_chain.s3_utils.exists",
-            lambda uri, client: seen.setdefault("uri", uri) or False,
+            "seekr_chain.remote_fs.exists",
+            lambda uri: seen.setdefault("uri", uri) or False,
         )
-        monkeypatch.setattr("boto3.client", lambda service: object())
 
         closure_exists("s3://my-bucket/nix-cache/", "/nix/store/xyz-x")
         assert seen["uri"] == "s3://my-bucket/nix-cache/xyz.narinfo"
@@ -130,69 +120,33 @@ class TestClosureExists:
         """
         seen = {}
         monkeypatch.setattr(
-            "seekr_chain.s3_utils.exists",
-            lambda uri, client: seen.setdefault("uri", uri) or False,
+            "seekr_chain.remote_fs.exists",
+            lambda uri: seen.setdefault("uri", uri) or False,
         )
-        monkeypatch.setattr("boto3.client", lambda service: object())
 
         closure_exists("s3://my-bucket?endpoint=minio.local:9000&scheme=http", "/nix/store/abc123-name")
         assert seen["uri"] == "s3://my-bucket/abc123.narinfo"
 
+    def test_oci_uri_hits_remote_fs(self, monkeypatch):
+        seen = {}
+
+        def fake_exists(uri):
+            seen["uri"] = uri
+            return True
+
+        monkeypatch.setattr("seekr_chain.remote_fs.exists", fake_exists)
+
+        ok = closure_exists("oci://my-ns/my-bucket/nix-cache/", "/nix/store/abc123-name")
+        assert ok is True
+        assert seen["uri"] == "oci://my-ns/my-bucket/nix-cache/abc123.narinfo"
+
     def test_non_s3_non_oci_without_seekr_fs_gives_helpful_error(self, monkeypatch):
-        # Pretend seekr_fs isn't installed. oci:// has a native handler now
-        # (see the tests below), so use azure:// to hit the fallback.
+        # Pretend seekr_fs isn't installed, to hit the fallback for other schemes.
         import sys
 
         monkeypatch.setitem(sys.modules, "seekr_fs", None)
         with pytest.raises(ImportError, match="seekr-fs is required"):
             closure_exists("azure://ns/bucket", "/nix/store/abc-x")
-
-    def test_oci_uri_hits_head_object(self, monkeypatch):
-        """oci:// URIs go through _oci_narinfo_exists: parse → client → HEAD."""
-        from seekr_chain import nix_utils
-
-        seen = {}
-
-        class _FakeClient:
-            def head_object(self, namespace_name, bucket_name, object_name):
-                seen["namespace"] = namespace_name
-                seen["bucket"] = bucket_name
-                seen["key"] = object_name
-                return object()  # success
-
-        monkeypatch.setattr(nix_utils, "_default_oci_client", lambda: _FakeClient())
-
-        ok = closure_exists("oci://my-ns/my-bucket/nix-cache/", "/nix/store/abc123-name")
-        assert ok is True
-        assert seen == {
-            "namespace": "my-ns",
-            "bucket": "my-bucket",
-            "key": "nix-cache/abc123.narinfo",
-        }
-
-    def test_oci_uri_returns_false_when_head_raises(self, monkeypatch):
-        """Any exception from head_object (404, auth, network) → False. Same
-        semantics as seekr-fs's OCIBackend.is_file.
-        """
-        from seekr_chain import nix_utils
-
-        class _FakeClient:
-            def head_object(self, **_):
-                raise RuntimeError("object not found")
-
-        monkeypatch.setattr(nix_utils, "_default_oci_client", lambda: _FakeClient())
-
-        assert closure_exists("oci://ns/bucket/prefix/", "/nix/store/xyz-x") is False
-
-    def test_oci_uri_without_oci_sdk_gives_helpful_error(self, monkeypatch):
-        """When the OCI SDK isn't installed we raise a clear ImportError
-        pointing at `pip install oci` (not seekr-fs).
-        """
-        import sys
-
-        monkeypatch.setitem(sys.modules, "oci", None)
-        with pytest.raises(ImportError, match=r"requires the `oci` SDK"):
-            closure_exists("oci://ns/bucket/prefix/", "/nix/store/abc-x")
 
 
 class TestFindWarmNodes:

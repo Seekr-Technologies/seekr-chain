@@ -235,7 +235,7 @@ def patch_configs_for_testing(job_name, datastore_root, monkeypatch, hermetic_fl
         monkeypatch.setenv("AWS_ACCESS_KEY_ID", minio_service.access_key)
         monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", minio_service.secret_key)
         monkeypatch.setenv("AWS_DEFAULT_REGION", "us-east-1")
-        # Empirically confirmed: a zero-length-body PUT (e.g. s3_utils.touch())
+        # Empirically confirmed: a zero-length-body PUT (e.g. the sentinel upload)
         # immediately followed by a non-empty PUT on the SAME boto3 client
         # reliably stalls ~30s against our hermetic MinIO (through the podman
         # network path) -- the reused keep-alive connection is left in a bad

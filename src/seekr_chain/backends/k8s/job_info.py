@@ -1,6 +1,6 @@
 from typing import TypedDict
 
-from seekr_chain import s3_utils
+from seekr_chain import remote_fs
 from seekr_chain.user_config import _load_config
 
 
@@ -50,16 +50,23 @@ def get_job_info(id: str, datastore_root: str | None = None) -> JobInfo:
             "When reconnecting to an existing job, use the same value that was set at submit time."
         )
 
-    s3_path = s3_utils.join(datastore_root, "jobs", id[:2], id[2:])
+    if not datastore_root.startswith("s3://"):
+        raise ValueError(
+            f"datastore_root must be an s3:// path, got: {datastore_root!r}\n"
+            "The log-shipping sidecar (fluent-bit) only supports uploading to S3, "
+            "so oci:// (and any other scheme) is not supported as a datastore_root."
+        )
+
+    s3_path = remote_fs.join(datastore_root, "jobs", id[:2], id[2:])
 
     return JobInfo(
         {
             "id": id,
             "s3_path": s3_path,
-            "remote_assets_path": s3_utils.join(s3_path, "assets.tar.gz"),
-            "remote_logs_path": s3_utils.join(s3_path, "logs"),
-            "remote_sentinel": s3_utils.join(s3_path, ".sentinel"),
-            "remote_step_data_path": s3_utils.join(s3_path, "data"),
-            "remote_version_path": s3_utils.join(s3_path, "data", "version"),
+            "remote_assets_path": remote_fs.join(s3_path, "assets.tar.gz"),
+            "remote_logs_path": remote_fs.join(s3_path, "logs"),
+            "remote_sentinel": remote_fs.join(s3_path, ".sentinel"),
+            "remote_step_data_path": remote_fs.join(s3_path, "data"),
+            "remote_version_path": remote_fs.join(s3_path, "data", "version"),
         }
     )
