@@ -119,6 +119,21 @@ def _parse_timestamp(ts):
     return None
 
 
+def get_completion_time(status) -> Optional[datetime.datetime]:
+    """Return a Job's terminal timestamp, for either success or failure.
+
+    Kubernetes only populates ``status.completion_time`` on success; for a
+    failed Job the terminal timestamp instead lives on the "Failed"
+    condition's ``last_transition_time``.
+    """
+    if status.completion_time:
+        return _parse_timestamp(status.completion_time)
+    for condition in getattr(status, "conditions", None) or []:
+        if condition.type == "Failed" and condition.status == "True":
+            return _parse_timestamp(condition.last_transition_time)
+    return None
+
+
 _PULL_ERROR_REASONS = {"ImagePullBackOff", "ErrImagePull", "InvalidImageName", "ErrImageNeverPull"}
 _SKIP_WAITING_MESSAGE = {"CrashLoopBackOff", "ContainerCreating", "PodInitializing"}
 
@@ -450,7 +465,7 @@ def job_status_and_completion(job) -> tuple[WorkflowStatus, Optional[datetime.da
     ``completion_time`` is populated only for terminal states.
     """
     s = job.status
-    completion_time = _parse_timestamp(s.completion_time)
+    completion_time = get_completion_time(s)
     if s.succeeded and s.succeeded > 0:
         return WorkflowStatus.SUCCEEDED, completion_time
     if s.failed and s.failed > 0:
