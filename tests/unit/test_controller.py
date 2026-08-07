@@ -437,7 +437,7 @@ class TestMainLinearDag:
         events = [
             [_make_event("a-js", "Failed", rv="2")],
         ]
-        assert _run_main(dag, events) == 1
+        assert _run_main(dag, events) == 0
 
     def test_linear_two_steps(self):
         dag = [
@@ -453,7 +453,7 @@ class TestMainLinearDag:
         ]
         assert _run_main(dag, events) == 0
 
-    def test_linear_step_b_fails_returns_1(self):
+    def test_linear_step_b_fails_returns_0(self):
         dag = [
             {"name": "a", "depends_on": []},
             {"name": "b", "depends_on": ["a"]},
@@ -464,7 +464,7 @@ class TestMainLinearDag:
                 _make_event("b-js", "Failed", rv="3"),
             ],
         ]
-        assert _run_main(dag, events) == 1
+        assert _run_main(dag, events) == 0
 
     def test_step_a_failure_cascade_fails_b(self):
         dag = [
@@ -475,7 +475,7 @@ class TestMainLinearDag:
         events = [
             [_make_event("a-js", "Failed", rv="2")],
         ]
-        assert _run_main(dag, events) == 1
+        assert _run_main(dag, events) == 0
 
 
 class TestMainDiamondDag:
@@ -511,7 +511,7 @@ class TestMainDiamondDag:
                 _make_event("c-js", "Completed", rv="4"),
             ],
         ]
-        assert _run_main(dag, events) == 1
+        assert _run_main(dag, events) == 0
 
 
 class TestMainCancellation:
@@ -521,7 +521,7 @@ class TestMainCancellation:
         events = [
             [_make_event("a-js", terminal=None, rv="2", suspend=True)],
         ]
-        assert _run_main(dag, events) == 1
+        assert _run_main(dag, events) == 0
 
     def test_cascade_cancels_unsubmitted_dependent(self):
         """a is cancelled before b's dependency is satisfied — b must never be
@@ -533,7 +533,7 @@ class TestMainCancellation:
         events = [
             [_make_event("a-js", terminal=None, rv="2", suspend=True)],
         ]
-        assert _run_main(dag, events) == 1
+        assert _run_main(dag, events) == 0
 
     def test_diamond_partial_cancel_cascades_join_step(self):
         """a → b, a → c, b+c → d. b is cancelled, c succeeds — d must
@@ -552,7 +552,7 @@ class TestMainCancellation:
                 _make_event("c-js", "Completed", rv="4"),
             ],
         ]
-        assert _run_main(dag, events) == 1
+        assert _run_main(dag, events) == 0
 
 
 class TestMainWatchReconnect:

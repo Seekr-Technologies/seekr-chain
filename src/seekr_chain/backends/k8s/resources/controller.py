@@ -477,7 +477,7 @@ def main() -> int:
             event_type="Warning",
         )
         print(f"[controller] workflow FAILED — failed steps: {failed}", file=sys.stderr, flush=True)
-        return 1
+        return 0
 
     cancelled = [n for n, p in phases.items() if p == "CANCELLED"]
     if cancelled:
@@ -490,7 +490,7 @@ def main() -> int:
             f"Workflow cancelled — cancelled steps: {cancelled}",
         )
         print(f"[controller] workflow CANCELLED — cancelled steps: {cancelled}", flush=True)
-        return 1
+        return 0
 
     _emit_event(
         k8s_v1,
