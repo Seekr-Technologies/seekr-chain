@@ -31,7 +31,6 @@ from typing import Callable, Optional
 from kubernetes.client.rest import ApiException
 from rich.console import Console
 
-from seekr_chain import k8s_api
 from seekr_chain.backends.k8s.workflow_state import (
     WorkflowState,
     build_workflow_state,
@@ -40,6 +39,7 @@ from seekr_chain.backends.k8s.workflow_state import (
     list_pods,
     read_workflow_job,
 )
+from seekr_chain.k8s_api import kube
 from seekr_chain.status import WorkflowStatus
 
 logger = logging.getLogger(__name__)
@@ -450,7 +450,7 @@ class ReconnectingWatcher:
         """Drive one reconnect-with-backoff watch loop, shared by every watch thread."""
         while not self._stop.is_set():
             try:
-                w = k8s_api.new_watch()
+                w = kube.new_watch()
                 kwargs = dict(spec.list_kwargs)
                 kwargs["timeout_seconds"] = _WATCH_RECONNECT_DELAY
                 kwargs["_request_timeout"] = _WATCH_REQUEST_TIMEOUT

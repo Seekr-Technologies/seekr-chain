@@ -15,7 +15,7 @@ import kubernetes as k8s
 from kubernetes.client.models import V1Pod
 from kubernetes.client.rest import ApiException
 
-from seekr_chain import k8s_api
+from seekr_chain.k8s_api import kube
 
 logger = logging.getLogger(__name__)
 
@@ -34,7 +34,7 @@ def _mem_str_to_bytes(mem_str: str) -> int:
 @lru_cache()
 def get_node_resources_by_gpu() -> dict[str, dict]:
     logger.info("Collecting node info")
-    v1 = k8s_api.get_core_v1_api()
+    v1 = kube.core_v1
     nodes = v1.list_node().items
 
     # Collect node allocations

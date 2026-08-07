@@ -3,8 +3,8 @@
 from datetime import datetime, timezone
 from typing import Optional
 
-from seekr_chain import k8s_api
 from seekr_chain.backends.k8s.workflow_state import get_completion_time
+from seekr_chain.k8s_api import kube
 
 
 def list_k8s_workflows(
@@ -14,10 +14,10 @@ def list_k8s_workflows(
 
     Returns a list of dicts with keys: name, job_name, user, status, created, duration.
     """
-    k8s_batch = k8s_api.get_batch_v1_api()
+    k8s_batch = kube.batch_v1
 
     if namespace is None:
-        namespace = k8s_api.default_namespace()
+        namespace = kube.namespace
 
     label_selector = "seekr-chain/job-id"
     if user is not None:

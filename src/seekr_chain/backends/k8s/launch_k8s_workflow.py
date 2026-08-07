@@ -11,12 +11,13 @@ from pathlib import Path
 import dotenv
 import kubernetes
 
-from seekr_chain import WorkflowConfig, constants, k8s_api, remote_fs, utils
+from seekr_chain import WorkflowConfig, constants, remote_fs, utils
 from seekr_chain.backends.k8s.job_info import JobInfo, _resolve_datastore_root, get_job_info
 from seekr_chain.backends.k8s.jobset import _INIT_IMAGE, create_jobset_manifest
 from seekr_chain.backends.k8s.parse_logs import DATA_SCHEMA_VERSION
 from seekr_chain.backends.k8s.rbac import detect_service_account
 from seekr_chain.config import EnvSource, SecretRefSource
+from seekr_chain.k8s_api import kube
 from seekr_chain.nix_resolution import has_nix_roles, resolve_nix_steps
 from seekr_chain.symlink import copy_filtered, symlink
 from seekr_chain.tar_directory import tar_directory
@@ -73,7 +74,7 @@ def _create_secrets(workflow_name: str, s3_creds: dict, config: WorkflowConfig):
             if k.upper() not in secrets:
                 secrets[k.upper()] = v
 
-    v1 = k8s_api.get_core_v1_api()
+    v1 = kube.core_v1
 
     if secrets:
         secret = kubernetes.client.V1Secret(
@@ -466,7 +467,7 @@ def launch_k8s_workflow(
         service_account=service_account,
     )
 
-    k8s_batch = k8s_api.get_batch_v1_api()
+    k8s_batch = kube.batch_v1
     try:
         k8s_batch.create_namespaced_job(namespace=config.namespace, body=job_manifest)
     except kubernetes.client.exceptions.ApiException as e:

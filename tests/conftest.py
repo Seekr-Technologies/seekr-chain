@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 
 import seekr_chain
-from seekr_chain import k8s_api
+from seekr_chain.k8s_api import kube
 
 # Make the tests/ package importable (needed for tests.hermetic.*)
 _TESTS_DIR = Path(__file__).parent
@@ -68,9 +68,9 @@ def reset_k8s_api():
     this a client (or namespace) built under one test's mocks or KUBECONFIG
     would be handed to every later test.
     """
-    k8s_api.reset()
+    kube.reset()
     yield
-    k8s_api.reset()
+    kube.reset()
 
 
 @pytest.fixture

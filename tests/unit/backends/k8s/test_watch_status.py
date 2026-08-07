@@ -4,7 +4,7 @@ Unit tests for K8sWorkflow.watch_controller_status() and get_workflow_job_status
 watch_controller_status() delegates to controller_status_watcher() (watched_state.py),
 which list-then-watches: a synchronous seed read via read_namespaced_job(),
 then a background thread replaying the stream() events of the Watch built by
-k8s_api.new_watch().
+kube.new_watch().
 Mirrors test_watched_state.py's mocking style. K8sWorkflow is constructed via
 object.__new__ to skip __init__'s cluster/S3 setup, since watch_controller_status() only
 touches self._k8s_batch/_namespace/_id.
@@ -69,7 +69,7 @@ class FakeK8sBatch:
 
 
 def test_watch_controller_status_returns_immediately_when_job_already_gone(monkeypatch):
-    monkeypatch.setattr(watched_state_mod.k8s_api, "new_watch", lambda: FakeWatch([]))
+    monkeypatch.setattr(watched_state_mod.kube, "new_watch", lambda: FakeWatch([]))
 
     workflow = _make_workflow(FakeK8sBatch(job=None))
     statuses = list(workflow.watch_controller_status())
@@ -80,7 +80,7 @@ def test_watch_controller_status_returns_immediately_when_job_already_gone(monke
 def test_watch_controller_status_ends_stream_on_deleted_event(monkeypatch):
     job = _job(active=1)
     events = [{"type": "DELETED", "object": job}]
-    monkeypatch.setattr(watched_state_mod.k8s_api, "new_watch", lambda: FakeWatch(events))
+    monkeypatch.setattr(watched_state_mod.kube, "new_watch", lambda: FakeWatch(events))
 
     workflow = _make_workflow(FakeK8sBatch(job=job))
     statuses = list(workflow.watch_controller_status())
@@ -95,7 +95,7 @@ def test_watch_controller_status_yields_on_change_then_stops_when_finished(monke
         {"type": "MODIFIED", "object": job_running},
         {"type": "MODIFIED", "object": job_succeeded},
     ]
-    monkeypatch.setattr(watched_state_mod.k8s_api, "new_watch", lambda: FakeWatch(events))
+    monkeypatch.setattr(watched_state_mod.kube, "new_watch", lambda: FakeWatch(events))
 
     workflow = _make_workflow(FakeK8sBatch(job=job_running))
     statuses = list(workflow.watch_controller_status())

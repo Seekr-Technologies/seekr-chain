@@ -5,13 +5,6 @@ DAG executor that runs inside the controller pod.
 Reads pre-rendered JobSet manifests and dag.json from disk (downloaded from S3
 by init containers) and submits them to Kubernetes in dependency order.
 
-Runs standalone: this file is copied into the controller pod and executed as
-``python {JOB_RESOURCES_PATH}/controller.py`` inside an image (see
-``docker/Dockerfile.controller``) whose only dependencies are ``kubernetes``
-and ``PyYAML``. Keep imports to those plus the standard library — in
-particular, it cannot use ``seekr_chain.k8s_api`` for its clients, so it is the
-sole sanctioned exception to that module's ownership of client construction.
-
 Uses the Kubernetes watch API to react immediately when a JobSet reaches a
 terminal state, rather than polling on a fixed interval. The watch stream
 reconnects automatically on transient errors, resuming from the last seen
@@ -296,9 +289,6 @@ def main() -> int:
 
     _touch_heartbeat()
 
-    # Clients are built here rather than via seekr_chain.k8s_api: this file is
-    # the one place in the repo that must not import seekr_chain (see the
-    # module docstring), and it is also the only in-cluster caller.
     kubernetes.config.load_incluster_config()
     k8s_custom = kubernetes.client.CustomObjectsApi()
     k8s_v1 = kubernetes.client.CoreV1Api()

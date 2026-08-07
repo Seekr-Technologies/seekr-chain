@@ -47,11 +47,11 @@ class TestK8sWorkflowReconnect:
             mock_job.metadata.annotations = {"seekr-chain/datastore-root": datastore_root} if datastore_root else {}
             mock_batch.read_namespaced_job.return_value = mock_job
 
-        with patch("seekr_chain.backends.k8s.k8s_workflow.k8s_api") as mock_k8s_api:
-            mock_k8s_api.default_namespace.return_value = "argo"
-            mock_k8s_api.get_core_v1_api.return_value = MagicMock()
-            mock_k8s_api.get_custom_objects_api.return_value = MagicMock()
-            mock_k8s_api.get_batch_v1_api.return_value = mock_batch
+        with patch("seekr_chain.backends.k8s.k8s_workflow.kube") as mock_kube:
+            mock_kube.namespace = "argo"
+            mock_kube.core_v1 = MagicMock()
+            mock_kube.custom_objects = MagicMock()
+            mock_kube.batch_v1 = mock_batch
 
             return K8sWorkflow(id=id)
 

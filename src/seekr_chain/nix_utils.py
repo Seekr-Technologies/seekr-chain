@@ -247,12 +247,12 @@ def find_warm_nodes(
     means the scheduler falls back to a cold pull. Never raises.
     """
     try:
-        from seekr_chain import k8s_api
+        from seekr_chain.k8s_api import kube
     except ImportError:
         return [], []
 
     try:
-        v1 = k8s_api.get_core_v1_api()
+        v1 = kube.core_v1
         # Existence-only selector: returns every nix-mode pod, regardless
         # of which closure it pulled. Partitioning is cheap in Python and
         # halves the API load compared to two separate queries.

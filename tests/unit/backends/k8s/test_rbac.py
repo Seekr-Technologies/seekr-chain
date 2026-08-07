@@ -32,8 +32,8 @@ def _mock_core_v1(side_effects):
 
 def _patch_core_v1(mock_v1):
     return patch(
-        "seekr_chain.backends.k8s.rbac.k8s_api.get_core_v1_api",
-        return_value=mock_v1,
+        "seekr_chain.backends.k8s.rbac.kube",
+        core_v1=mock_v1,
     )
 
 
