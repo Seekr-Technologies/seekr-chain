@@ -2,6 +2,7 @@
 
 import os
 import textwrap
+from datetime import datetime, timezone
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -368,6 +369,41 @@ class TestListWorkflows:
         assert len(result) == 1
         assert result[0]["job_name"] == "my-training"
         assert result[0]["user"] == "bob"
+
+    @patch("seekr_chain.backends.k8s.list_workflows.kubernetes")
+    def test_failed_job_duration_uses_condition_timestamp(self, mock_k8s):
+        """Failed jobs freeze duration at the Failed condition's timestamp, not now()."""
+        from seekr_chain.backends.k8s.list_workflows import list_k8s_workflows as list_workflows
+
+        start = datetime(2026, 1, 1, 0, 0, 0, tzinfo=timezone.utc)
+        failed_at = datetime(2026, 1, 1, 0, 5, 30, tzinfo=timezone.utc)
+
+        mock_job = MagicMock()
+        mock_job.metadata.name = "abc123"
+        mock_job.metadata.creation_timestamp = None
+        mock_job.metadata.labels = {}
+        mock_job.status.succeeded = None
+        mock_job.status.failed = 1
+        mock_job.status.active = None
+        mock_job.status.start_time = start
+        mock_job.status.completion_time = None
+        mock_condition = MagicMock()
+        mock_condition.type = "Failed"
+        mock_condition.status = "True"
+        mock_condition.last_transition_time = failed_at
+        mock_job.status.conditions = [mock_condition]
+
+        mock_batch = MagicMock()
+        mock_result = MagicMock()
+        mock_result.items = [mock_job]
+        mock_batch.list_namespaced_job.return_value = mock_result
+        mock_k8s.client.BatchV1Api.return_value = mock_batch
+        mock_k8s.config.list_kube_config_contexts.return_value = ([], {"context": {"namespace": "default"}})
+
+        result = list_workflows()
+
+        assert result[0]["status"] == "Failed"
+        assert result[0]["duration"] == "5:30"
 
 
 class TestList:

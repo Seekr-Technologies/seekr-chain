@@ -7,13 +7,23 @@ test_collect_states.py's fixture style.
 """
 
 from dataclasses import asdict
+from datetime import datetime, timezone
 from types import SimpleNamespace
 
 from seekr_chain.backends.k8s.workflow_state import build_workflow_state
 from seekr_chain.status import PodStatus, WorkflowStatus
 
 
-def _job(succeeded=0, failed=0, active=0, start_time=None, completion_time=None, labels=None, annotations=None):
+def _job(
+    succeeded=0,
+    failed=0,
+    active=0,
+    start_time=None,
+    completion_time=None,
+    conditions=None,
+    labels=None,
+    annotations=None,
+):
     return SimpleNamespace(
         metadata=SimpleNamespace(
             labels=labels or {},
@@ -26,6 +36,7 @@ def _job(succeeded=0, failed=0, active=0, start_time=None, completion_time=None,
             active=active,
             start_time=start_time,
             completion_time=completion_time,
+            conditions=conditions,
         ),
     )
 
@@ -128,3 +139,18 @@ def test_build_workflow_state_step_with_no_pods_still_appears():
     assert state.steps[0].name == "step-a"
     assert state.steps[0].roles == []
     assert state.steps[0].pod.status == PodStatus.PENDING
+
+
+def test_build_workflow_state_failed_job_uses_condition_for_dt_end():
+    """A failed Job has no completion_time; dt_end falls back to the Failed condition."""
+    start = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    failed_at = datetime(2026, 1, 1, 0, 5, tzinfo=timezone.utc)
+    job = _job(
+        failed=1,
+        start_time=start,
+        completion_time=None,
+        conditions=[SimpleNamespace(type="Failed", status="True", last_transition_time=failed_at)],
+    )
+    state = build_workflow_state("wf-1", job=job, jobsets=[], pods=[])
+    assert state.status == WorkflowStatus.FAILED
+    assert state.dt_end == failed_at

@@ -6,6 +6,8 @@ from typing import Optional
 
 import kubernetes
 
+from seekr_chain.backends.k8s.workflow_state import get_completion_time
+
 
 def list_k8s_workflows(
     namespace: Optional[str] = None, limit: Optional[int] = None, user: Optional[str] = None
@@ -53,7 +55,7 @@ def list_k8s_workflows(
         # Duration calculation
         duration = ""
         start_time = status.start_time
-        completion_time = status.completion_time
+        completion_time = get_completion_time(status)
         if start_time:
             dt_end = completion_time if completion_time else datetime.now(timezone.utc)
             total_seconds = int((dt_end - start_time).total_seconds())
