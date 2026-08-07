@@ -5,7 +5,8 @@
 # Reads these env vars (set on the build step's container):
 #   SEEKR_CHAIN_NIX_STORE        URI of the binary cache to push to
 #   SEEKR_CHAIN_NIX_CLOSURE      expected /nix/store path (sanity check vs build output)
-#   SEEKR_CHAIN_NIX_EXPRESSION   path inside /seekr-chain/workspace to the flake
+#   SEEKR_CHAIN_NIX_WORKSPACE    copied nix source tree inside /seekr-chain
+#   SEEKR_CHAIN_NIX_EXPRESSION   path inside that nix workspace to the flake
 #   SEEKR_CHAIN_NIX_SYSTEM       e.g. x86_64-linux
 #   SEEKR_CHAIN_NIX_ATTR         attribute path within the flake (default: "default")
 #   SEEKR_CHAIN_NIX_COMPRESSION  zstd|xz|none|bzip2|gzip — applied to NARs we upload
@@ -73,7 +74,7 @@ sh /seekr-chain/resources/nix-bootstrap.sh
   echo 'log-lines = 200'
 } >> /etc/nix/nix.conf
 
-cd /seekr-chain/workspace
+cd "${SEEKR_CHAIN_NIX_WORKSPACE:-/seekr-chain/workspace}"
 
 # No --store flag: nix build runs against the real, bootstrapped /nix
 # directly. An earlier design passed --store local?root=/nix-shared here
