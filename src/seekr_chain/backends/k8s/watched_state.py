@@ -41,7 +41,6 @@ from seekr_chain.backends.k8s.workflow_state import (
     list_pods,
     read_controller_jobset,
     read_phases_configmap,
-    workflow_cancelled,
 )
 from seekr_chain.status import WorkflowStatus
 
@@ -193,9 +192,13 @@ def _seed_controller_jobset(k8s_custom, namespace, workflow_id) -> tuple[list, s
 
 def _project_workflow_state(workflow_id, caches) -> WorkflowState:
     controller_jobset = next(iter(caches["job"].values()), None)
-    cancelled = workflow_cancelled(next(iter(caches["phases"].values()), None))
+    phases_configmap = next(iter(caches["phases"].values()), None)
     return build_workflow_state(
-        workflow_id, controller_jobset, list(caches["jobsets"].values()), list(caches["pods"].values()), cancelled
+        workflow_id,
+        controller_jobset,
+        list(caches["jobsets"].values()),
+        list(caches["pods"].values()),
+        phases_configmap,
     )
 
 
@@ -203,8 +206,8 @@ def _project_controller_status(caches) -> Optional[WorkflowStatus]:
     controller_jobset = next(iter(caches["job"].values()), None)
     if controller_jobset is None:
         return None
-    cancelled = workflow_cancelled(next(iter(caches["phases"].values()), None))
-    return controller_jobset_status_and_completion(controller_jobset, cancelled)[0]
+    phases_configmap = next(iter(caches["phases"].values()), None)
+    return controller_jobset_status_and_completion(controller_jobset, phases_configmap)[0]
 
 
 class ReconnectingWatcher:

@@ -10,7 +10,6 @@ from seekr_chain.backends.k8s.workflow_state import (
     _parse_timestamp,
     controller_jobset_status_and_completion,
     read_phases_configmap,
-    workflow_cancelled,
 )
 
 _PHASE_BY_STATUS = {
@@ -18,6 +17,7 @@ _PHASE_BY_STATUS = {
     "FAILED": "Failed",
     "RUNNING": "Running",
     "TERMINATED": "Terminated",
+    "ERROR": "Error",
 }
 
 
@@ -57,10 +57,10 @@ def list_k8s_workflows(
         metadata = jobset.get("metadata", {})
         labels = metadata.get("labels", {}) or {}
 
-        cancelled = False
-        if jobset.get("status", {}).get("terminalState") == "Failed":
-            cancelled = workflow_cancelled(read_phases_configmap(k8s_v1, namespace, metadata.get("name")))
-        status, completion_time = controller_jobset_status_and_completion(jobset, cancelled)
+        phases_configmap = None
+        if jobset.get("status", {}).get("terminalState") == "Completed":
+            phases_configmap = read_phases_configmap(k8s_v1, namespace, metadata.get("name"))
+        status, completion_time = controller_jobset_status_and_completion(jobset, phases_configmap)
         phase = _PHASE_BY_STATUS.get(status.value, "Pending")
 
         # Duration calculation

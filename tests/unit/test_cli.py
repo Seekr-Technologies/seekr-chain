@@ -355,6 +355,7 @@ class TestListWorkflows:
         mock_custom = MagicMock()
         mock_custom.list_namespaced_custom_object.return_value = {"items": [jobset]}
         mock_k8s.client.CustomObjectsApi.return_value = mock_custom
+        mock_k8s.client.CoreV1Api.return_value.read_namespaced_config_map.side_effect = ApiException(status=404)
         mock_k8s.config.list_kube_config_contexts.return_value = ([], {"context": {"namespace": "default"}})
 
         result = list_workflows()
@@ -364,8 +365,9 @@ class TestListWorkflows:
         assert result[0]["user"] == "bob"
 
     @patch("seekr_chain.backends.k8s.list_workflows.kubernetes")
-    def test_failed_job_duration_uses_condition_timestamp(self, mock_k8s):
-        """Failed jobs freeze duration at the Failed condition's timestamp, not now()."""
+    def test_crashed_controller_reports_error(self, mock_k8s):
+        """A Failed terminalState now only means the controller process itself
+        crashed — freezes duration at the Failed condition's timestamp."""
 
         start = "2026-01-01T00:00:00Z"
         failed_at = "2026-01-01T00:05:30Z"
@@ -385,24 +387,23 @@ class TestListWorkflows:
         mock_custom = MagicMock()
         mock_custom.list_namespaced_custom_object.return_value = {"items": [jobset]}
         mock_k8s.client.CustomObjectsApi.return_value = mock_custom
-        mock_k8s.client.CoreV1Api.return_value.read_namespaced_config_map.side_effect = ApiException(status=404)
         mock_k8s.config.list_kube_config_contexts.return_value = ([], {"context": {"namespace": "default"}})
 
         result = list_workflows()
 
-        assert result[0]["status"] == "Failed"
+        assert result[0]["status"] == "Error"
         assert result[0]["duration"] == "5:30"
 
     @patch("seekr_chain.backends.k8s.list_workflows.kubernetes")
     def test_cancelled_run_reports_terminated_not_failed(self, mock_k8s):
-        """A Failed terminalState with a CANCELLED phase in the ConfigMap reports Terminated."""
+        """A Completed terminalState with a CANCELLED phase in the ConfigMap reports Terminated."""
 
         jobset = {
             "metadata": {"name": "abc123", "creationTimestamp": None, "labels": {}},
             "status": {
                 "replicatedJobsStatus": [],
-                "terminalState": "Failed",
-                "conditions": [{"type": "Failed", "status": "True", "lastTransitionTime": "2026-01-01T00:00:00Z"}],
+                "terminalState": "Completed",
+                "conditions": [{"type": "Completed", "status": "True", "lastTransitionTime": "2026-01-01T00:00:00Z"}],
             },
         }
 
@@ -418,6 +419,32 @@ class TestListWorkflows:
         result = list_workflows()
 
         assert result[0]["status"] == "Terminated"
+
+    @patch("seekr_chain.backends.k8s.list_workflows.kubernetes")
+    def test_completed_with_failed_phase_reports_failed(self, mock_k8s):
+        """A Completed terminalState with a FAILED phase in the ConfigMap reports Failed."""
+
+        jobset = {
+            "metadata": {"name": "abc123", "creationTimestamp": None, "labels": {}},
+            "status": {
+                "replicatedJobsStatus": [],
+                "terminalState": "Completed",
+                "conditions": [{"type": "Completed", "status": "True", "lastTransitionTime": "2026-01-01T00:00:00Z"}],
+            },
+        }
+
+        mock_configmap = MagicMock()
+        mock_configmap.data = {"phases": '{"step-a": "FAILED"}'}
+
+        mock_custom = MagicMock()
+        mock_custom.list_namespaced_custom_object.return_value = {"items": [jobset]}
+        mock_k8s.client.CustomObjectsApi.return_value = mock_custom
+        mock_k8s.client.CoreV1Api.return_value.read_namespaced_config_map.return_value = mock_configmap
+        mock_k8s.config.list_kube_config_contexts.return_value = ([], {"context": {"namespace": "default"}})
+
+        result = list_workflows()
+
+        assert result[0]["status"] == "Failed"
 
 
 class TestList:

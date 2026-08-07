@@ -22,6 +22,7 @@ from seekr_chain.backends.k8s.workflow_state import (
     list_jobsets,
     read_phases_configmap,
     workflow_cancelled,
+    workflow_failed,
 )
 from seekr_chain.status import ContainerStatus, PodStatus, WorkflowStatus
 
@@ -735,18 +736,33 @@ class TestGetWorkflowJobStatus:
         assert status == WorkflowStatus.RUNNING
         assert dt is None
 
-    def test_failed_job_reads_phases_configmap_to_detect_cancellation(self):
+    def test_failed_terminal_state_is_error_regardless_of_phases(self):
+        """A JobSet Failed terminalState now only means the controller process
+        itself crashed and exhausted backoffLimit — never a deliberate exit."""
         jobset = {"status": {"terminalState": "Failed"}}
+        api = _FakeCustomStatusApi(response=jobset)
+        status, _ = get_workflow_job_status(api, _FakeV1NoConfigMap(), "ns", "wf-abc")
+        assert status == WorkflowStatus.ERROR
+
+    def test_completed_job_reads_phases_configmap_to_detect_cancellation(self):
+        jobset = {"status": {"terminalState": "Completed"}}
         api = _FakeCustomStatusApi(response=jobset)
         cm = SimpleNamespace(data={"phases": '{"step-a": "CANCELLED"}'})
         status, _ = get_workflow_job_status(api, _FakeV1WithConfigMap(cm), "ns", "wf-abc")
         assert status == WorkflowStatus.TERMINATED
 
-    def test_failed_job_without_cancelled_phase_stays_failed(self):
-        jobset = {"status": {"terminalState": "Failed"}}
+    def test_completed_job_reads_phases_configmap_to_detect_failure(self):
+        jobset = {"status": {"terminalState": "Completed"}}
+        api = _FakeCustomStatusApi(response=jobset)
+        cm = SimpleNamespace(data={"phases": '{"step-a": "FAILED"}'})
+        status, _ = get_workflow_job_status(api, _FakeV1WithConfigMap(cm), "ns", "wf-abc")
+        assert status == WorkflowStatus.FAILED
+
+    def test_completed_job_without_configmap_is_succeeded(self):
+        jobset = {"status": {"terminalState": "Completed"}}
         api = _FakeCustomStatusApi(response=jobset)
         status, _ = get_workflow_job_status(api, _FakeV1NoConfigMap(), "ns", "wf-abc")
-        assert status == WorkflowStatus.FAILED
+        assert status == WorkflowStatus.SUCCEEDED
 
 
 # ---------------------------------------------------------------------------
@@ -755,20 +771,39 @@ class TestGetWorkflowJobStatus:
 
 
 class TestControllerJobsetStatusAndCompletion:
-    def test_failed_without_cancelled_flag(self):
+    def test_failed_terminal_state_is_error(self):
         jobset = {"status": {"terminalState": "Failed"}}
         status, _ = controller_jobset_status_and_completion(jobset)
-        assert status == WorkflowStatus.FAILED
+        assert status == WorkflowStatus.ERROR
 
-    def test_failed_with_cancelled_flag_maps_to_terminated(self):
+    def test_failed_terminal_state_is_error_even_with_cancelled_phase(self):
         jobset = {"status": {"terminalState": "Failed"}}
-        status, _ = controller_jobset_status_and_completion(jobset, cancelled=True)
+        cm = SimpleNamespace(data={"phases": '{"step-a": "CANCELLED"}'})
+        status, _ = controller_jobset_status_and_completion(jobset, cm)
+        assert status == WorkflowStatus.ERROR
+
+    def test_completed_without_configmap_is_succeeded(self):
+        jobset = {"status": {"terminalState": "Completed"}}
+        status, _ = controller_jobset_status_and_completion(jobset)
+        assert status == WorkflowStatus.SUCCEEDED
+
+    def test_completed_with_cancelled_phase_is_terminated(self):
+        jobset = {"status": {"terminalState": "Completed"}}
+        cm = SimpleNamespace(data={"phases": '{"step-a": "CANCELLED"}'})
+        status, _ = controller_jobset_status_and_completion(jobset, cm)
         assert status == WorkflowStatus.TERMINATED
 
-    def test_completed_ignores_cancelled_flag(self):
+    def test_completed_with_failed_phase_is_failed(self):
         jobset = {"status": {"terminalState": "Completed"}}
-        status, _ = controller_jobset_status_and_completion(jobset, cancelled=True)
-        assert status == WorkflowStatus.SUCCEEDED
+        cm = SimpleNamespace(data={"phases": '{"step-a": "FAILED"}'})
+        status, _ = controller_jobset_status_and_completion(jobset, cm)
+        assert status == WorkflowStatus.FAILED
+
+    def test_completed_prefers_cancelled_over_failed(self):
+        jobset = {"status": {"terminalState": "Completed"}}
+        cm = SimpleNamespace(data={"phases": '{"step-a": "FAILED", "step-b": "CANCELLED"}'})
+        status, _ = controller_jobset_status_and_completion(jobset, cm)
+        assert status == WorkflowStatus.TERMINATED
 
 
 # ---------------------------------------------------------------------------
@@ -815,3 +850,19 @@ class TestWorkflowCancelled:
     def test_any_cancelled_step_is_cancelled(self):
         cm = SimpleNamespace(data={"phases": '{"step-a": "SUCCEEDED", "step-b": "CANCELLED"}'})
         assert workflow_cancelled(cm) is True
+
+
+class TestWorkflowFailed:
+    def test_none_configmap_is_not_failed(self):
+        assert workflow_failed(None) is False
+
+    def test_missing_phases_key_is_not_failed(self):
+        assert workflow_failed(SimpleNamespace(data={})) is False
+
+    def test_no_failed_step_is_not_failed(self):
+        cm = SimpleNamespace(data={"phases": '{"step-a": "SUCCEEDED", "step-b": "CANCELLED"}'})
+        assert workflow_failed(cm) is False
+
+    def test_any_failed_step_is_failed(self):
+        cm = SimpleNamespace(data={"phases": '{"step-a": "SUCCEEDED", "step-b": "FAILED"}'})
+        assert workflow_failed(cm) is True

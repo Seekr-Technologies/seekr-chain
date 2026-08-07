@@ -447,7 +447,7 @@ def _collect_step_state(name, roles, jobset: dict) -> StepState:
 
 
 def controller_jobset_status_and_completion(
-    jobset: dict, cancelled: bool = False
+    jobset: dict, phases_configmap=None
 ) -> tuple[WorkflowStatus, Optional[datetime.datetime]]:
     """Map a controller JobSet's ``.status`` into ``(WorkflowStatus, completion_time)``.
 
@@ -455,10 +455,12 @@ def controller_jobset_status_and_completion(
     JobSet response — mirrors the per-step handling in ``_jobset_step_pod()``.
     ``completion_time`` is populated only for terminal states.
 
-    ``cancelled`` distinguishes a `chain cancel`-triggered exit from a genuine
-    failure: the controller exits 1 in both cases (so JobSet's own terminalState
-    can't tell them apart), so callers derive it from the phases ConfigMap via
-    ``read_phases_configmap()``/``workflow_cancelled()``.
+    The controller always exits 0 on ``Completed`` — DAG failure and
+    `chain cancel` are both normal orchestration outcomes, not controller
+    errors — so ``phases_configmap`` (see ``read_phases_configmap()``) is the
+    source of truth for SUCCEEDED/FAILED/TERMINATED. A ``Failed``
+    terminalState means the controller process itself crashed and exhausted
+    its retry budget, which is a distinct condition (``ERROR``).
     """
     status = jobset.get("status", {})
     terminal_state = status.get("terminalState")
@@ -471,11 +473,13 @@ def controller_jobset_status_and_completion(
             if c.get("type") == terminal_state and c.get("lastTransitionTime")
         ]
         completion_time = _parse_timestamp(max(terminal_times)) if terminal_times else None
-        if terminal_state == "Completed":
-            return WorkflowStatus.SUCCEEDED, completion_time
-        if cancelled:
+        if terminal_state == "Failed":
+            return WorkflowStatus.ERROR, completion_time
+        if workflow_cancelled(phases_configmap):
             return WorkflowStatus.TERMINATED, completion_time
-        return WorkflowStatus.FAILED, completion_time
+        if workflow_failed(phases_configmap):
+            return WorkflowStatus.FAILED, completion_time
+        return WorkflowStatus.SUCCEEDED, completion_time
 
     replicated_status = status.get("replicatedJobsStatus", []) or []
     active = sum(rs.get("active", 0) for rs in replicated_status)
@@ -493,7 +497,7 @@ class _JobMetadata:
     dt_end: Optional[datetime.datetime]
 
 
-def _jobset_metadata_from_object(jobset: Optional[dict], cancelled: bool = False) -> _JobMetadata:
+def _jobset_metadata_from_object(jobset: Optional[dict], phases_configmap=None) -> _JobMetadata:
     """Extract workflow-level metadata from an already-fetched controller JobSet.
 
     Returns an all-``UNKNOWN``/``None`` ``_JobMetadata`` if ``jobset`` is ``None`` (not found).
@@ -515,7 +519,7 @@ def _jobset_metadata_from_object(jobset: Optional[dict], cancelled: bool = False
     all_times = [c.get("lastTransitionTime") for c in conditions if c.get("lastTransitionTime")]
     dt_start = _parse_timestamp(min(all_times)) if all_times else _parse_timestamp(metadata.get("creationTimestamp"))
 
-    status, dt_end = controller_jobset_status_and_completion(jobset, cancelled)
+    status, dt_end = controller_jobset_status_and_completion(jobset, phases_configmap)
     return _JobMetadata(name=name, total_steps=total_steps, status=status, dt_start=dt_start, dt_end=dt_end)
 
 
@@ -603,9 +607,10 @@ def read_phases_configmap(k8s_v1, namespace: str, workflow_id: str):
 def workflow_cancelled(phases_configmap) -> bool:
     """True if any step's persisted phase is CANCELLED.
 
-    The controller exits 1 on both genuine failure and `chain cancel`, so
-    JobSet's own terminalState can't distinguish them — this falls back to
-    the phase ConfigMap the controller already persists for restart-resume.
+    The controller always exits 0 on ``Completed``, so JobSet's own
+    terminalState can't distinguish a cancelled run from a successful or
+    failed one — this falls back to the phase ConfigMap the controller
+    already persists for restart-resume.
     """
     if phases_configmap is None:
         return False
@@ -615,8 +620,18 @@ def workflow_cancelled(phases_configmap) -> bool:
     return "CANCELLED" in json.loads(raw).values()
 
 
+def workflow_failed(phases_configmap) -> bool:
+    """True if any step's persisted phase is FAILED. See ``workflow_cancelled()``."""
+    if phases_configmap is None:
+        return False
+    raw = (phases_configmap.data or {}).get("phases")
+    if not raw:
+        return False
+    return "FAILED" in json.loads(raw).values()
+
+
 def build_workflow_state(
-    workflow_id: str, controller_jobset: Optional[dict], jobsets: list[dict], pods: list, cancelled: bool = False
+    workflow_id: str, controller_jobset: Optional[dict], jobsets: list[dict], pods: list, phases_configmap=None
 ) -> WorkflowState:
     """Build a ``WorkflowState`` from already-fetched controller JobSet /
     worker JobSet / Pod objects.
@@ -624,7 +639,7 @@ def build_workflow_state(
     Pure — makes no API calls. Shared by the one-shot ``get_workflow_state()``
     and by watch-driven callers that maintain their own cache of raw objects.
     """
-    meta = _jobset_metadata_from_object(controller_jobset, cancelled)
+    meta = _jobset_metadata_from_object(controller_jobset, phases_configmap)
     jobset_by_step = _group_jobsets_by_step(jobsets)
     roles_by_step = _group_pods_by_step(pods, jobset_by_step.keys())
     steps = [
@@ -651,12 +666,12 @@ def get_workflow_state(k8s_custom, k8s_v1, namespace: str, workflow_id: str) -> 
     extra context required from the caller.
     """
     controller_jobset = read_controller_jobset(k8s_custom, namespace, workflow_id)
-    cancelled = False
-    if controller_jobset and controller_jobset.get("status", {}).get("terminalState") == "Failed":
-        cancelled = workflow_cancelled(read_phases_configmap(k8s_v1, namespace, workflow_id))
+    phases_configmap = None
+    if controller_jobset and controller_jobset.get("status", {}).get("terminalState") == "Completed":
+        phases_configmap = read_phases_configmap(k8s_v1, namespace, workflow_id)
     jobsets, _ = list_jobsets(k8s_custom, namespace, workflow_id)
     pods, _ = list_pods(k8s_v1, namespace, workflow_id)
-    return build_workflow_state(workflow_id, controller_jobset, jobsets, pods, cancelled)
+    return build_workflow_state(workflow_id, controller_jobset, jobsets, pods, phases_configmap)
 
 
 def get_workflow_job_status(
@@ -666,9 +681,10 @@ def get_workflow_job_status(
 
     Used by ``K8sWorkflow.get_status()`` (called repeatedly by ``wait()``) so
     callers can poll status without fetching the full workflow state. Only
-    reads the phases ConfigMap (for CANCELLED-vs-FAILED disambiguation) once
-    the JobSet has actually reached a Failed terminalState, keeping the
-    common (non-terminal) poll to a single API call.
+    reads the phases ConfigMap (for SUCCEEDED/FAILED/TERMINATED
+    disambiguation) once the JobSet has actually reached a Completed
+    terminalState, keeping the common (non-terminal) poll to a single API
+    call.
     """
     try:
         jobset = k8s_custom.get_namespaced_custom_object_status(
@@ -682,10 +698,10 @@ def get_workflow_job_status(
         if e.status != 404:
             raise
         return WorkflowStatus.UNKNOWN, None
-    cancelled = False
-    if jobset.get("status", {}).get("terminalState") == "Failed":
-        cancelled = workflow_cancelled(read_phases_configmap(k8s_v1, namespace, workflow_id))
-    return controller_jobset_status_and_completion(jobset, cancelled)
+    phases_configmap = None
+    if jobset.get("status", {}).get("terminalState") == "Completed":
+        phases_configmap = read_phases_configmap(k8s_v1, namespace, workflow_id)
+    return controller_jobset_status_and_completion(jobset, phases_configmap)
 
 
 def first_running_or_finished_pod(workflow_state: WorkflowState) -> Optional[PodState]:
