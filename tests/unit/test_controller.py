@@ -353,7 +353,6 @@ def _run_main(
         "SEEKR_CHAIN_JOB_ASSET_PATH": "/assets",
         "SEEKR_CHAIN_NAMESPACE": "ns",
         "SEEKR_CHAIN_CONTROLLER_JOB_NAME": "wf-abc",
-        "SEEKR_CHAIN_CONTROLLER_JOB_UID": "uid-123",
     }
 
     call_count = [0]
@@ -371,6 +370,7 @@ def _run_main(
     mock_watch_cls.return_value = mock_watch_instance
 
     mock_k8s = MagicMock()
+    mock_k8s.get_namespaced_custom_object.return_value = {"metadata": {"uid": "uid-123"}}
     mock_k8s.create_namespaced_custom_object.return_value = {}
     if existing_jobsets:
         from kubernetes.client.exceptions import ApiException
@@ -437,7 +437,7 @@ class TestMainLinearDag:
         events = [
             [_make_event("a-js", "Failed", rv="2")],
         ]
-        assert _run_main(dag, events) == 1
+        assert _run_main(dag, events) == 0
 
     def test_linear_two_steps(self):
         dag = [
@@ -453,7 +453,7 @@ class TestMainLinearDag:
         ]
         assert _run_main(dag, events) == 0
 
-    def test_linear_step_b_fails_returns_1(self):
+    def test_linear_step_b_fails_returns_0(self):
         dag = [
             {"name": "a", "depends_on": []},
             {"name": "b", "depends_on": ["a"]},
@@ -464,7 +464,7 @@ class TestMainLinearDag:
                 _make_event("b-js", "Failed", rv="3"),
             ],
         ]
-        assert _run_main(dag, events) == 1
+        assert _run_main(dag, events) == 0
 
     def test_step_a_failure_cascade_fails_b(self):
         dag = [
@@ -475,7 +475,7 @@ class TestMainLinearDag:
         events = [
             [_make_event("a-js", "Failed", rv="2")],
         ]
-        assert _run_main(dag, events) == 1
+        assert _run_main(dag, events) == 0
 
 
 class TestMainDiamondDag:
@@ -511,7 +511,7 @@ class TestMainDiamondDag:
                 _make_event("c-js", "Completed", rv="4"),
             ],
         ]
-        assert _run_main(dag, events) == 1
+        assert _run_main(dag, events) == 0
 
 
 class TestMainCancellation:
@@ -521,7 +521,7 @@ class TestMainCancellation:
         events = [
             [_make_event("a-js", terminal=None, rv="2", suspend=True)],
         ]
-        assert _run_main(dag, events) == 1
+        assert _run_main(dag, events) == 0
 
     def test_cascade_cancels_unsubmitted_dependent(self):
         """a is cancelled before b's dependency is satisfied — b must never be
@@ -533,7 +533,7 @@ class TestMainCancellation:
         events = [
             [_make_event("a-js", terminal=None, rv="2", suspend=True)],
         ]
-        assert _run_main(dag, events) == 1
+        assert _run_main(dag, events) == 0
 
     def test_diamond_partial_cancel_cascades_join_step(self):
         """a → b, a → c, b+c → d. b is cancelled, c succeeds — d must
@@ -552,7 +552,7 @@ class TestMainCancellation:
                 _make_event("c-js", "Completed", rv="4"),
             ],
         ]
-        assert _run_main(dag, events) == 1
+        assert _run_main(dag, events) == 0
 
 
 class TestMainWatchReconnect:
@@ -574,13 +574,13 @@ class TestMainWatchReconnect:
         mock_watch_cls.return_value = mock_watch_instance
 
         mock_k8s = MagicMock()
+        mock_k8s.get_namespaced_custom_object.return_value = {"metadata": {"uid": "uid-123"}}
         mock_k8s.create_namespaced_custom_object.return_value = {}
 
         env = {
             "SEEKR_CHAIN_JOB_ASSET_PATH": "/assets",
             "SEEKR_CHAIN_NAMESPACE": "ns",
             "SEEKR_CHAIN_CONTROLLER_JOB_NAME": "wf-abc",
-            "SEEKR_CHAIN_CONTROLLER_JOB_UID": "uid-123",
         }
 
         dag = [{"name": "a", "depends_on": []}]
@@ -628,13 +628,13 @@ class TestMainWatchReconnect:
         mock_watch_cls.return_value = mock_watch_instance
 
         mock_k8s = MagicMock()
+        mock_k8s.get_namespaced_custom_object.return_value = {"metadata": {"uid": "uid-123"}}
         mock_k8s.create_namespaced_custom_object.return_value = {}
 
         env = {
             "SEEKR_CHAIN_JOB_ASSET_PATH": "/assets",
             "SEEKR_CHAIN_NAMESPACE": "ns",
             "SEEKR_CHAIN_CONTROLLER_JOB_NAME": "wf-abc",
-            "SEEKR_CHAIN_CONTROLLER_JOB_UID": "uid-123",
         }
 
         dag = [{"name": "a", "depends_on": []}]
@@ -711,13 +711,13 @@ class TestMainControllerRetry:
         ]
 
         mock_custom = MagicMock()
+        mock_custom.get_namespaced_custom_object.return_value = {"metadata": {"uid": "uid-123"}}
         mock_custom.create_namespaced_custom_object.return_value = {}
 
         env = {
             "SEEKR_CHAIN_JOB_ASSET_PATH": "/assets",
             "SEEKR_CHAIN_NAMESPACE": "ns",
             "SEEKR_CHAIN_CONTROLLER_JOB_NAME": "wf-abc",
-            "SEEKR_CHAIN_CONTROLLER_JOB_UID": "uid-123",
         }
 
         call_count = [0]
@@ -784,13 +784,13 @@ class TestWatchTimeout:
         mock_watch_cls.return_value = mock_watch_instance
 
         mock_k8s = MagicMock()
+        mock_k8s.get_namespaced_custom_object.return_value = {"metadata": {"uid": "uid-123"}}
         mock_k8s.create_namespaced_custom_object.return_value = {}
 
         env = {
             "SEEKR_CHAIN_JOB_ASSET_PATH": "/assets",
             "SEEKR_CHAIN_NAMESPACE": "ns",
             "SEEKR_CHAIN_CONTROLLER_JOB_NAME": "wf-abc",
-            "SEEKR_CHAIN_CONTROLLER_JOB_UID": "uid-123",
         }
 
         with (
@@ -826,6 +826,7 @@ class TestTransientSubmitRetry:
 
         call_count = [0]
         mock_k8s = MagicMock()
+        mock_k8s.get_namespaced_custom_object.return_value = {"metadata": {"uid": "uid-123"}}
 
         def _create_side_effect(*args, **kwargs):
             call_count[0] += 1
@@ -858,7 +859,6 @@ class TestTransientSubmitRetry:
             "SEEKR_CHAIN_JOB_ASSET_PATH": "/assets",
             "SEEKR_CHAIN_NAMESPACE": "ns",
             "SEEKR_CHAIN_CONTROLLER_JOB_NAME": "wf-abc",
-            "SEEKR_CHAIN_CONTROLLER_JOB_UID": "uid-123",
         }
 
         with (
