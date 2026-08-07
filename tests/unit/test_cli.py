@@ -6,6 +6,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 from click.testing import CliRunner
+from kubernetes.client.rest import ApiException
 
 from seekr_chain.cli import main
 
@@ -387,12 +388,40 @@ class TestListWorkflows:
         mock_custom = MagicMock()
         mock_custom.list_namespaced_custom_object.return_value = {"items": [jobset]}
         mock_k8s.client.CustomObjectsApi.return_value = mock_custom
+        mock_k8s.client.CoreV1Api.return_value.read_namespaced_config_map.side_effect = ApiException(status=404)
         mock_k8s.config.list_kube_config_contexts.return_value = ([], {"context": {"namespace": "default"}})
 
         result = list_workflows()
 
         assert result[0]["status"] == "Failed"
         assert result[0]["duration"] == "5:30"
+
+    @patch("seekr_chain.backends.k8s.list_workflows.kubernetes")
+    def test_cancelled_run_reports_terminated_not_failed(self, mock_k8s):
+        """A Failed terminalState with a CANCELLED phase in the ConfigMap reports Terminated."""
+        from seekr_chain.backends.k8s.list_workflows import list_k8s_workflows as list_workflows
+
+        jobset = {
+            "metadata": {"name": "abc123", "creationTimestamp": None, "labels": {}},
+            "status": {
+                "replicatedJobsStatus": [],
+                "terminalState": "Failed",
+                "conditions": [{"type": "Failed", "status": "True", "lastTransitionTime": "2026-01-01T00:00:00Z"}],
+            },
+        }
+
+        mock_configmap = MagicMock()
+        mock_configmap.data = {"phases": '{"step-a": "CANCELLED"}'}
+
+        mock_custom = MagicMock()
+        mock_custom.list_namespaced_custom_object.return_value = {"items": [jobset]}
+        mock_k8s.client.CustomObjectsApi.return_value = mock_custom
+        mock_k8s.client.CoreV1Api.return_value.read_namespaced_config_map.return_value = mock_configmap
+        mock_k8s.config.list_kube_config_contexts.return_value = ([], {"context": {"namespace": "default"}})
+
+        result = list_workflows()
+
+        assert result[0]["status"] == "Terminated"
 
 
 class TestList:

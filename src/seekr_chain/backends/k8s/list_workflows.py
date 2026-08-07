@@ -6,12 +6,18 @@ from typing import Optional
 
 import kubernetes
 
-from seekr_chain.backends.k8s.workflow_state import _parse_timestamp, controller_jobset_status_and_completion
+from seekr_chain.backends.k8s.workflow_state import (
+    _parse_timestamp,
+    controller_jobset_status_and_completion,
+    read_phases_configmap,
+    workflow_cancelled,
+)
 
 _PHASE_BY_STATUS = {
     "SUCCEEDED": "Succeeded",
     "FAILED": "Failed",
     "RUNNING": "Running",
+    "TERMINATED": "Terminated",
 }
 
 
@@ -24,6 +30,7 @@ def list_k8s_workflows(
     """
     kubernetes.config.load_kube_config(config_file=os.environ.get("KUBECONFIG"))
     k8s_custom = kubernetes.client.CustomObjectsApi()
+    k8s_v1 = kubernetes.client.CoreV1Api()
 
     if namespace is None:
         _, active_ctx = kubernetes.config.list_kube_config_contexts()
@@ -50,7 +57,10 @@ def list_k8s_workflows(
         metadata = jobset.get("metadata", {})
         labels = metadata.get("labels", {}) or {}
 
-        status, completion_time = controller_jobset_status_and_completion(jobset)
+        cancelled = False
+        if jobset.get("status", {}).get("terminalState") == "Failed":
+            cancelled = workflow_cancelled(read_phases_configmap(k8s_v1, namespace, metadata.get("name")))
+        status, completion_time = controller_jobset_status_and_completion(jobset, cancelled)
         phase = _PHASE_BY_STATUS.get(status.value, "Pending")
 
         # Duration calculation
