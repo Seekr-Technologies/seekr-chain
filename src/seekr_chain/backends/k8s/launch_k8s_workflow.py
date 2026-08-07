@@ -354,18 +354,6 @@ def _build_controller_jobset(
                     "template": {
                         "spec": {
                             "backoffLimit": 10,
-                            # A genuine workflow failure/cancellation exits 1 — fail the Job
-                            # immediately rather than waiting out backoffLimit's retries, which
-                            # are meant for transient crashes (OOM, node loss, etc.) whose exit
-                            # codes won't match this rule and fall through to normal retry.
-                            "podFailurePolicy": {
-                                "rules": [
-                                    {
-                                        "action": "FailJob",
-                                        "onExitCodes": {"operator": "In", "values": [1]},
-                                    }
-                                ]
-                            },
                             "ttlSecondsAfterFinished": int(config.ttl.total_seconds()),
                             "template": {
                                 "metadata": {
