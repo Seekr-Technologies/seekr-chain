@@ -7,15 +7,26 @@ check with a mocked remote_fs.
 
 from __future__ import annotations
 
+import subprocess
+import sys
+
 import pytest
 
+from seekr_chain import nix_utils
 from seekr_chain.nix_utils import (
+    NixEvalError,
     NixNotInstalledError,
     closure_exists,
     closure_hash_from_path,
     eval_closure_path,
+    fingerprint_nix_source_tree,
     is_nix_installed,
 )
+
+
+@pytest.fixture(autouse=True)
+def _isolate_nix_memo_cache(monkeypatch, tmp_path):
+    monkeypatch.setattr(nix_utils, "_NIX_CLOSURE_CACHE_ROOT", tmp_path / "closure-cache")
 
 
 class TestClosureHashFromPath:
@@ -62,9 +73,6 @@ class TestEvalClosurePath:
         """A hung substituter/DNS blackhole must raise NixEvalError, not hang
         `chain submit` forever.
         """
-        import subprocess
-
-        from seekr_chain.nix_utils import NixEvalError
 
         monkeypatch.setattr("seekr_chain.nix_utils.shutil.which", lambda _: "/usr/bin/nix")
 
@@ -142,263 +150,233 @@ class TestClosureExists:
 
     def test_non_s3_non_oci_without_seekr_fs_gives_helpful_error(self, monkeypatch):
         # Pretend seekr_fs isn't installed, to hit the fallback for other schemes.
-        import sys
-
         monkeypatch.setitem(sys.modules, "seekr_fs", None)
         with pytest.raises(ImportError, match="seekr-fs is required"):
             closure_exists("azure://ns/bucket", "/nix/store/abc-x")
 
 
-class TestFindWarmNodes:
-    """Query the k8s API for nix-mode pods (label-existence) and partition
-    their unique node names into (exact-closure-match, partial-match —
-    some other closure), most-recent first. This is the data source for
-    the submit-time nodeAffinity injection.
+class TestClosureMemo:
+    def test_store_and_lookup_local_sharded_memo(self):
+        nix_utils.store_cached_closure_path("digest123", ".", "/nix/store/abc123-name")
+
+        closure = nix_utils.lookup_cached_closure_path("digest123", ".")
+        assert closure == "/nix/store/abc123-name"
+
+        key_hash = nix_utils._closure_memo_key_hash("digest123", ".", "default", "x86_64-linux")
+        path = nix_utils._local_closure_memo_path(key_hash)
+        assert path == nix_utils._NIX_CLOSURE_CACHE_ROOT / key_hash[:2] / f"{key_hash[2:]}.txt"
+        assert path.read_text() == "/nix/store/abc123-name"
+
+    def test_remote_hit_backfills_local(self, monkeypatch):
+        seen = {}
+
+        def fake_remote(store_uri, key_hash):
+            seen["store_uri"] = store_uri
+            seen["key_hash"] = key_hash
+            return "/nix/store/remote-hit-name"
+
+        monkeypatch.setattr(nix_utils, "_read_remote_closure_memo", fake_remote)
+
+        closure = nix_utils.lookup_cached_closure_path("digest123", ".", store_uri="s3://bucket")
+        assert closure == "/nix/store/remote-hit-name"
+
+        key_hash = nix_utils._closure_memo_key_hash("digest123", ".", "default", "x86_64-linux")
+        assert seen == {"store_uri": "s3://bucket", "key_hash": key_hash}
+        assert nix_utils._local_closure_memo_path(key_hash).read_text() == "/nix/store/remote-hit-name"
+
+    def test_remote_memo_uri_uses_store_prefix_and_strips_query_params(self):
+        key_hash = "ab" + "c" * 62
+        uri = nix_utils._closure_memo_uri("s3://bucket/prefix?endpoint=minio.local:9000&scheme=http", key_hash)
+        assert uri == f"s3://bucket/prefix/closure-cache/v1/ab/{'c' * 62}.txt"
+
+
+class TestMaybeEvalClosureClosureInStore:
+    """closure_in_store tells the caller whether a build step is needed.
+    With no store_uri there's nothing to check, so it defaults to True; with
+    a store_uri it mirrors closure_exists, and a hit-but-not-in-store result
+    materializes the source tree so the caller has something to build from.
     """
 
-    def _mock_pod(self, name, node, created, closure="abc123"):
-        """Build a minimal V1Pod-shaped object for the test.
+    def _code_path(self, tmp_path):
+        code_path = tmp_path / "code"
+        code_path.mkdir()
+        (code_path / "flake.nix").write_text("{}")
+        return code_path
 
-        Defaults the closure label to ``"abc123"`` so existing tests that
-        query for that hash see all their mock pods in the *exact* list.
-        Override to put a pod into the partial bucket.
-        """
-        from unittest.mock import MagicMock
+    def test_no_separate_source_defaults_true_without_store_uri(self, monkeypatch, tmp_path):
+        code_path = self._code_path(tmp_path)
+        monkeypatch.setattr(nix_utils, "eval_closure_path", lambda *_a, **_k: "/nix/store/aaaa-default")
 
-        from seekr_chain.nix_utils import NIX_CLOSURE_LABEL
-
-        pod = MagicMock()
-        pod.metadata.name = name
-        pod.metadata.creation_timestamp = created
-        pod.metadata.labels = {NIX_CLOSURE_LABEL: closure}
-        pod.spec.node_name = node
-        return pod
-
-    def _mock_api(self, monkeypatch, pods=None, raises=None):
-        """Stub get_core_v1_api so find_warm_nodes can be exercised offline."""
-        from unittest.mock import MagicMock
-
-        v1 = MagicMock()
-        if raises:
-            v1.list_namespaced_pod.side_effect = raises
-        else:
-            result = MagicMock()
-            result.items = pods or []
-            v1.list_namespaced_pod.return_value = result
-
-        from seekr_chain import k8s_utils
-
-        monkeypatch.setattr(k8s_utils, "get_core_v1_api", lambda: v1)
-        return v1
-
-    def test_returns_unique_nodes_newest_first(self, monkeypatch):
-        import datetime
-
-        from seekr_chain.nix_utils import find_warm_nodes
-
-        # Three pods across three nodes, all carrying the queried closure.
-        pods = [
-            self._mock_pod("a", "node-old", datetime.datetime(2026, 6, 1)),
-            self._mock_pod("b", "node-new", datetime.datetime(2026, 6, 3)),
-            self._mock_pod("c", "node-mid", datetime.datetime(2026, 6, 2)),
-        ]
-        self._mock_api(monkeypatch, pods=pods)
-
-        exact, partial = find_warm_nodes("abc123", namespace="argo-workflows")
-        assert exact == ["node-new", "node-mid", "node-old"]
-        assert partial == []
-
-    def test_dedups_multiple_pods_on_same_node(self, monkeypatch):
-        import datetime
-
-        from seekr_chain.nix_utils import find_warm_nodes
-
-        pods = [
-            self._mock_pod("a", "node-1", datetime.datetime(2026, 6, 1)),
-            self._mock_pod("b", "node-1", datetime.datetime(2026, 6, 2)),
-            self._mock_pod("c", "node-2", datetime.datetime(2026, 6, 3)),
-        ]
-        self._mock_api(monkeypatch, pods=pods)
-
-        exact, partial = find_warm_nodes("abc123", namespace="argo-workflows")
-        # node-1 has two pods but appears once; node-2 is newest.
-        assert exact == ["node-2", "node-1"]
-        assert partial == []
-
-    def test_respects_limit(self, monkeypatch):
-        import datetime
-
-        from seekr_chain.nix_utils import find_warm_nodes
-
-        pods = [self._mock_pod(f"p{i}", f"node-{i}", datetime.datetime(2026, 6, i + 1)) for i in range(20)]
-        self._mock_api(monkeypatch, pods=pods)
-
-        exact, _ = find_warm_nodes("abc123", namespace="argo-workflows", limit=5)
-        assert len(exact) == 5
-        # All newest 5, descending.
-        assert exact == [f"node-{i}" for i in range(19, 14, -1)]
-
-    def test_empty_when_no_matching_pods(self, monkeypatch):
-        from seekr_chain.nix_utils import find_warm_nodes
-
-        self._mock_api(monkeypatch, pods=[])
-        assert find_warm_nodes("abc123", namespace="argo-workflows") == ([], [])
-
-    def test_skips_pods_with_no_node_name(self, monkeypatch):
-        """A pod that hasn't been scheduled yet (no spec.nodeName) shouldn't
-        appear in the warm list — we can't infer a node from it.
-        """
-        import datetime
-
-        from seekr_chain.nix_utils import find_warm_nodes
-
-        pods = [
-            self._mock_pod("pending", None, datetime.datetime(2026, 6, 5)),
-            self._mock_pod("scheduled", "node-a", datetime.datetime(2026, 6, 1)),
-        ]
-        self._mock_api(monkeypatch, pods=pods)
-
-        exact, partial = find_warm_nodes("abc123", namespace="argo-workflows")
-        assert exact == ["node-a"]
-        assert partial == []
-
-    def test_api_failure_returns_empty(self, monkeypatch):
-        """k8s API errors degrade gracefully: warm-cache is a soft hint;
-        we'd rather schedule cold than fail the submit.
-        """
-        from seekr_chain.nix_utils import find_warm_nodes
-
-        self._mock_api(monkeypatch, raises=RuntimeError("apiserver unreachable"))
-        assert find_warm_nodes("abc123", namespace="argo-workflows") == ([], [])
-
-    def test_partitions_exact_vs_other_closures(self, monkeypatch):
-        """Pods carrying the requested closure_hash go to exact; pods with
-        any other label value go to partial. Disjoint lists.
-        """
-        import datetime
-
-        from seekr_chain.nix_utils import find_warm_nodes
-
-        pods = [
-            self._mock_pod("a", "node-exact", datetime.datetime(2026, 6, 1), closure="abc123"),
-            self._mock_pod("b", "node-other-1", datetime.datetime(2026, 6, 2), closure="xyz999"),
-            self._mock_pod("c", "node-other-2", datetime.datetime(2026, 6, 3), closure="def456"),
-        ]
-        self._mock_api(monkeypatch, pods=pods)
-
-        exact, partial = find_warm_nodes("abc123", namespace="argo-workflows")
-        assert exact == ["node-exact"]
-        # Partial is newest-first across all non-matching closures.
-        assert partial == ["node-other-2", "node-other-1"]
-
-    def test_exact_wins_when_node_has_pods_for_multiple_closures(self, monkeypatch):
-        """A node that has BOTH an exact-match pod and a non-match pod goes
-        into exact only, never both. This holds even if the non-match pod is
-        more recent — the closure paths are on disk either way.
-        """
-        import datetime
-
-        from seekr_chain.nix_utils import find_warm_nodes
-
-        pods = [
-            # node-mixed: older exact pod + newer non-match pod
-            self._mock_pod("old-exact", "node-mixed", datetime.datetime(2026, 6, 1), closure="abc123"),
-            self._mock_pod("new-other", "node-mixed", datetime.datetime(2026, 6, 5), closure="xyz999"),
-            # node-other: only a non-match pod
-            self._mock_pod("only-other", "node-other", datetime.datetime(2026, 6, 3), closure="xyz999"),
-        ]
-        self._mock_api(monkeypatch, pods=pods)
-
-        exact, partial = find_warm_nodes("abc123", namespace="argo-workflows")
-        assert "node-mixed" in exact
-        assert "node-mixed" not in partial
-        assert partial == ["node-other"]
-
-    def test_separate_limits_for_exact_and_partial(self, monkeypatch):
-        """exact uses ``limit``; partial uses ``partial_limit``. They cap
-        independently.
-        """
-        import datetime
-
-        from seekr_chain.nix_utils import find_warm_nodes
-
-        # 6 exact nodes, 25 partial nodes.
-        pods = [
-            self._mock_pod(f"e{i}", f"ex-{i}", datetime.datetime(2026, 6, i + 1), closure="abc123") for i in range(6)
-        ] + [
-            self._mock_pod(f"p{i}", f"pt-{i}", datetime.datetime(2025, 6, (i % 28) + 1), closure="xyz999")
-            for i in range(25)
-        ]
-        self._mock_api(monkeypatch, pods=pods)
-
-        exact, partial = find_warm_nodes(
-            "abc123",
-            namespace="argo-workflows",
-            limit=3,
-            partial_limit=10,
+        result = nix_utils.maybe_eval_closure(
+            code_path=str(code_path),
+            staged_root=str(code_path),
+            staging_dir=tmp_path,
+            resolved_expression=str(code_path / "flake.nix"),
+            role_name="train",
+            expression="./",
         )
-        assert len(exact) == 3
-        assert len(partial) == 10
+        assert result.closure_in_store is True
 
-    def test_mixed_none_and_real_timestamps_does_not_raise(self, monkeypatch):
-        """A pod with no creation_timestamp (e.g. a partially-initialized
-        object from a flaky watch) shouldn't crash the sort against pods
-        that do have a real datetime — the fallback must be datetime-typed,
-        not a bare int, or comparison raises TypeError.
+    def test_no_separate_source_checks_store_when_given(self, monkeypatch, tmp_path):
+        code_path = self._code_path(tmp_path)
+        monkeypatch.setattr(nix_utils, "eval_closure_path", lambda *_a, **_k: "/nix/store/aaaa-default")
+        monkeypatch.setattr(nix_utils, "closure_exists", lambda *_a, **_k: False)
+
+        result = nix_utils.maybe_eval_closure(
+            code_path=str(code_path),
+            staged_root=str(code_path),
+            staging_dir=tmp_path,
+            resolved_expression=str(code_path / "flake.nix"),
+            role_name="train",
+            expression="./",
+            store_uri="s3://bucket",
+        )
+        assert result.closure_in_store is False
+
+    def test_memo_hit_in_store_does_not_materialize(self, monkeypatch, tmp_path):
+        code_path = self._code_path(tmp_path)
+        monkeypatch.setattr(nix_utils, "lookup_cached_closure_path", lambda *_a, **_k: "/nix/store/bbbb-default")
+        monkeypatch.setattr(nix_utils, "closure_exists", lambda *_a, **_k: True)
+        monkeypatch.setattr(
+            nix_utils,
+            "materialize_nix_source_tree",
+            lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("should not materialize on an in-store hit")),
+        )
+
+        result = nix_utils.maybe_eval_closure(
+            code_path=str(code_path),
+            staged_root=str(code_path),
+            staging_dir=tmp_path,
+            resolved_expression=str(code_path / "flake.nix"),
+            role_name="train",
+            expression="./",
+            source_include=["flake.nix"],
+            store_uri="s3://bucket",
+        )
+        assert result.closure_in_store is True
+        assert result.staged_source_dir is None
+
+    def test_memo_hit_not_in_store_materializes(self, monkeypatch, tmp_path):
+        code_path = self._code_path(tmp_path)
+        workspace = tmp_path / "materialized"
+        monkeypatch.setattr(nix_utils, "lookup_cached_closure_path", lambda *_a, **_k: "/nix/store/cccc-default")
+        monkeypatch.setattr(nix_utils, "closure_exists", lambda *_a, **_k: False)
+        monkeypatch.setattr(nix_utils, "materialize_nix_source_tree", lambda *_a, **_k: ("digest", workspace))
+
+        result = nix_utils.maybe_eval_closure(
+            code_path=str(code_path),
+            staged_root=str(code_path),
+            staging_dir=tmp_path,
+            resolved_expression=str(code_path / "flake.nix"),
+            role_name="train",
+            expression="./",
+            source_include=["flake.nix"],
+            store_uri="s3://bucket",
+        )
+        assert result.closure_in_store is False
+        assert result.staged_source_dir == workspace
+
+    def test_cache_miss_checks_store_on_the_freshly_evaluated_closure(self, monkeypatch, tmp_path):
+        code_path = self._code_path(tmp_path)
+        workspace = tmp_path / "materialized"
+        workspace.mkdir()
+        (workspace / "flake.nix").write_text("{}")
+        monkeypatch.setattr(nix_utils, "lookup_cached_closure_path", lambda *_a, **_k: None)
+        monkeypatch.setattr(nix_utils, "materialize_nix_source_tree", lambda *_a, **_k: ("digest", workspace))
+        monkeypatch.setattr(nix_utils, "eval_closure_path", lambda *_a, **_k: "/nix/store/dddd-default")
+        monkeypatch.setattr(nix_utils, "store_cached_closure_path", lambda *_a, **_k: None)
+        monkeypatch.setattr(nix_utils, "closure_exists", lambda *_a, **_k: False)
+
+        result = nix_utils.maybe_eval_closure(
+            code_path=str(code_path),
+            staged_root=str(code_path),
+            staging_dir=tmp_path,
+            resolved_expression=str(code_path / "flake.nix"),
+            role_name="train",
+            expression="./",
+            source_include=["flake.nix"],
+            store_uri="s3://bucket",
+        )
+        assert result.closure_in_store is False
+        assert result.staged_source_dir == workspace
+
+    def test_cache_miss_deletes_materialized_source_when_freshly_evaluated_closure_is_already_in_store(
+        self, monkeypatch, tmp_path
+    ):
+        """Case 3: the memo missed, so we materialized+evaled speculatively,
+        but the closure turns out to already be in the store — the copy we
+        just made has no build to feed, so it's deleted rather than uploaded.
         """
-        import datetime
+        code_path = self._code_path(tmp_path)
+        workspace = tmp_path / "materialized"
+        workspace.mkdir()
+        (workspace / "flake.nix").write_text("{}")
+        monkeypatch.setattr(nix_utils, "lookup_cached_closure_path", lambda *_a, **_k: None)
+        monkeypatch.setattr(nix_utils, "materialize_nix_source_tree", lambda *_a, **_k: ("digest", workspace))
+        monkeypatch.setattr(nix_utils, "eval_closure_path", lambda *_a, **_k: "/nix/store/eeee-default")
+        monkeypatch.setattr(nix_utils, "store_cached_closure_path", lambda *_a, **_k: None)
+        monkeypatch.setattr(nix_utils, "closure_exists", lambda *_a, **_k: True)
 
-        from seekr_chain.nix_utils import find_warm_nodes
+        result = nix_utils.maybe_eval_closure(
+            code_path=str(code_path),
+            staged_root=str(code_path),
+            staging_dir=tmp_path,
+            resolved_expression=str(code_path / "flake.nix"),
+            role_name="train",
+            expression="./",
+            source_include=["flake.nix"],
+            store_uri="s3://bucket",
+        )
+        assert result.closure_in_store is True
+        assert result.staged_source_dir is None
+        assert not workspace.exists()
 
-        pods = [
-            self._mock_pod("a", "node-real", datetime.datetime(2026, 6, 1)),
-            self._mock_pod("b", "node-none", None),
-        ]
-        self._mock_api(monkeypatch, pods=pods)
 
-        exact, partial = find_warm_nodes("abc123", namespace="argo-workflows")
-        assert set(exact) == {"node-real", "node-none"}
-        assert partial == []
+class TestMaterializeNixSourceTree:
+    def test_writes_under_staging_dir_nix_workspaces(self, tmp_path):
+        src = tmp_path / "src"
+        src.mkdir()
+        (src / "flake.nix").write_text("{}")
+        staging_dir = tmp_path / "staging"
 
-    def test_partition_failure_returns_empty(self, monkeypatch):
-        """Any error raised while sorting/partitioning (not just the API
-        call itself) must degrade to ([], []), matching the documented
-        "never raises" contract.
-        """
-        import datetime
+        digest, workspace = nix_utils.materialize_nix_source_tree(src, staging_dir, include=["flake.nix"])
 
-        from seekr_chain.nix_utils import find_warm_nodes
+        assert workspace == staging_dir / "nix-workspaces" / digest / "workspace"
+        assert (workspace / "flake.nix").read_text() == "{}"
 
-        pods = [
-            self._mock_pod("a", "node-a", datetime.datetime(2026, 6, 1)),
-            self._mock_pod("b", "node-b", "not-a-real-timestamp"),
-        ]
-        self._mock_api(monkeypatch, pods=pods)
+    def test_second_call_for_same_digest_skips_the_copy(self, monkeypatch, tmp_path):
+        src = tmp_path / "src"
+        src.mkdir()
+        (src / "flake.nix").write_text("{}")
+        staging_dir = tmp_path / "staging"
 
-        # Sorting a str against a real datetime raises TypeError.
-        assert find_warm_nodes("abc123", namespace="argo-workflows") == ([], [])
+        calls = {"copy": 0}
+        real_copy_filtered = nix_utils.copy_filtered
 
-    def test_ignores_pods_missing_the_label(self, monkeypatch):
-        """Defensive: even though the API selector should filter them out,
-        a pod with no closure label is skipped (no bucket).
-        """
-        import datetime
-        from unittest.mock import MagicMock
+        def counting_copy_filtered(*a, **k):
+            calls["copy"] += 1
+            return real_copy_filtered(*a, **k)
 
-        from seekr_chain.nix_utils import find_warm_nodes
+        monkeypatch.setattr(nix_utils, "copy_filtered", counting_copy_filtered)
 
-        unlabeled = MagicMock()
-        unlabeled.metadata.name = "unlabeled"
-        unlabeled.metadata.creation_timestamp = datetime.datetime(2026, 6, 9)
-        unlabeled.metadata.labels = {}
-        unlabeled.spec.node_name = "node-bare"
+        digest1, workspace1 = nix_utils.materialize_nix_source_tree(src, staging_dir, include=["flake.nix"])
+        digest2, workspace2 = nix_utils.materialize_nix_source_tree(src, staging_dir, include=["flake.nix"])
 
-        pods = [
-            unlabeled,
-            self._mock_pod("a", "node-real", datetime.datetime(2026, 6, 1)),
-        ]
-        self._mock_api(monkeypatch, pods=pods)
+        assert calls["copy"] == 1
+        assert digest1 == digest2
+        assert workspace1 == workspace2
 
-        exact, partial = find_warm_nodes("abc123", namespace="argo-workflows")
-        assert exact == ["node-real"]
-        assert "node-bare" not in partial
+
+class TestNixSourceFingerprint:
+    def test_filtered_tree_fingerprint_is_independent_of_creation_order(self, tmp_path):
+        first = tmp_path / "first"
+        second = tmp_path / "second"
+        first.mkdir()
+        second.mkdir()
+
+        (first / "b.txt").write_text("b")
+        (first / "a.txt").write_text("a")
+        (second / "a.txt").write_text("a")
+        (second / "b.txt").write_text("b")
+
+        assert fingerprint_nix_source_tree(first) == fingerprint_nix_source_tree(second)

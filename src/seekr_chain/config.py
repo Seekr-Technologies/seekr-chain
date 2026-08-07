@@ -283,6 +283,22 @@ class NixConfig(BaseModel):
         modest (4 CPU / 16 GiB RAM / 0 GPU) — fine for small python closures;
         large native builds (pytorch from source, flash-attn) want much more
         and should set this explicitly.
+    include : Optional list of root-relative glob patterns that define the
+        source tree staged for nix eval/build. Unset (the default): nix
+        shares ``code``'s filtered tree exactly, no separate copy, no
+        duplicate upload. Set: this *replaces* ``code.include`` for nix
+        (not ANDed with it) — a role can point ``nix.include`` at a
+        completely different subtree than ``code.include`` and still get
+        real content there. Use this to keep flake invalidation narrow in
+        a large repo where ``code.include`` is broad; the tradeoff is a
+        separate materialized copy, so any files also covered by
+        ``code.include`` are uploaded twice. In practice that's cheap:
+        nix.include is meant to be a small curated set (flake.nix,
+        lockfiles, ...), and it's only staged/uploaded for closures that
+        still need building, not on every submit.
+    exclude : Optional list of root-relative glob patterns excluded from the
+        nix source tree. Applied after ``include``. Same replace-not-AND
+        relationship with ``code.exclude`` as above.
     """
 
     expression: str = "./"
@@ -291,6 +307,8 @@ class NixConfig(BaseModel):
     store: Optional[str] = None
     build: bool = True
     build_resources: Optional[ResourceConfig] = None
+    include: Optional[list[str]] = None
+    exclude: Optional[list[str]] = None
 
     # Submit-time cache: resolve_nix_steps evaluates the closure path once
     # and stashes it here so downstream callers (jobset's _resolve_nix_role,
@@ -299,6 +317,15 @@ class NixConfig(BaseModel):
     # cache hot; running it 3x per submit (which is what happened before this
     # cache existed) noticeably slowed `chain submit`.
     _resolved_closure: Optional[str] = PrivateAttr(default=None)
+    # Submit-time staging metadata for nix-specific copied source trees.
+    # ``_source_digest`` identifies the filtered nix source set,
+    # ``_staged_source_dir`` is the stable local path used for `nix eval`
+    # when materialized, and ``_source_subdir`` is the relative path included
+    # in the uploaded assets tar so in-cluster nix builds use the identical
+    # source tree.
+    _source_digest: Optional[str] = PrivateAttr(default=None)
+    _staged_source_dir: Optional[str] = PrivateAttr(default=None)
+    _source_subdir: Optional[str] = PrivateAttr(default=None)
     # Submit-time cache: resolve_nix_steps queries the k8s API for pods that
     # have previously pulled this closure (label seekr-chain.nix/closure=<hash>)
     # and stashes their node names here. The renderer injects them as a soft
@@ -306,11 +333,6 @@ class NixConfig(BaseModel):
     # nodes. None = not queried yet (e.g. unit tests that bypass resolution);
     # [] = queried, no warm nodes known (first-ever pull).
     _warm_nodes: Optional[list[str]] = PrivateAttr(default=None)
-    # Partial warm-cache: nodes that have pulled *some other* closure. They
-    # share a chunk of store paths with this one (glibc, gcc, bash, …), so
-    # substituters hit local disk for the overlap. Rendered as a lower-weight
-    # nodeAffinity preference. Disjoint from _warm_nodes by construction.
-    _partial_warm_nodes: Optional[list[str]] = PrivateAttr(default=None)
 
 
 class RoleSpecConfig(BaseModel):

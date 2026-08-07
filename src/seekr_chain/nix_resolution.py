@@ -24,9 +24,12 @@ Mutates the passed ``WorkflowConfig`` in place and returns it.
 
 from __future__ import annotations
 
+import datetime
 import hashlib
 import logging
 import os
+import time
+from pathlib import Path
 from urllib.parse import urlparse
 
 from seekr_chain import nix_utils
@@ -63,7 +66,8 @@ _DEFAULT_NIX_COMPRESSION = "zstd"
 # the build step's container:
 #   SEEKR_CHAIN_NIX_STORE       binary cache URI to push to
 #   SEEKR_CHAIN_NIX_CLOSURE     expected /nix/store path
-#   SEEKR_CHAIN_NIX_EXPRESSION  flake path inside /seekr-chain/workspace
+#   SEEKR_CHAIN_NIX_WORKSPACE   copied nix source tree inside /seekr-chain
+#   SEEKR_CHAIN_NIX_EXPRESSION  flake path inside that nix workspace
 #   SEEKR_CHAIN_NIX_SYSTEM      e.g. x86_64-linux
 #   SEEKR_CHAIN_NIX_ATTR        attr inside the flake (default: "default")
 #   SEEKR_CHAIN_NIX_COMPRESSION compression scheme for NAR uploads
@@ -96,6 +100,94 @@ def _roles_of(step) -> list[RoleSpecConfig]:
     if isinstance(step, MultiRoleStepConfig):
         return list(step.roles)
     return [step]
+
+
+# Label every nix-mode pod (consumer or build) carries: identifies the
+# closure that pod fetched/produced. Used both by the rendered podAffinity
+# (concurrent co-scheduling) and by find_warm_nodes() below.
+NIX_CLOSURE_LABEL = "seekr-chain.nix/closure"
+
+
+def find_warm_nodes(
+    closure_hash: str,
+    namespace: str,
+    limit: int = 10,
+) -> list[str]:
+    """Return exact warm-cache node names for a closure.
+
+    One k8s API call, narrowed to an equality selector
+    (``NIX_CLOSURE_LABEL == closure_hash``) — the API server does the
+    filtering, so only nodes that actually have this closure come back.
+    The closure literally lives at ``<hostpath>/nix/store/<hash>-...`` on
+    each returned node (surfaced at ``/nix/store/<hash>-...`` inside any
+    pod mounting it with ``subPath=nix``) — substituters hit local disk
+    for the full closure on next consume. Rendered as a nodeAffinity
+    preference (weight 90 in jobset.py).
+
+    Recency ordering uses the most-recent pod's ``creation_timestamp``
+    per node; the result is capped at ``limit``.
+
+    Returns ``[]`` on any error (kubeconfig not set, RBAC denied, network
+    unreachable, …). Warm-cache is a soft hint; a missing one means the
+    scheduler falls back to a cold pull. Never raises.
+    """
+    started = time.perf_counter()
+    try:
+        from seekr_chain import k8s_utils
+    except ImportError:
+        return []
+
+    try:
+        v1 = k8s_utils.get_core_v1_api()
+        result = v1.list_namespaced_pod(
+            namespace=namespace,
+            label_selector=f"{NIX_CLOSURE_LABEL}={closure_hash}",
+        )
+    except Exception as e:
+        logger.warning(
+            "could not query warm nodes for closure %s in %s: %s; scheduler will pick without warm-cache hint",
+            closure_hash,
+            namespace,
+            e,
+        )
+        return []
+
+    try:
+        pods = [p for p in result.items if p.spec.node_name]
+        # A bare int 0 fallback would raise TypeError when sorted against
+        # real datetimes, so the fallback must be datetime-typed too. If a
+        # mix of aware/naive datetimes still slips through (e.g. a
+        # partially-populated object from a flaky watch), the outer
+        # try/except below catches the resulting TypeError and degrades to
+        # [] rather than propagating it.
+        pods.sort(
+            key=lambda p: p.metadata.creation_timestamp or datetime.datetime.min,
+            reverse=True,
+        )
+
+        nodes: list[str] = []
+        seen: set[str] = set()
+        for p in pods:
+            node = p.spec.node_name
+            if node not in seen and len(nodes) < limit:
+                nodes.append(node)
+                seen.add(node)
+        logger.info(
+            "Warm-node lookup for closure %s in namespace %s completed in %.3fs (nodes=%d)",
+            closure_hash,
+            namespace,
+            time.perf_counter() - started,
+            len(nodes),
+        )
+        return nodes
+    except Exception as e:
+        logger.warning(
+            "error partitioning warm nodes for closure %s in %s: %s; scheduler will pick without warm-cache hint",
+            closure_hash,
+            namespace,
+            e,
+        )
+        return []
 
 
 def _resolve_store_uri(nix_cfg: NixConfig, role_name: str) -> str:
@@ -169,6 +261,11 @@ def _make_build_step(
         env={
             "SEEKR_CHAIN_NIX_STORE": store_uri,
             "SEEKR_CHAIN_NIX_CLOSURE": closure_path,
+            **(
+                {"SEEKR_CHAIN_NIX_WORKSPACE": f"/seekr-chain/{nix_cfg._source_subdir}"}
+                if nix_cfg._source_subdir is not None
+                else {}
+            ),
             "SEEKR_CHAIN_NIX_EXPRESSION": nix_cfg.expression,
             "SEEKR_CHAIN_NIX_SYSTEM": nix_cfg.system,
             "SEEKR_CHAIN_NIX_ATTR": nix_cfg.attr,
@@ -266,18 +363,7 @@ def _collect_nix_roles_by_step(config: WorkflowConfig) -> list[tuple]:
     return nix_roles_by_step
 
 
-def has_nix_roles(config: WorkflowConfig) -> bool:
-    """Whether any step in ``config`` uses nix mode.
-
-    Lets callers upstream of ``resolve_nix_steps`` (e.g. the code-staging
-    step in ``launch_k8s_workflow``) decide whether they need a real-file
-    copy of ``code.path`` (nix requires it) or can use the cheaper symlink
-    tree.
-    """
-    return bool(_collect_nix_roles_by_step(config))
-
-
-def resolve_nix_steps(config: WorkflowConfig, staged_code_dir: str) -> WorkflowConfig:
+def resolve_nix_steps(config: WorkflowConfig, staged_code_dir: str, staging_dir: str | Path) -> WorkflowConfig:
     """Walk a WorkflowConfig and augment it with build steps for missing closures.
 
     See module docstring. Mutates and returns ``config``.
@@ -285,10 +371,10 @@ def resolve_nix_steps(config: WorkflowConfig, staged_code_dir: str) -> WorkflowC
     No-op when no step has ``nix:`` set — so this is safe to call
     unconditionally for every submit.
 
-    ``staged_code_dir`` is a real-file copy of the curated upload set
-    (``code.include``/``code.exclude`` applied to ``code.path``) that the
-    caller already materialized as part of staging the upload — eval runs
-    directly against it instead of building a second copy.
+    ``staged_code_dir`` is the caller's staged user workspace (typically the
+    cheap symlink tree). ``staging_dir`` is where a cache-miss materializes
+    a role's copied nix source tree (``nix-workspaces/<digest>/workspace``),
+    already the location asset packaging tars up.
     """
     nix_roles_by_step = _collect_nix_roles_by_step(config)
 
@@ -302,15 +388,13 @@ def resolve_nix_steps(config: WorkflowConfig, staged_code_dir: str) -> WorkflowC
             "/seekr-chain/workspace, which is populated from code.path."
         )
 
-    # Evaluate the flake from the curated file set that gets uploaded (and that
-    # the build pod builds from), not the live tree. This drops the multi-GB
-    # .venv/.git/cache copy nix's `path:` fetcher would otherwise do, and makes
-    # the submit-time closure byte-identical to what the pod produces — so
-    # nix-build.sh's "source tree drifted" guard can't trip on a set mismatch.
     role_to_key, needed_builds = _collect_needed_builds(
         nix_roles_by_step,
         config.code.path,
+        config.code.include or [],
+        config.code.exclude or [],
         str(staged_code_dir),
+        staging_dir,
         config.namespace or "argo",
     )
     if not needed_builds:
@@ -322,14 +406,17 @@ def resolve_nix_steps(config: WorkflowConfig, staged_code_dir: str) -> WorkflowC
 def _collect_needed_builds(
     nix_roles_by_step: list[tuple],
     code_path: str,
+    code_include: list[str],
+    code_exclude: list[str],
     staged_root: str,
+    staging_dir: str | Path,
     namespace: str,
 ) -> tuple[dict[int, tuple[str, str]], dict[tuple[str, str], NixConfig]]:
     """Walk the nix-mode roles, eval each closure, and return:
 
     ``code_path`` is the live directory (used for the lexical containment
-    check); ``staged_root`` is the curated copy the flake is actually evaluated
-    from — each role's validated expression is rebased onto it.
+    check); ``staged_root`` is the general staged user workspace used as a
+    fallback when a role has no dedicated nix source tree.
 
     - ``role_to_key``: id(role) -> (resolved /nix/store path, store_uri).
       Store is part of the key because two roles can share a closure while
@@ -342,19 +429,17 @@ def _collect_needed_builds(
     Side effects on each role's NixConfig:
 
     - ``_resolved_closure`` cached so the jobset renderer doesn't re-eval.
-    - ``_warm_nodes`` (exact-closure match) and ``_partial_warm_nodes``
-      (any other closure on the node) populated via a single k8s API call
-      per unique closure. The renderer injects both as soft nodeAffinity
-      preferences (different weights).
+    - ``_warm_nodes`` (exact-closure match) populated via a single k8s API
+      call per unique closure. The renderer injects it as a soft
+      nodeAffinity preference.
 
     Raises if any role has ``build=False`` but the closure isn't in the store.
     """
     role_to_key: dict[int, tuple[str, str]] = {}
     needed_builds: dict[tuple[str, str], NixConfig] = {}
     # Dedup the warm-node query across roles in the same submit. One API
-    # call per unique closure-hash, not per role. Each entry is
-    # (exact_nodes, partial_nodes) from find_warm_nodes.
-    warm_nodes_cache: dict[str, tuple[list[str], list[str]]] = {}
+    # call per unique closure-hash, not per role.
+    warm_nodes_cache: dict[str, list[str]] = {}
 
     for step, nix_roles in nix_roles_by_step:
         for role in nix_roles:
@@ -364,41 +449,49 @@ def _collect_needed_builds(
                 code_path,
                 role_name,
             )
-            # Rebase the validated (live) path onto the staged copy so nix
-            # hashes only the uploaded set, matching what the pod builds.
-            rel = os.path.relpath(resolved_expression, os.path.normpath(code_path))
-            staged_expression = os.path.normpath(os.path.join(staged_root, rel))
             logger.info(
                 "Resolving nix closure for role %r from staged upload set (expression=%r)",
                 role_name,
                 role.nix.expression,
             )
-            closure = nix_utils.eval_closure_path(
-                staged_expression,
+            include = role.nix.include if role.nix.include is not None else code_include
+            exclude = role.nix.exclude if role.nix.exclude is not None else code_exclude
+            store_uri = _resolve_store_uri(role.nix, role_name)
+            eval_result = nix_utils.maybe_eval_closure(
+                code_path=code_path,
+                staged_root=staged_root,
+                staging_dir=staging_dir,
+                resolved_expression=resolved_expression,
+                role_name=role_name,
+                expression=role.nix.expression,
                 attr=role.nix.attr,
                 system=role.nix.system,
+                source_include=include,
+                source_exclude=exclude,
+                store_uri=store_uri,
             )
+            closure = eval_result.closure_path
+            role.nix._source_digest = eval_result.source_digest
+            role.nix._source_subdir = eval_result.source_subdir
+            role.nix._staged_source_dir = str(eval_result.staged_source_dir) if eval_result.staged_source_dir else None
             # Cache for downstream (jobset rendering) so we don't re-eval.
             role.nix._resolved_closure = closure
 
             closure_hash = nix_utils.closure_hash_from_path(closure)
             if closure_hash not in warm_nodes_cache:
-                warm_nodes_cache[closure_hash] = nix_utils.find_warm_nodes(
+                warm_nodes_cache[closure_hash] = find_warm_nodes(
                     closure_hash,
                     namespace=namespace,
                 )
-            exact_nodes, partial_nodes = warm_nodes_cache[closure_hash]
-            role.nix._warm_nodes = exact_nodes
-            role.nix._partial_warm_nodes = partial_nodes
+            role.nix._warm_nodes = warm_nodes_cache[closure_hash]
 
-            store_uri = _resolve_store_uri(role.nix, role_name)
             # Store is part of the key: two roles can share a closure but
             # be configured with different nix.store values, and each
             # needs its own build step pushing to its own store.
             key = (closure, store_uri)
             role_to_key[id(role)] = key
 
-            if nix_utils.closure_exists(store_uri, closure):
+            if eval_result.closure_in_store:
                 logger.debug("nix closure %s already in %s", closure, store_uri)
                 continue
 
@@ -473,3 +566,12 @@ def _inject_build_steps(
     # Build steps go at the front for readability — depends_on drives execution.
     config.steps = build_steps + list(config.steps)
     return config
+
+
+def process_nix(config: WorkflowConfig, *, staged_code_dir: str, staging_dir: Path) -> WorkflowConfig:
+    """Resolve nix-mode steps end to end: eval/build closures, inject build
+    steps and warm-node affinity, and materialize any missing nix source
+    trees directly into ``staging_dir`` for upload. No-op when ``config``
+    has no nix-mode roles.
+    """
+    return resolve_nix_steps(config, staged_code_dir=staged_code_dir, staging_dir=staging_dir)

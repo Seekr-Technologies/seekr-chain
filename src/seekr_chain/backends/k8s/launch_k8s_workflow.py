@@ -17,8 +17,8 @@ from seekr_chain.backends.k8s.jobset import _INIT_IMAGE, create_jobset_manifest
 from seekr_chain.backends.k8s.parse_logs import DATA_SCHEMA_VERSION
 from seekr_chain.backends.k8s.rbac import detect_service_account
 from seekr_chain.config import EnvSource, SecretRefSource
-from seekr_chain.nix_resolution import has_nix_roles, resolve_nix_steps
-from seekr_chain.symlink import copy_filtered, symlink
+from seekr_chain.nix_resolution import process_nix
+from seekr_chain.symlink import symlink
 from seekr_chain.tar_directory import tar_directory
 from seekr_chain.user_config import config as _user_config
 
@@ -421,24 +421,17 @@ def launch_k8s_workflow(
         # Stage code and resolve nix closures first, before any S3/kube/secrets
         # setup below -- nix eval is the step most likely to fail (bad flake,
         # missing store path), so it should fail fast and cheaply rather than
-        # after that other setup has already run. Staged once here, real files
-        # for nix-mode (nix `path:` can't eval off symlinks -- it'd leave
-        # dangling store links) or the cheap symlink tree otherwise, so eval
-        # and upload share a single materialization instead of each building
-        # their own copy.
+        # after that other setup has already run. The general user workspace
+        # stays as the cheap symlink tree; nix-mode roles get their own copied,
+        # content-addressed source tree linked into staging under
+        # nix-workspaces/<digest>/workspace so eval and the in-cluster build see
+        # identical bytes.
         local_code_dest = None
         if config.code is not None:
             local_code_dest = staging_dir / "workspace"
-            if has_nix_roles(config):
-                copy_filtered(
-                    config.code.path, local_code_dest, include=config.code.include, exclude=config.code.exclude
-                )
-            else:
-                symlink(
-                    Path(config.code.path), local_code_dest, exclude=config.code.exclude, include=config.code.include
-                )
+            symlink(Path(config.code.path), local_code_dest, exclude=config.code.exclude, include=config.code.include)
 
-        config = resolve_nix_steps(config, staged_code_dir=local_code_dest)
+        config = process_nix(config, staged_code_dir=local_code_dest, staging_dir=staging_dir)
 
         s3_creds = _get_s3_creds()
 

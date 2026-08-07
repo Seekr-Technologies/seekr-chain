@@ -17,12 +17,29 @@ build steps for any missing closures. We test:
 
 from __future__ import annotations
 
+import datetime
 import hashlib
 import os
+from pathlib import Path
+from unittest.mock import MagicMock
 
 import pytest
 
+from seekr_chain import k8s_utils, nix_utils
+from seekr_chain import nix_resolution as nr_mod
+from seekr_chain.backends.k8s.jobset import _eval_role_closure
 from seekr_chain.config import NixConfig, WorkflowConfig
+from seekr_chain.nix_resolution import (
+    _DEFAULT_NIX_RUNNER_IMAGE,
+    NIX_CLOSURE_LABEL,
+    _build_step_name,
+    _validate_store_uri,
+    find_warm_nodes,
+    process_nix,
+    resolve_nix_steps,
+)
+from seekr_chain.symlink import copy_filtered, symlink
+from seekr_chain.user_config import UserConfig
 from tests.utils import _populate
 
 
@@ -37,10 +54,36 @@ def staged_dir(tmp_path):
 
 
 @pytest.fixture
+def staging_dir(tmp_path):
+    """Where resolve_nix_steps materializes a role's nix source tree on a
+    closure-memo miss (nix-workspaces/<digest>/workspace)."""
+    d = tmp_path / "nix-staging"
+    d.mkdir()
+    return d
+
+
+@pytest.fixture(autouse=True)
+def _isolate_nix_local_cache(monkeypatch, tmp_path):
+    monkeypatch.setattr(nix_utils, "_NIX_CLOSURE_CACHE_ROOT", tmp_path / "closure-cache")
+
+
+@pytest.fixture(autouse=True)
+def _populate_default_code_root():
+    _populate(
+        Path("/tmp/t"),
+        {
+            "flake.nix": ["{}"],
+            "train.nix": ["{}"],
+            "eval.nix": ["{}"],
+            "subdir": {"flake.nix": ["{}"]},
+            "bar": {"flake.nix": ["{}"]},
+        },
+    )
+
+
+@pytest.fixture
 def _nix_user_config(monkeypatch):
     """Provide a runner image + store via user_config for all tests in this module."""
-    from seekr_chain import nix_resolution as nr_mod
-    from seekr_chain.user_config import UserConfig
 
     cfg = UserConfig(
         nix_store="s3://test-bucket",  # bare bucket — nix's s3 store rejects prefixes
@@ -70,6 +113,10 @@ def _no_eval_needed(monkeypatch, staged_dir):
         # *where* the flake is staged.
         if expression == staged_dir or expression.startswith(staged_dir + os.sep):
             rel = os.path.relpath(expression, staged_dir)
+        elif "/nix-workspaces/" in expression and expression.endswith("/workspace"):
+            rel = "."
+        elif "/nix-workspaces/" in expression and "/workspace/" in expression:
+            rel = expression.split("/workspace/", 1)[1]
         else:
             rel = expression
         rel = os.path.normpath(rel)
@@ -94,15 +141,13 @@ def _missing(monkeypatch):
 
 
 class TestNoOp:
-    def test_image_only_workflow_passes_through_unchanged(self, staged_dir):
-        from seekr_chain.nix_resolution import resolve_nix_steps
-
+    def test_image_only_workflow_passes_through_unchanged(self, staged_dir, staging_dir):
         c = WorkflowConfig(
             name="t",
             code={"path": "/tmp/t"},
             steps=[{"name": "a", "image": "ubuntu", "script": "echo"}],
         )
-        out = resolve_nix_steps(c, staged_code_dir=staged_dir)
+        out = resolve_nix_steps(c, staged_code_dir=staged_dir, staging_dir=staging_dir)
         assert out is c
         assert len(out.steps) == 1
         assert out.steps[0].image == "ubuntu"
@@ -114,9 +159,7 @@ class TestNoOp:
 
 
 class TestClosureExists:
-    def test_no_build_step_inserted(self, staged_dir, monkeypatch, _nix_user_config, _no_eval_needed):
-        from seekr_chain.nix_resolution import resolve_nix_steps
-
+    def test_no_build_step_inserted(self, staged_dir, monkeypatch, _nix_user_config, _no_eval_needed, staging_dir):
         _existing(monkeypatch)
 
         c = WorkflowConfig(
@@ -126,7 +169,7 @@ class TestClosureExists:
                 {"name": "a", "nix": {"expression": "./"}, "script": "echo"},
             ],
         )
-        out = resolve_nix_steps(c, staged_code_dir=staged_dir)
+        out = resolve_nix_steps(c, staged_code_dir=staged_dir, staging_dir=staging_dir)
         assert [s.name for s in out.steps] == ["a"]
 
 
@@ -142,8 +185,8 @@ class TestBuildStepInjection:
         monkeypatch,
         _nix_user_config,
         _no_eval_needed,
+        staging_dir,
     ):
-        from seekr_chain.nix_resolution import resolve_nix_steps
 
         _missing(monkeypatch)
 
@@ -154,7 +197,7 @@ class TestBuildStepInjection:
                 {"name": "train", "nix": {"expression": "./"}, "script": "echo"},
             ],
         )
-        out = resolve_nix_steps(c, staged_code_dir=staged_dir)
+        out = resolve_nix_steps(c, staged_code_dir=staged_dir, staging_dir=staging_dir)
 
         # Build step prepended, user step still there.
         assert len(out.steps) == 2
@@ -178,23 +221,17 @@ class TestBuildStepInjection:
         # it from a path. The build step's env keeps the original "./" — the
         # build pod resolves it relative to /seekr-chain/workspace.
         expected_closure = train.nix._resolved_closure
-        assert build.env == {
-            "SEEKR_CHAIN_NIX_STORE": "s3://test-bucket",
-            "SEEKR_CHAIN_NIX_CLOSURE": expected_closure,
-            "SEEKR_CHAIN_NIX_EXPRESSION": "./",
-            "SEEKR_CHAIN_NIX_SYSTEM": "x86_64-linux",
-            "SEEKR_CHAIN_NIX_ATTR": "default",
-            "SEEKR_CHAIN_NIX_COMPRESSION": "zstd",
-            # Same store, under the name seekr-nix's nix-wrapper.sh shim
-            # requires to accelerate `nix build` at all.
-            "SEEKR_NIX_STORE_BACKEND": "s3://test-bucket",
-        }
+        assert build.env["SEEKR_CHAIN_NIX_STORE"] == "s3://test-bucket"
+        assert build.env["SEEKR_CHAIN_NIX_CLOSURE"] == expected_closure
+        assert build.env["SEEKR_CHAIN_NIX_EXPRESSION"] == "./"
+        assert build.env["SEEKR_CHAIN_NIX_SYSTEM"] == "x86_64-linux"
+        assert build.env["SEEKR_CHAIN_NIX_ATTR"] == "default"
+        assert build.env["SEEKR_CHAIN_NIX_COMPRESSION"] == "zstd"
+        assert build.env["SEEKR_NIX_STORE_BACKEND"] == "s3://test-bucket"
+        assert build.env["SEEKR_CHAIN_NIX_WORKSPACE"].startswith("/seekr-chain/nix-workspaces/")
 
-    def test_compression_override(self, staged_dir, monkeypatch, _no_eval_needed):
+    def test_compression_override(self, staged_dir, monkeypatch, _no_eval_needed, staging_dir):
         """user_config.nix_compression overrides the default ZSTD."""
-        from seekr_chain import nix_resolution as nr_mod
-        from seekr_chain.nix_resolution import resolve_nix_steps
-        from seekr_chain.user_config import UserConfig
 
         _missing(monkeypatch)
         monkeypatch.setattr(
@@ -212,7 +249,7 @@ class TestBuildStepInjection:
             code={"path": "/tmp/t"},
             steps=[{"name": "a", "nix": {"expression": "./"}, "script": "echo"}],
         )
-        out = resolve_nix_steps(c, staged_code_dir=staged_dir)
+        out = resolve_nix_steps(c, staged_code_dir=staged_dir, staging_dir=staging_dir)
         build = next(s for s in out.steps if s.name.startswith("nix-build-"))
         # Uppercase NONE → lowercase none for nix's URI syntax. The script
         # reads SEEKR_CHAIN_NIX_COMPRESSION at runtime.
@@ -224,8 +261,8 @@ class TestBuildStepInjection:
         monkeypatch,
         _nix_user_config,
         _no_eval_needed,
+        staging_dir,
     ):
-        from seekr_chain.nix_resolution import resolve_nix_steps
 
         _missing(monkeypatch)
 
@@ -238,7 +275,7 @@ class TestBuildStepInjection:
                 {"name": "b", "nix": {"expression": "./train.nix"}, "script": "echo"},
             ],
         )
-        out = resolve_nix_steps(c, staged_code_dir=staged_dir)
+        out = resolve_nix_steps(c, staged_code_dir=staged_dir, staging_dir=staging_dir)
         # 1 build step + 2 user steps.
         assert len(out.steps) == 3
         build_steps = [s for s in out.steps if s.name.startswith("nix-build-")]
@@ -255,6 +292,7 @@ class TestBuildStepInjection:
         monkeypatch,
         _nix_user_config,
         _no_eval_needed,
+        staging_dir,
     ):
         """Two roles sharing a closure but configured with different
         nix.store values must each get their own build step pushing to
@@ -262,7 +300,6 @@ class TestBuildStepInjection:
         push to whichever store was seen first, and the other role's
         store would 404 at runtime.
         """
-        from seekr_chain.nix_resolution import resolve_nix_steps
 
         _missing(monkeypatch)
 
@@ -282,7 +319,7 @@ class TestBuildStepInjection:
                 },
             ],
         )
-        out = resolve_nix_steps(c, staged_code_dir=staged_dir)
+        out = resolve_nix_steps(c, staged_code_dir=staged_dir, staging_dir=staging_dir)
 
         build_steps = [s for s in out.steps if s.name.startswith("nix-build-")]
         assert len(build_steps) == 2
@@ -306,8 +343,8 @@ class TestBuildStepInjection:
         monkeypatch,
         _nix_user_config,
         _no_eval_needed,
+        staging_dir,
     ):
-        from seekr_chain.nix_resolution import resolve_nix_steps
 
         _missing(monkeypatch)
 
@@ -319,7 +356,7 @@ class TestBuildStepInjection:
                 {"name": "b", "nix": {"expression": "./eval.nix"}, "script": "echo"},
             ],
         )
-        out = resolve_nix_steps(c, staged_code_dir=staged_dir)
+        out = resolve_nix_steps(c, staged_code_dir=staged_dir, staging_dir=staging_dir)
         build_steps = [s for s in out.steps if s.name.startswith("nix-build-")]
         assert len(build_steps) == 2
 
@@ -329,20 +366,29 @@ class TestBuildStepInjection:
         monkeypatch,
         _nix_user_config,
         _no_eval_needed,
+        staging_dir,
     ):
         """If a user names their step something like our build-step prefix, we
         suffix -1, -2 etc. instead of overwriting it."""
-        from seekr_chain.nix_resolution import _build_step_name, resolve_nix_steps
 
         _missing(monkeypatch)
 
         # Figure out what name our build step would get for this expression.
-        from seekr_chain import nix_utils
 
-        # resolve_nix_steps evaluates from a staged copy; the fake eval is
-        # staging-independent (see _no_eval_needed), so evaluating the same
-        # relative expression here yields the same closure it will produce.
-        closure = nix_utils.eval_closure_path("./")
+        eval_result = nix_utils.maybe_eval_closure(
+            code_path="/tmp/t",
+            staged_root=staged_dir,
+            staging_dir=staging_dir,
+            resolved_expression="/tmp/t",
+            role_name="train",
+            expression="./",
+            attr="default",
+            system="x86_64-linux",
+            source_include=["**"],
+            source_exclude=[],
+            store_uri="s3://test-bucket",
+        )
+        closure = eval_result.closure_path
         existing_name = _build_step_name(closure, "s3://test-bucket")
 
         # Now build a workflow where the user already has a step with that name.
@@ -354,7 +400,7 @@ class TestBuildStepInjection:
                 {"name": "train", "nix": {"expression": "./"}, "script": "echo"},
             ],
         )
-        out = resolve_nix_steps(c, staged_code_dir=staged_dir)
+        out = resolve_nix_steps(c, staged_code_dir=staged_dir, staging_dir=staging_dir)
         names = [s.name for s in out.steps]
         # The original user step is still there; the synthesized one got
         # suffixed -1.
@@ -367,8 +413,8 @@ class TestBuildStepInjection:
         monkeypatch,
         _nix_user_config,
         _no_eval_needed,
+        staging_dir,
     ):
-        from seekr_chain.nix_resolution import resolve_nix_steps
 
         _missing(monkeypatch)
 
@@ -385,7 +431,7 @@ class TestBuildStepInjection:
                 },
             ],
         )
-        out = resolve_nix_steps(c, staged_code_dir=staged_dir)
+        out = resolve_nix_steps(c, staged_code_dir=staged_dir, staging_dir=staging_dir)
         train = next(s for s in out.steps if s.name == "train")
         # Has both the original 'prep' dep AND the new build step.
         assert "prep" in train.depends_on
@@ -404,8 +450,8 @@ class TestErrorPaths:
         monkeypatch,
         _nix_user_config,
         _no_eval_needed,
+        staging_dir,
     ):
-        from seekr_chain.nix_resolution import resolve_nix_steps
 
         _missing(monkeypatch)
 
@@ -421,13 +467,10 @@ class TestErrorPaths:
             ],
         )
         with pytest.raises(ValueError, match="nix.build=False"):
-            resolve_nix_steps(c, staged_code_dir=staged_dir)
+            resolve_nix_steps(c, staged_code_dir=staged_dir, staging_dir=staging_dir)
 
-    def test_no_store_anywhere_errors(self, staged_dir, monkeypatch, _no_eval_needed):
+    def test_no_store_anywhere_errors(self, staged_dir, monkeypatch, _no_eval_needed, staging_dir):
         """No store on the step AND no nix_store in user_config -> error."""
-        from seekr_chain import nix_resolution as nr_mod
-        from seekr_chain.nix_resolution import resolve_nix_steps
-        from seekr_chain.user_config import UserConfig
 
         monkeypatch.setattr(nr_mod, "_user_config", UserConfig(nix_runner_image="img"))
 
@@ -437,15 +480,12 @@ class TestErrorPaths:
             steps=[{"name": "a", "nix": {"expression": "./"}, "script": "echo"}],
         )
         with pytest.raises(ValueError, match="nix.store"):
-            resolve_nix_steps(c, staged_code_dir=staged_dir)
+            resolve_nix_steps(c, staged_code_dir=staged_dir, staging_dir=staging_dir)
 
-    def test_no_runner_image_uses_default(self, staged_dir, monkeypatch, _no_eval_needed):
+    def test_no_runner_image_uses_default(self, staged_dir, monkeypatch, _no_eval_needed, staging_dir):
         """Build-step injection uses _DEFAULT_NIX_RUNNER_IMAGE when user_config
         doesn't set nix_runner_image. Same fallback as the render-time helper.
         """
-        from seekr_chain import nix_resolution as nr_mod
-        from seekr_chain.nix_resolution import _DEFAULT_NIX_RUNNER_IMAGE, resolve_nix_steps
-        from seekr_chain.user_config import UserConfig
 
         _missing(monkeypatch)
         monkeypatch.setattr(nr_mod, "_user_config", UserConfig(nix_store="s3://x"))
@@ -460,24 +500,21 @@ class TestErrorPaths:
             code={"path": "/tmp/t"},
             steps=[{"name": "a", "nix": {"expression": "./"}, "script": "echo"}],
         )
-        out = resolve_nix_steps(c, staged_code_dir=staged_dir)
+        out = resolve_nix_steps(c, staged_code_dir=staged_dir, staging_dir=staging_dir)
         build = next(s for s in out.steps if s.name.startswith("nix-build-"))
         assert build.image == _DEFAULT_NIX_RUNNER_IMAGE
 
 
 class TestWarmNodesCache:
-    """resolve_nix_steps should populate role.nix._warm_nodes (exact) and
-    role.nix._partial_warm_nodes (some other closure) via find_warm_nodes
-    so the renderer can inject the two nodeAffinity preferences.
+    """resolve_nix_steps should populate role.nix._warm_nodes via
+    find_warm_nodes so the renderer can inject the nodeAffinity preference.
     """
 
-    def test_warm_nodes_populated(self, staged_dir, monkeypatch, _nix_user_config, _no_eval_needed):
-        from seekr_chain.nix_resolution import resolve_nix_steps
-
+    def test_warm_nodes_populated(self, staged_dir, monkeypatch, _nix_user_config, _no_eval_needed, staging_dir):
         _existing(monkeypatch)
         monkeypatch.setattr(
-            "seekr_chain.nix_utils.find_warm_nodes",
-            lambda h, namespace, **_kw: (["node-a", "node-b"], ["node-c"]),
+            "seekr_chain.nix_resolution.find_warm_nodes",
+            lambda h, namespace, **_kw: ["node-a", "node-b"],
         )
 
         c = WorkflowConfig(
@@ -485,9 +522,8 @@ class TestWarmNodesCache:
             code={"path": "/tmp/t"},
             steps=[{"name": "a", "nix": {"expression": "./"}, "script": "echo"}],
         )
-        out = resolve_nix_steps(c, staged_code_dir=staged_dir)
+        out = resolve_nix_steps(c, staged_code_dir=staged_dir, staging_dir=staging_dir)
         assert out.steps[0].nix._warm_nodes == ["node-a", "node-b"]
-        assert out.steps[0].nix._partial_warm_nodes == ["node-c"]
 
     def test_warm_nodes_deduped_across_roles_sharing_closure(
         self,
@@ -495,21 +531,21 @@ class TestWarmNodesCache:
         monkeypatch,
         _nix_user_config,
         _no_eval_needed,
+        staging_dir,
     ):
         """Two steps with the same expression share a closure; find_warm_nodes
         should be called only once per unique closure, with both roles getting
-        the same cached (exact, partial) tuple.
+        the same cached result.
         """
-        from seekr_chain.nix_resolution import resolve_nix_steps
 
         _existing(monkeypatch)
         calls = {"n": 0}
 
         def fake(_h, **_kw):
             calls["n"] += 1
-            return (["node-a"], ["node-z"])
+            return ["node-a"]
 
-        monkeypatch.setattr("seekr_chain.nix_utils.find_warm_nodes", fake)
+        monkeypatch.setattr("seekr_chain.nix_resolution.find_warm_nodes", fake)
 
         c = WorkflowConfig(
             name="t",
@@ -519,12 +555,10 @@ class TestWarmNodesCache:
                 {"name": "b", "nix": {"expression": "./"}, "script": "echo"},
             ],
         )
-        out = resolve_nix_steps(c, staged_code_dir=staged_dir)
+        out = resolve_nix_steps(c, staged_code_dir=staged_dir, staging_dir=staging_dir)
         assert calls["n"] == 1  # only one API call across both roles
         assert out.steps[0].nix._warm_nodes == ["node-a"]
-        assert out.steps[0].nix._partial_warm_nodes == ["node-z"]
         assert out.steps[1].nix._warm_nodes == ["node-a"]
-        assert out.steps[1].nix._partial_warm_nodes == ["node-z"]
 
 
 class TestExpressionValidation:
@@ -532,32 +566,27 @@ class TestExpressionValidation:
     so symlinks inside code.path can still escape via dereferencing on upload.
     """
 
-    def test_code_required(self, staged_dir, _nix_user_config, _no_eval_needed):
-        from seekr_chain.nix_resolution import resolve_nix_steps
-
+    def test_code_required(self, staged_dir, _nix_user_config, _no_eval_needed, staging_dir):
         # No code: but a nix-mode step. Rejected — the flake never reaches the pod.
         c = WorkflowConfig(
             name="t",
             steps=[{"name": "a", "nix": {"expression": "./"}, "script": "echo"}],
         )
         with pytest.raises(ValueError, match="code"):
-            resolve_nix_steps(c, staged_code_dir=staged_dir)
+            resolve_nix_steps(c, staged_code_dir=staged_dir, staging_dir=staging_dir)
 
-    def test_image_only_workflow_doesnt_need_code(self, staged_dir, _no_eval_needed):
+    def test_image_only_workflow_doesnt_need_code(self, staged_dir, _no_eval_needed, staging_dir):
         """Sanity: the code-required check only fires for nix-mode roles."""
-        from seekr_chain.nix_resolution import resolve_nix_steps
 
         c = WorkflowConfig(
             name="t",
             steps=[{"name": "a", "image": "ubuntu", "script": "echo"}],
         )
         # No raise — and config returned unchanged.
-        out = resolve_nix_steps(c, staged_code_dir=staged_dir)
+        out = resolve_nix_steps(c, staged_code_dir=staged_dir, staging_dir=staging_dir)
         assert out is c
 
-    def test_absolute_expression_rejected(self, staged_dir, _nix_user_config, _no_eval_needed):
-        from seekr_chain.nix_resolution import resolve_nix_steps
-
+    def test_absolute_expression_rejected(self, staged_dir, _nix_user_config, _no_eval_needed, staging_dir):
         c = WorkflowConfig(
             name="t",
             code={"path": "/tmp/t"},
@@ -566,11 +595,9 @@ class TestExpressionValidation:
             ],
         )
         with pytest.raises(ValueError, match="absolute"):
-            resolve_nix_steps(c, staged_code_dir=staged_dir)
+            resolve_nix_steps(c, staged_code_dir=staged_dir, staging_dir=staging_dir)
 
-    def test_escape_via_dotdot_rejected(self, staged_dir, _nix_user_config, _no_eval_needed):
-        from seekr_chain.nix_resolution import resolve_nix_steps
-
+    def test_escape_via_dotdot_rejected(self, staged_dir, _nix_user_config, _no_eval_needed, staging_dir):
         c = WorkflowConfig(
             name="t",
             code={"path": "/tmp/t"},
@@ -579,11 +606,10 @@ class TestExpressionValidation:
             ],
         )
         with pytest.raises(ValueError, match="escapes code.path"):
-            resolve_nix_steps(c, staged_code_dir=staged_dir)
+            resolve_nix_steps(c, staged_code_dir=staged_dir, staging_dir=staging_dir)
 
-    def test_subdir_expression_ok(self, staged_dir, monkeypatch, _nix_user_config, _no_eval_needed):
+    def test_subdir_expression_ok(self, staged_dir, monkeypatch, _nix_user_config, _no_eval_needed, staging_dir):
         """Expression pointing at a subdir under code.path is allowed."""
-        from seekr_chain.nix_resolution import resolve_nix_steps
 
         _existing(monkeypatch)
         c = WorkflowConfig(
@@ -594,11 +620,12 @@ class TestExpressionValidation:
             ],
         )
         # No raise.
-        resolve_nix_steps(c, staged_code_dir=staged_dir)
+        resolve_nix_steps(c, staged_code_dir=staged_dir, staging_dir=staging_dir)
 
-    def test_dotdot_resolving_back_inside_is_ok(self, staged_dir, monkeypatch, _nix_user_config, _no_eval_needed):
+    def test_dotdot_resolving_back_inside_is_ok(
+        self, staged_dir, monkeypatch, _nix_user_config, _no_eval_needed, staging_dir
+    ):
         """foo/../bar resolves to bar which is inside code.path — fine."""
-        from seekr_chain.nix_resolution import resolve_nix_steps
 
         _existing(monkeypatch)
         c = WorkflowConfig(
@@ -608,7 +635,7 @@ class TestExpressionValidation:
                 {"name": "a", "nix": {"expression": "foo/../bar"}, "script": "echo"},
             ],
         )
-        resolve_nix_steps(c, staged_code_dir=staged_dir)
+        resolve_nix_steps(c, staged_code_dir=staged_dir, staging_dir=staging_dir)
 
 
 class TestClosureCache:
@@ -616,9 +643,7 @@ class TestClosureCache:
     downstream callers (jobset rendering) don't re-shell to `nix eval`.
     """
 
-    def test_closure_cached_on_nix_config(self, staged_dir, monkeypatch, _nix_user_config):
-        from seekr_chain.nix_resolution import resolve_nix_steps
-
+    def test_closure_cached_on_nix_config(self, staged_dir, monkeypatch, _nix_user_config, staging_dir):
         _existing(monkeypatch)
         # Count eval calls — should be exactly one per role.
         calls = {"n": 0}
@@ -634,7 +659,7 @@ class TestClosureCache:
             code={"path": "/tmp/t"},
             steps=[{"name": "a", "nix": {"expression": "./"}, "script": "echo"}],
         )
-        out = resolve_nix_steps(c, staged_code_dir=staged_dir)
+        out = resolve_nix_steps(c, staged_code_dir=staged_dir, staging_dir=staging_dir)
         assert calls["n"] == 1
         assert out.steps[0].nix._resolved_closure == "/nix/store/cachedhash-x"
 
@@ -643,7 +668,6 @@ class TestClosureCache:
         _eval_role_closure (used by _resolve_nix_role + _detect_closure_hash)
         must read the cache instead of evaling again.
         """
-        from seekr_chain.backends.k8s.jobset import _eval_role_closure
 
         eval_count = {"n": 0}
 
@@ -665,12 +689,147 @@ class TestClosureCache:
         assert eval_count["n"] == 1
 
 
+class TestNixSourceStaging:
+    def test_nix_include_limits_eval_tree(self, monkeypatch, tmp_path, _nix_user_config, staging_dir):
+        _existing(monkeypatch)
+        captured = {}
+
+        def fake_eval(expression, attr="default", system="x86_64-linux"):
+            captured["path"] = expression
+            tree = set()
+            for root, _dirs, files in os.walk(expression):
+                for f in files:
+                    tree.add(os.path.relpath(os.path.join(root, f), expression))
+            captured["tree"] = tree
+            return "/nix/store/0000000000000000000000000000abcd-default"
+
+        monkeypatch.setattr("seekr_chain.nix_utils.eval_closure_path", fake_eval)
+        monkeypatch.setattr("seekr_chain.nix_resolution.find_warm_nodes", lambda *_a, **_k: ([], []))
+
+        live_dir = tmp_path / "live"
+        _populate(
+            live_dir,
+            {
+                "flake.nix": ["{}"],
+                "pyproject.toml": ["[project]"],
+                "uv.lock": ["version = 1"],
+                "src": {"app.py": ["print('noise')"]},
+            },
+        )
+        staged_dir = tmp_path / "staged"
+        symlink(live_dir, staged_dir)
+
+        c = WorkflowConfig(
+            name="t",
+            code={"path": str(live_dir)},
+            steps=[
+                {
+                    "name": "train",
+                    "nix": {"expression": "./", "include": ["flake.nix", "pyproject.toml", "uv.lock"]},
+                    "script": "echo",
+                }
+            ],
+        )
+        resolve_nix_steps(c, staged_code_dir=str(staged_dir), staging_dir=staging_dir)
+
+        assert captured["tree"] == {"flake.nix", "pyproject.toml", "uv.lock"}
+        assert c.steps[0].nix._source_subdir.startswith("nix-workspaces/")
+        # closure_exists() is stubbed True, so the freshly-evaled closure is
+        # already in the store — the copy just made for eval has no build to
+        # feed and is deleted.
+        assert c.steps[0].nix._staged_source_dir is None
+
+    def test_cached_closure_skips_materialize_and_eval_when_store_hit(
+        self, monkeypatch, tmp_path, _nix_user_config, staging_dir
+    ):
+        live_dir = tmp_path / "live"
+        _populate(live_dir, {"flake.nix": ["{}"], "pyproject.toml": ["[project]"]})
+        staged_dir = tmp_path / "staged"
+        symlink(live_dir, staged_dir)
+
+        monkeypatch.setattr("seekr_chain.nix_resolution.find_warm_nodes", lambda *_a, **_k: ([], []))
+        monkeypatch.setattr("seekr_chain.nix_utils.closure_exists", lambda *_a, **_k: True)
+
+        digest = nix_utils.fingerprint_nix_source_tree(live_dir, include=["flake.nix", "pyproject.toml"])
+        nix_utils.store_cached_closure_path(digest, ".", "/nix/store/cachedhash-default")
+
+        monkeypatch.setattr(
+            "seekr_chain.nix_utils.materialize_nix_source_tree",
+            lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("should not materialize on memo hit")),
+        )
+        monkeypatch.setattr(
+            "seekr_chain.nix_utils.eval_closure_path",
+            lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("should not eval on memo hit")),
+        )
+
+        c = WorkflowConfig(
+            name="t",
+            code={"path": str(live_dir)},
+            steps=[
+                {
+                    "name": "train",
+                    "nix": {"expression": "./", "include": ["flake.nix", "pyproject.toml"]},
+                    "script": "echo",
+                }
+            ],
+        )
+        out = resolve_nix_steps(c, staged_code_dir=str(staged_dir), staging_dir=staging_dir)
+        assert out.steps[0].nix._resolved_closure == "/nix/store/cachedhash-default"
+        assert out.steps[0].nix._staged_source_dir is None
+
+    def test_cached_closure_materializes_only_for_missing_store_build(
+        self,
+        monkeypatch,
+        tmp_path,
+        _nix_user_config,
+        staging_dir,
+    ):
+
+        live_dir = tmp_path / "live"
+        _populate(live_dir, {"flake.nix": ["{}"], "pyproject.toml": ["[project]"]})
+        staged_dir = tmp_path / "staged"
+        symlink(live_dir, staged_dir)
+
+        monkeypatch.setattr("seekr_chain.nix_resolution.find_warm_nodes", lambda *_a, **_k: ([], []))
+        monkeypatch.setattr("seekr_chain.nix_utils.closure_exists", lambda *_a, **_k: False)
+
+        digest = nix_utils.fingerprint_nix_source_tree(live_dir, include=["flake.nix", "pyproject.toml"])
+        nix_utils.store_cached_closure_path(digest, ".", "/nix/store/cachedhash-default")
+
+        cached_workspace = tmp_path / "cached-source"
+        _populate(cached_workspace, {"flake.nix": ["{}"], "pyproject.toml": ["[project]"]})
+        calls = {"materialize": 0}
+
+        def fake_materialize(*_a, **_k):
+            calls["materialize"] += 1
+            return digest, cached_workspace
+
+        monkeypatch.setattr("seekr_chain.nix_utils.materialize_nix_source_tree", fake_materialize)
+        monkeypatch.setattr(
+            "seekr_chain.nix_utils.eval_closure_path",
+            lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("should not eval on memo hit")),
+        )
+
+        c = WorkflowConfig(
+            name="t",
+            code={"path": str(live_dir)},
+            steps=[
+                {
+                    "name": "train",
+                    "nix": {"expression": "./", "include": ["flake.nix", "pyproject.toml"]},
+                    "script": "echo",
+                }
+            ],
+        )
+        out = resolve_nix_steps(c, staged_code_dir=str(staged_dir), staging_dir=staging_dir)
+        assert calls["materialize"] == 1
+        assert out.steps[1].nix._staged_source_dir == str(cached_workspace)
+        assert out.steps[1].depends_on
+
+
 class TestStoreUriValidation:
-    def test_s3_with_prefix_rejected(self, staged_dir, monkeypatch, _no_eval_needed):
+    def test_s3_with_prefix_rejected(self, staged_dir, monkeypatch, _no_eval_needed, staging_dir):
         """nix's native s3:// store can't handle path prefixes — fail fast."""
-        from seekr_chain import nix_resolution as nr_mod
-        from seekr_chain.nix_resolution import resolve_nix_steps
-        from seekr_chain.user_config import UserConfig
 
         monkeypatch.setattr(nr_mod, "_user_config", UserConfig(nix_store="s3://bucket/prefix", nix_runner_image="img"))
         c = WorkflowConfig(
@@ -679,13 +838,17 @@ class TestStoreUriValidation:
             steps=[{"name": "a", "nix": {"expression": "./"}, "script": "echo"}],
         )
         with pytest.raises(ValueError, match="does not support path prefixes"):
-            resolve_nix_steps(c, staged_code_dir=staged_dir)
+            resolve_nix_steps(c, staged_code_dir=staged_dir, staging_dir=staging_dir)
 
     def test_s3_with_prefix_in_per_step_store_rejected(
-        self, staged_dir, monkeypatch, _no_eval_needed, _nix_user_config
+        self,
+        staged_dir,
+        monkeypatch,
+        _no_eval_needed,
+        _nix_user_config,
+        staging_dir,
     ):
         """Same rejection when the per-step store sets a prefix."""
-        from seekr_chain.nix_resolution import resolve_nix_steps
 
         c = WorkflowConfig(
             name="t",
@@ -699,11 +862,9 @@ class TestStoreUriValidation:
             ],
         )
         with pytest.raises(ValueError, match="does not support path prefixes"):
-            resolve_nix_steps(c, staged_code_dir=staged_dir)
+            resolve_nix_steps(c, staged_code_dir=staged_dir, staging_dir=staging_dir)
 
-    def test_s3_bare_bucket_ok(self, staged_dir, monkeypatch, _no_eval_needed, _nix_user_config):
-        from seekr_chain.nix_resolution import resolve_nix_steps
-
+    def test_s3_bare_bucket_ok(self, staged_dir, monkeypatch, _no_eval_needed, _nix_user_config, staging_dir):
         _existing(monkeypatch)  # so we don't go down the build-step path
 
         c = WorkflowConfig(
@@ -718,11 +879,11 @@ class TestStoreUriValidation:
             ],
         )
         # Should not raise.
-        resolve_nix_steps(c, staged_code_dir=staged_dir)
+        resolve_nix_steps(c, staged_code_dir=staged_dir, staging_dir=staging_dir)
 
-    def test_s3_bare_bucket_with_query_ok(self, staged_dir, monkeypatch, _no_eval_needed, _nix_user_config):
-        from seekr_chain.nix_resolution import resolve_nix_steps
-
+    def test_s3_bare_bucket_with_query_ok(
+        self, staged_dir, monkeypatch, _no_eval_needed, _nix_user_config, staging_dir
+    ):
         _existing(monkeypatch)
 
         c = WorkflowConfig(
@@ -736,11 +897,9 @@ class TestStoreUriValidation:
                 }
             ],
         )
-        resolve_nix_steps(c, staged_code_dir=staged_dir)
+        resolve_nix_steps(c, staged_code_dir=staged_dir, staging_dir=staging_dir)
 
-    def test_s3_with_trailing_slash_ok(self, staged_dir, monkeypatch, _no_eval_needed, _nix_user_config):
-        from seekr_chain.nix_resolution import resolve_nix_steps
-
+    def test_s3_with_trailing_slash_ok(self, staged_dir, monkeypatch, _no_eval_needed, _nix_user_config, staging_dir):
         _existing(monkeypatch)
 
         c = WorkflowConfig(
@@ -754,11 +913,10 @@ class TestStoreUriValidation:
                 }
             ],
         )
-        resolve_nix_steps(c, staged_code_dir=staged_dir)
+        resolve_nix_steps(c, staged_code_dir=staged_dir, staging_dir=staging_dir)
 
     def test_non_s3_paths_not_validated(self, monkeypatch, _no_eval_needed):
         """http://, file://, oci:// all handle paths normally — don't reject those."""
-        from seekr_chain.nix_resolution import _validate_store_uri
 
         # Should not raise for these. (Other schemes may not work end-to-end
         # today, but the path-prefix complaint is s3-specific.)
@@ -779,10 +937,10 @@ class TestMultiRoleSteps:
         monkeypatch,
         _nix_user_config,
         _no_eval_needed,
+        staging_dir,
     ):
         """A multi-role step where one role uses nix gets its build step
         injected and depends_on wired correctly at the step level."""
-        from seekr_chain.nix_resolution import resolve_nix_steps
 
         _missing(monkeypatch)
 
@@ -799,7 +957,7 @@ class TestMultiRoleSteps:
                 },
             ],
         )
-        out = resolve_nix_steps(c, staged_code_dir=staged_dir)
+        out = resolve_nix_steps(c, staged_code_dir=staged_dir, staging_dir=staging_dir)
         build = next(s for s in out.steps if s.name.startswith("nix-build-"))
         training = next(s for s in out.steps if s.name == "training")
         assert build.name in (training.depends_on or [])
@@ -827,13 +985,10 @@ class TestStagedEval:
             return "/nix/store/0000000000000000000000000000abcd-default"
 
         monkeypatch.setattr("seekr_chain.nix_utils.eval_closure_path", fake_eval)
-        monkeypatch.setattr("seekr_chain.nix_utils.find_warm_nodes", lambda *_a, **_k: ([], []))
+        monkeypatch.setattr("seekr_chain.nix_resolution.find_warm_nodes", lambda *_a, **_k: ([], []))
         return captured
 
-    def test_evaluates_staged_copy_excluding_junk(self, monkeypatch, tmp_path, _nix_user_config):
-        from seekr_chain.nix_resolution import resolve_nix_steps
-        from seekr_chain.symlink import copy_filtered
-
+    def test_evaluates_staged_copy_excluding_junk(self, monkeypatch, tmp_path, _nix_user_config, staging_dir):
         _existing(monkeypatch)  # closure present -> no build step, keep it simple
         captured = self._capture_eval(monkeypatch)
 
@@ -861,7 +1016,7 @@ class TestStagedEval:
         staged_dir = tmp_path / "staged"
         copy_filtered(c.code.path, str(staged_dir), include=c.code.include, exclude=c.code.exclude)
 
-        resolve_nix_steps(c, staged_code_dir=str(staged_dir))
+        resolve_nix_steps(c, staged_code_dir=str(staged_dir), staging_dir=staging_dir)
 
         # Eval ran against the staged copy, not the live tree.
         assert captured["path"] != str(live_dir)
@@ -870,10 +1025,7 @@ class TestStagedEval:
         # Closure cached for the jobset renderer.
         assert c.steps[0].nix._resolved_closure == "/nix/store/0000000000000000000000000000abcd-default"
 
-    def test_subdir_expression_resolves_under_staged_root(self, monkeypatch, tmp_path, _nix_user_config):
-        from seekr_chain.nix_resolution import resolve_nix_steps
-        from seekr_chain.symlink import copy_filtered
-
+    def test_subdir_expression_resolves_under_staged_root(self, monkeypatch, tmp_path, _nix_user_config, staging_dir):
         _existing(monkeypatch)
         captured = self._capture_eval(monkeypatch)
 
@@ -894,17 +1046,16 @@ class TestStagedEval:
         staged_dir = tmp_path / "staged"
         copy_filtered(c.code.path, str(staged_dir), include=c.code.include, exclude=c.code.exclude)
 
-        resolve_nix_steps(c, staged_code_dir=str(staged_dir))
+        resolve_nix_steps(c, staged_code_dir=str(staged_dir), staging_dir=staging_dir)
 
         # The subdir expression is rebased onto the staged root.
         assert captured["path"].endswith("/pkg")
         assert captured["path"] != str(live_dir / "pkg")
         assert captured["tree"] == {"flake.nix", "app.py"}
 
-    def test_uses_caller_provided_staged_dir_directly(self, monkeypatch, tmp_path, _nix_user_config):
+    def test_uses_caller_provided_staged_dir_directly(self, monkeypatch, tmp_path, _nix_user_config, staging_dir):
         """resolve_nix_steps evals the caller-provided staged dir as-is — it
         has no staging logic of its own left to bypass."""
-        from seekr_chain.nix_resolution import resolve_nix_steps
 
         _existing(monkeypatch)
         captured = self._capture_eval(monkeypatch)
@@ -919,7 +1070,198 @@ class TestStagedEval:
             code={"path": str(live_dir)},
             steps=[{"name": "train", "nix": {"expression": "./"}, "script": "echo"}],
         )
-        resolve_nix_steps(c, staged_code_dir=str(staged_dir))
+        resolve_nix_steps(c, staged_code_dir=str(staged_dir), staging_dir=staging_dir)
 
         # Eval ran against the caller-provided dir, not the live tree.
-        assert captured["path"] == str(staged_dir)
+        assert "/nix-workspaces/" in captured["path"]
+        assert captured["path"].endswith("/workspace")
+
+
+class TestProcessNix:
+    """process_nix is the single entry point launch_k8s_workflow calls: it
+    delegates to resolve_nix_steps, which materializes any missing nix
+    source trees directly into staging_dir for upload.
+    """
+
+    def test_image_only_workflow_leaves_staging_dir_untouched(self, tmp_path, staged_dir):
+        staging_dir = tmp_path / "staging"
+        staging_dir.mkdir()
+
+        c = WorkflowConfig(
+            name="t",
+            code={"path": "/tmp/t"},
+            steps=[{"name": "a", "image": "ubuntu", "script": "echo"}],
+        )
+        out = process_nix(c, staged_code_dir=staged_dir, staging_dir=staging_dir)
+
+        assert out is c
+        assert list(staging_dir.iterdir()) == []
+
+    def test_nix_role_with_missing_closure_materializes_source_into_staging_dir(
+        self, monkeypatch, tmp_path, _nix_user_config
+    ):
+
+        monkeypatch.setattr("seekr_chain.nix_resolution.find_warm_nodes", lambda *_a, **_k: ([], []))
+        monkeypatch.setattr("seekr_chain.nix_utils.closure_exists", lambda *_a, **_k: False)
+        monkeypatch.setattr(
+            "seekr_chain.nix_utils.eval_closure_path",
+            lambda *_a, **_k: "/nix/store/0000000000000000000000000000abcd-default",
+        )
+
+        live_dir = tmp_path / "live"
+        _populate(live_dir, {"flake.nix": ["{}"], "pyproject.toml": ["[project]"]})
+        staged_code_dir = tmp_path / "staged"
+        symlink(live_dir, staged_code_dir)
+
+        c = WorkflowConfig(
+            name="t",
+            code={"path": str(live_dir)},
+            steps=[
+                {
+                    "name": "train",
+                    "nix": {"expression": "./", "include": ["flake.nix", "pyproject.toml"]},
+                    "script": "echo",
+                }
+            ],
+        )
+        staging_dir = tmp_path / "staging"
+        staging_dir.mkdir()
+
+        out = process_nix(c, staged_code_dir=str(staged_code_dir), staging_dir=staging_dir)
+
+        nix_role = out.steps[-1].nix
+        assert nix_role._staged_source_dir is not None
+        workspace = staging_dir / nix_role._source_subdir
+        assert workspace == Path(nix_role._staged_source_dir)
+        assert not workspace.is_symlink()
+        assert (workspace / "flake.nix").read_text() == "{}"
+
+
+class TestFindWarmNodes:
+    """Query the k8s API for nix-mode pods carrying the exact requested
+    closure label (an equality selector, so the API server does the
+    filtering) and return their unique node names, most-recent first. This
+    is the data source for the submit-time nodeAffinity injection.
+    """
+
+    def _mock_pod(self, name, node, created, closure="abc123"):
+        """Build a minimal V1Pod-shaped object for the test."""
+
+        pod = MagicMock()
+        pod.metadata.name = name
+        pod.metadata.creation_timestamp = created
+        pod.metadata.labels = {NIX_CLOSURE_LABEL: closure}
+        pod.spec.node_name = node
+        return pod
+
+    def _mock_api(self, monkeypatch, pods=None, raises=None):
+        """Stub get_core_v1_api so find_warm_nodes can be exercised offline."""
+
+        v1 = MagicMock()
+        if raises:
+            v1.list_namespaced_pod.side_effect = raises
+        else:
+            result = MagicMock()
+            result.items = pods or []
+            v1.list_namespaced_pod.return_value = result
+
+        monkeypatch.setattr(k8s_utils, "get_core_v1_api", lambda: v1)
+        return v1
+
+    def test_returns_unique_nodes_newest_first(self, monkeypatch):
+
+        pods = [
+            self._mock_pod("a", "node-old", datetime.datetime(2026, 6, 1)),
+            self._mock_pod("b", "node-new", datetime.datetime(2026, 6, 3)),
+            self._mock_pod("c", "node-mid", datetime.datetime(2026, 6, 2)),
+        ]
+        self._mock_api(monkeypatch, pods=pods)
+
+        assert find_warm_nodes("abc123", namespace="argo-workflows") == ["node-new", "node-mid", "node-old"]
+
+    def test_dedups_multiple_pods_on_same_node(self, monkeypatch):
+
+        pods = [
+            self._mock_pod("a", "node-1", datetime.datetime(2026, 6, 1)),
+            self._mock_pod("b", "node-1", datetime.datetime(2026, 6, 2)),
+            self._mock_pod("c", "node-2", datetime.datetime(2026, 6, 3)),
+        ]
+        self._mock_api(monkeypatch, pods=pods)
+
+        # node-1 has two pods but appears once; node-2 is newest.
+        assert find_warm_nodes("abc123", namespace="argo-workflows") == ["node-2", "node-1"]
+
+    def test_respects_limit(self, monkeypatch):
+
+        pods = [self._mock_pod(f"p{i}", f"node-{i}", datetime.datetime(2026, 6, i + 1)) for i in range(20)]
+        self._mock_api(monkeypatch, pods=pods)
+
+        nodes = find_warm_nodes("abc123", namespace="argo-workflows", limit=5)
+        assert len(nodes) == 5
+        # All newest 5, descending.
+        assert nodes == [f"node-{i}" for i in range(19, 14, -1)]
+
+    def test_empty_when_no_matching_pods(self, monkeypatch):
+        self._mock_api(monkeypatch, pods=[])
+        assert find_warm_nodes("abc123", namespace="argo-workflows") == []
+
+    def test_uses_equality_selector(self, monkeypatch):
+        """The k8s query must be scoped to this exact closure hash server-side,
+        not an existence-only selector partitioned client-side.
+        """
+
+        v1 = self._mock_api(monkeypatch, pods=[])
+        find_warm_nodes("abc123", namespace="argo-workflows")
+        _, kwargs = v1.list_namespaced_pod.call_args
+        assert kwargs["label_selector"] == f"{NIX_CLOSURE_LABEL}=abc123"
+
+    def test_skips_pods_with_no_node_name(self, monkeypatch):
+        """A pod that hasn't been scheduled yet (no spec.nodeName) shouldn't
+        appear in the warm list — we can't infer a node from it.
+        """
+
+        pods = [
+            self._mock_pod("pending", None, datetime.datetime(2026, 6, 5)),
+            self._mock_pod("scheduled", "node-a", datetime.datetime(2026, 6, 1)),
+        ]
+        self._mock_api(monkeypatch, pods=pods)
+
+        assert find_warm_nodes("abc123", namespace="argo-workflows") == ["node-a"]
+
+    def test_api_failure_returns_empty(self, monkeypatch):
+        """k8s API errors degrade gracefully: warm-cache is a soft hint;
+        we'd rather schedule cold than fail the submit.
+        """
+
+        self._mock_api(monkeypatch, raises=RuntimeError("apiserver unreachable"))
+        assert find_warm_nodes("abc123", namespace="argo-workflows") == []
+
+    def test_mixed_none_and_real_timestamps_does_not_raise(self, monkeypatch):
+        """A pod with no creation_timestamp (e.g. a partially-initialized
+        object from a flaky watch) shouldn't crash the sort against pods
+        that do have a real datetime — the fallback must be datetime-typed,
+        not a bare int, or comparison raises TypeError.
+        """
+
+        pods = [
+            self._mock_pod("a", "node-real", datetime.datetime(2026, 6, 1)),
+            self._mock_pod("b", "node-none", None),
+        ]
+        self._mock_api(monkeypatch, pods=pods)
+
+        assert set(find_warm_nodes("abc123", namespace="argo-workflows")) == {"node-real", "node-none"}
+
+    def test_partition_failure_returns_empty(self, monkeypatch):
+        """Any error raised while sorting/deduping (not just the API call
+        itself) must degrade to [], matching the documented "never raises"
+        contract.
+        """
+
+        pods = [
+            self._mock_pod("a", "node-a", datetime.datetime(2026, 6, 1)),
+            self._mock_pod("b", "node-b", "not-a-real-timestamp"),
+        ]
+        self._mock_api(monkeypatch, pods=pods)
+
+        # Sorting a str against a real datetime raises TypeError.
+        assert find_warm_nodes("abc123", namespace="argo-workflows") == []
