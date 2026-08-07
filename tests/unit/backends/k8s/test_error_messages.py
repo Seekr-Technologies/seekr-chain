@@ -8,12 +8,9 @@ import pytest
 class TestLoadKubeconfig:
     def test_wraps_config_exception(self):
         """load_kubeconfig wraps ConfigException into RuntimeError with guidance."""
-        from seekr_chain.k8s_utils import load_kubeconfig
-
-        # Clear the lru_cache so our mock takes effect
-        load_kubeconfig.cache_clear()
-
         import kubernetes
+
+        from seekr_chain.k8s_api import load_kubeconfig
 
         with patch(
             "kubernetes.config.load_kube_config",
@@ -22,16 +19,11 @@ class TestLoadKubeconfig:
             with pytest.raises(RuntimeError, match="Failed to load Kubernetes config"):
                 load_kubeconfig()
 
-        # Clean up cache so other tests aren't affected
-        load_kubeconfig.cache_clear()
-
     def test_guidance_mentions_kubeconfig_env(self):
         """Error message mentions KUBECONFIG env var."""
-        from seekr_chain.k8s_utils import load_kubeconfig
-
-        load_kubeconfig.cache_clear()
-
         import kubernetes
+
+        from seekr_chain.k8s_api import load_kubeconfig
 
         with patch(
             "kubernetes.config.load_kube_config",
@@ -39,8 +31,6 @@ class TestLoadKubeconfig:
         ):
             with pytest.raises(RuntimeError, match="KUBECONFIG"):
                 load_kubeconfig()
-
-        load_kubeconfig.cache_clear()
 
 
 class TestS3CredentialError:

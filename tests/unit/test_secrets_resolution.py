@@ -183,7 +183,7 @@ class TestCreateSecretsCleanup:
 
         with (
             patch(
-                "seekr_chain.backends.k8s.launch_k8s_workflow.k8s_utils.get_core_v1_api",
+                "seekr_chain.backends.k8s.launch_k8s_workflow.k8s_api.get_core_v1_api",
                 return_value=mock_v1,
             ),
             patch("seekr_chain.backends.k8s.launch_k8s_workflow.logger") as mock_logger,
@@ -210,7 +210,7 @@ class TestCreateSecretsCleanup:
 
         with (
             patch(
-                "seekr_chain.backends.k8s.launch_k8s_workflow.k8s_utils.get_core_v1_api",
+                "seekr_chain.backends.k8s.launch_k8s_workflow.k8s_api.get_core_v1_api",
                 return_value=mock_v1,
             ),
             patch("seekr_chain.backends.k8s.launch_k8s_workflow.logger") as mock_logger,

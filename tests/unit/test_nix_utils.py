@@ -186,9 +186,9 @@ class TestFindWarmNodes:
             result.items = pods or []
             v1.list_namespaced_pod.return_value = result
 
-        from seekr_chain import k8s_utils
+        from seekr_chain import k8s_api
 
-        monkeypatch.setattr(k8s_utils, "get_core_v1_api", lambda: v1)
+        monkeypatch.setattr(k8s_api, "get_core_v1_api", lambda: v1)
         return v1
 
     def test_returns_unique_nodes_newest_first(self, monkeypatch):

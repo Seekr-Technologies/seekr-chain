@@ -302,10 +302,10 @@ class TestAttach:
 
 
 class TestListWorkflows:
-    """Unit tests for the list_workflows k8s_utils function."""
+    """Unit tests for the list_k8s_workflows function."""
 
-    @patch("seekr_chain.backends.k8s.list_workflows.kubernetes")
-    def test_label_selector(self, mock_k8s):
+    @patch("seekr_chain.backends.k8s.list_workflows.k8s_api")
+    def test_label_selector(self, mock_k8s_api):
         """list_workflows filters to seekr-chain workflows via label selector."""
         from seekr_chain.backends.k8s.list_workflows import list_k8s_workflows as list_workflows
 
@@ -313,16 +313,16 @@ class TestListWorkflows:
         mock_result = MagicMock()
         mock_result.items = []
         mock_batch.list_namespaced_job.return_value = mock_result
-        mock_k8s.client.BatchV1Api.return_value = mock_batch
-        mock_k8s.config.list_kube_config_contexts.return_value = ([], {"context": {"namespace": "default"}})
+        mock_k8s_api.get_batch_v1_api.return_value = mock_batch
+        mock_k8s_api.default_namespace.return_value = "default"
 
         list_workflows()
 
         call_kwargs = mock_batch.list_namespaced_job.call_args.kwargs
         assert call_kwargs["label_selector"] == "seekr-chain/job-id"
 
-    @patch("seekr_chain.backends.k8s.list_workflows.kubernetes")
-    def test_label_selector_with_user(self, mock_k8s):
+    @patch("seekr_chain.backends.k8s.list_workflows.k8s_api")
+    def test_label_selector_with_user(self, mock_k8s_api):
         """list_workflows with user= appends user label selector."""
         from seekr_chain.backends.k8s.list_workflows import list_k8s_workflows as list_workflows
 
@@ -330,16 +330,16 @@ class TestListWorkflows:
         mock_result = MagicMock()
         mock_result.items = []
         mock_batch.list_namespaced_job.return_value = mock_result
-        mock_k8s.client.BatchV1Api.return_value = mock_batch
-        mock_k8s.config.list_kube_config_contexts.return_value = ([], {"context": {"namespace": "default"}})
+        mock_k8s_api.get_batch_v1_api.return_value = mock_batch
+        mock_k8s_api.default_namespace.return_value = "default"
 
         list_workflows(user="alice")
 
         call_kwargs = mock_batch.list_namespaced_job.call_args.kwargs
         assert call_kwargs["label_selector"] == "seekr-chain/job-id,seekr-chain/user=alice"
 
-    @patch("seekr_chain.backends.k8s.list_workflows.kubernetes")
-    def test_returns_job_name_and_user(self, mock_k8s):
+    @patch("seekr_chain.backends.k8s.list_workflows.k8s_api")
+    def test_returns_job_name_and_user(self, mock_k8s_api):
         """list_workflows extracts job_name and user from workflow labels."""
         from seekr_chain.backends.k8s.list_workflows import list_k8s_workflows as list_workflows
 
@@ -361,8 +361,8 @@ class TestListWorkflows:
         mock_result = MagicMock()
         mock_result.items = [mock_job]
         mock_batch.list_namespaced_job.return_value = mock_result
-        mock_k8s.client.BatchV1Api.return_value = mock_batch
-        mock_k8s.config.list_kube_config_contexts.return_value = ([], {"context": {"namespace": "default"}})
+        mock_k8s_api.get_batch_v1_api.return_value = mock_batch
+        mock_k8s_api.default_namespace.return_value = "default"
 
         result = list_workflows()
 
@@ -370,8 +370,8 @@ class TestListWorkflows:
         assert result[0]["job_name"] == "my-training"
         assert result[0]["user"] == "bob"
 
-    @patch("seekr_chain.backends.k8s.list_workflows.kubernetes")
-    def test_failed_job_duration_uses_condition_timestamp(self, mock_k8s):
+    @patch("seekr_chain.backends.k8s.list_workflows.k8s_api")
+    def test_failed_job_duration_uses_condition_timestamp(self, mock_k8s_api):
         """Failed jobs freeze duration at the Failed condition's timestamp, not now()."""
         from seekr_chain.backends.k8s.list_workflows import list_k8s_workflows as list_workflows
 
@@ -397,8 +397,8 @@ class TestListWorkflows:
         mock_result = MagicMock()
         mock_result.items = [mock_job]
         mock_batch.list_namespaced_job.return_value = mock_result
-        mock_k8s.client.BatchV1Api.return_value = mock_batch
-        mock_k8s.config.list_kube_config_contexts.return_value = ([], {"context": {"namespace": "default"}})
+        mock_k8s_api.get_batch_v1_api.return_value = mock_batch
+        mock_k8s_api.default_namespace.return_value = "default"
 
         result = list_workflows()
 
