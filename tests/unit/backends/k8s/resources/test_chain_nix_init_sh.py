@@ -15,6 +15,7 @@ container over a cosmetic number. ``test_failing_du_does_not_fail_the_pod``
 pins that down; the rest fence off the same shape elsewhere.
 """
 
+import re
 import shutil
 import stat
 import subprocess
@@ -170,6 +171,51 @@ class TestChainNixInit:
             "TOTAL (kubelet-visible)",
         ):
             assert phase in result.stdout, f"{phase!r} missing from phase timing"
+
+    def test_phase_timing_reports_milliseconds(self, tmp_path):
+        """Whole seconds can't distinguish a 40ms phase from a 900ms one, which
+        is the resolution the gap actually lives at."""
+        result = _run_init(
+            tmp_path,
+            [_make_fake_nix(tmp_path), _make_real_bin_dir(tmp_path, real_du=True)],
+        )
+
+        assert result.returncode == 0, result.stderr
+        timings = re.findall(r"^\s+\S.*?\s+(\d+\.\d{3})s$", result.stdout, re.M)
+        assert len(timings) >= 7, f"expected a 3-decimal row per phase, got {timings}"
+
+    def test_phase_timing_attributes_a_slow_phase_to_that_phase(self, tmp_path):
+        """The point of the breakdown: a phase that burns time has to be the
+        one the table blames. A slow `du` must land on the du row, not smear
+        across the total."""
+        slow_du = _bin_dir(tmp_path, "slow-du-bin")
+        _write_exe(slow_du / "du", '#!/bin/sh\nsleep 1.4\necho "12345\t/nix"\n')
+        result = _run_init(
+            tmp_path,
+            [
+                slow_du,
+                _make_fake_nix(tmp_path),
+                _make_real_bin_dir(tmp_path, real_du=False),
+            ],
+        )
+
+        assert result.returncode == 0, result.stderr
+        du_row = re.search(r"pre-pull store size \(du\)\s+(\d+\.\d{3})s", result.stdout)
+        assert du_row, f"no du row in:\n{result.stdout}"
+        # Two `du` calls would double this; the fast path should skip the
+        # second, so ~1.4s not ~2.8s.
+        assert 1.3 <= float(du_row.group(1)) < 2.5, du_row.group(1)
+
+    def test_sub_second_pull_reports_a_real_duration_and_speed(self, tmp_path):
+        """Whole-second timing rounded a fast pull to 0s, which then suppressed
+        the speed line entirely (divide-by-zero guard)."""
+        result = _run_init(
+            tmp_path,
+            [_make_fake_nix(tmp_path), _make_real_bin_dir(tmp_path, real_du=True)],
+        )
+
+        assert result.returncode == 0, result.stderr
+        assert re.search(r"Duration:\s+\d+\.\d{3}s", result.stdout), result.stdout
 
     def test_phase_timing_stages_match_the_trap(self, tmp_path):
         """The trap's stage name and the timing buckets come from one `stage`

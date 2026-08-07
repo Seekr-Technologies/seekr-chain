@@ -49,14 +49,73 @@ NIX_ROOT="${SEEKR_CHAIN_NIX_ROOT:-/nix}"
 NIX_CONF="${SEEKR_CHAIN_NIX_CONF:-/etc/nix/nix.conf}"
 RESOURCE_DIR="${SEEKR_CHAIN_RESOURCE_DIR:-/seekr-chain/resources}"
 
+# Millisecond clock. `date +%s` is too coarse to attribute phases that
+# differ by a few hundred ms, so probe once for something finer and stick
+# with the result:
+#
+#   ns    `date +%s%N` (GNU coreutils) -- true millisecond resolution.
+#   csec  /proc/uptime -- always present on Linux, 10ms resolution.
+#   sec   `date +%s` -- last resort; every phase reads as a whole second.
+#
+# The fallbacks are not theoretical: the runner image is wolfi-base, whose
+# `date` is busybox and whose glibc strftime has no `%N`, and coreutils is
+# deliberately not baked into /nix (see docker/Dockerfile). CLOCK_NOTE
+# carries the degraded resolution into the output so three printed
+# decimals are never mistaken for three measured ones.
+_probe=$(date +%s%N 2>/dev/null || echo x)
+case "$_probe" in
+  # Non-digits mean %N came back literal or empty; a short string means it
+  # expanded to nothing. Either way there are no nanoseconds here.
+  *[!0-9]*) CLOCK_MODE=none ;;
+  *) if [ "${#_probe}" -ge 19 ]; then CLOCK_MODE=ns; else CLOCK_MODE=none; fi ;;
+esac
+CLOCK_NOTE=""
+if [ "$CLOCK_MODE" = none ]; then
+  if [ -r /proc/uptime ]; then
+    CLOCK_MODE=csec
+    CLOCK_NOTE="  (clock: /proc/uptime, 10ms resolution)"
+  else
+    CLOCK_MODE=sec
+    CLOCK_NOTE="  (clock: whole seconds only)"
+  fi
+fi
+unset _probe
+
+now_ms() {
+  case "$CLOCK_MODE" in
+    ns)
+      # Trim 6 digits rather than dividing: keeps the value inside the
+      # 13-digit range every shell can do arithmetic on.
+      _n=$(date +%s%N)
+      echo "${_n%??????}"
+      ;;
+    csec)
+      # "103466.72 993576.54" -> 103466720 ms. Strip one leading zero off
+      # the fraction: `$((08))` is an invalid octal constant, not 8.
+      read -r _up _rest < /proc/uptime
+      _frac=${_up#*.}
+      _frac=${_frac#0}
+      echo "$(( ${_up%.*} * 1000 + ${_frac:-0} * 10 ))"
+      ;;
+    *)
+      echo "$(( $(date +%s) * 1000 ))"
+      ;;
+  esac
+}
+
+# Milliseconds -> "S.mmm", for display only.
+fmt_ms() {
+  awk -v ms="$1" 'BEGIN { printf "%.3f", ms / 1000 }'
+}
+
 # Wall-clock accounting: the pull's own "Duration" summary below only
 # brackets run_copy() -- it doesn't cover the bootstrap copy that runs
 # before it, the store-size walks, or nix-gc.sh that runs after, all of
 # which count toward this container's real lifetime as seen by kubelet.
-# The per-phase breakdown printed at the end attributes every second, so
-# a gap between kubelet's container-start/stop timestamps and the pull's
-# own reported Duration is never a mystery.
-SCRIPT_START_TIME=$(date +%s)
+# The per-phase breakdown printed at the end attributes every millisecond,
+# so a gap between kubelet's container-start/stop timestamps and the
+# pull's own reported Duration is never a mystery.
+SCRIPT_START_MS=$(now_ms)
 
 # `set -e` exits silently, which in kubectl looks identical to a dozen
 # other failure modes. This trap names the stage instead -- `$LINENO`
@@ -70,13 +129,13 @@ SCRIPT_START_TIME=$(date +%s)
 # under the name its `stage` call gave it.
 STAGE="startup"
 STAGE_LABEL="startup"
-STAGE_START=$SCRIPT_START_TIME
+STAGE_START=$SCRIPT_START_MS
 PHASE_TIMES=""
 
 stage() {
   local now
-  now=$(date +%s)
-  # One "label|seconds" record per line, consumed by awk at the end.
+  now=$(now_ms)
+  # One "label|milliseconds" record per line, consumed by awk at the end.
   PHASE_TIMES="${PHASE_TIMES}${STAGE_LABEL}|$((now - STAGE_START))
 "
   STAGE="$1"
@@ -172,7 +231,7 @@ closure_stat() {
 
 stage "pre-pull store size (du)"
 SIZE_BEFORE=$(dir_size_bytes)
-START_TIME=$(date +%s)
+START_MS=$(now_ms)
 
 # Watchdog: monitors /nix size growth. If size doesn't change
 # for STALL_S consecutive seconds, kill the nix process. This is the
@@ -294,8 +353,8 @@ done
 # these numbers say -- so nothing below may abort the script. That is the
 # whole reason dir_size_bytes/closure_stat exist.
 stage "summary stats (nix path-info)"
-END_TIME=$(date +%s)
-DURATION=$((END_TIME - START_TIME))
+END_MS=$(now_ms)
+DURATION_MS=$((END_MS - START_MS))
 
 # `|| true` not `|| echo 0`: grep -c outputs "0" *and* exits 1 on no matches;
 # `|| echo 0` would give multi-line output and break later arithmetic.
@@ -333,8 +392,8 @@ if [ "$CLOSURE_PATHS" -gt 0 ]; then
 else
   HIT_PCT="n/a"
 fi
-if [ "$DURATION" -gt 0 ] && [ "$BYTES_PULLED" -gt 0 ]; then
-  SPEED=$(awk "BEGIN { printf \"%.2f MB/s\", $BYTES_PULLED / $DURATION / 1048576 }")
+if [ "$DURATION_MS" -gt 0 ] && [ "$BYTES_PULLED" -gt 0 ]; then
+  SPEED=$(awk "BEGIN { printf \"%.2f MB/s\", $BYTES_PULLED / ($DURATION_MS / 1000) / 1048576 }")
 else
   SPEED="—"
 fi
@@ -358,7 +417,7 @@ cat <<EOF
 
   Already on node:         $PATHS_HIT paths  ($HIT_PCT% hit) — saved $(fmt_bytes "$BYTES_SAVED")
   Pulled from cache:       $PATHS_PULLED paths,  $(fmt_bytes "$BYTES_PULLED")
-  Duration:                ${DURATION}s
+  Duration:                $(fmt_ms "$DURATION_MS")s
   Effective speed:         $SPEED
 ===================================================================
 EOF
@@ -382,11 +441,13 @@ stage "done"
 # both scale with the store, not with how much was actually transferred,
 # and both get slower as peer pods contend for the same disk.
 #
-# Resolution is whole seconds (`date +%s` is all POSIX sh gives us), so
-# sub-second phases read as 0s. Good enough to spot which phase ate the
-# time; not a profiler.
-TOTAL_S=$(($(date +%s) - SCRIPT_START_TIME))
+# Resolution depends on which clock the probe at the top settled on;
+# CLOCK_NOTE says so when it's coarser than a millisecond.
+TOTAL_MS=$(( $(now_ms) - SCRIPT_START_MS ))
 echo
-echo "chain-nix-init phase timing"
-printf '%s' "$PHASE_TIMES" | awk -F'|' '{ printf "  %-32s %4ds\n", $1, $2 }'
-printf '  %-32s %4ds\n' "TOTAL (kubelet-visible)" "$TOTAL_S"
+echo "chain-nix-init phase timing${CLOCK_NOTE}"
+# PHASE_TIMES already ends in a newline, so the total is just one more
+# record -- same awk, same column widths, no chance of the summary row
+# formatting differently from the phases above it.
+printf '%sTOTAL (kubelet-visible)|%s\n' "$PHASE_TIMES" "$TOTAL_MS" \
+  | awk -F'|' '{ printf "  %-32s %8.3fs\n", $1, $2 / 1000 }'
