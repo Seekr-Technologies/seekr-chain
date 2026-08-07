@@ -57,11 +57,14 @@ RESOURCE_DIR="${SEEKR_CHAIN_RESOURCE_DIR:-/seekr-chain/resources}"
 #   csec  /proc/uptime -- always present on Linux, 10ms resolution.
 #   sec   `date +%s` -- last resort; every phase reads as a whole second.
 #
-# The fallbacks are not theoretical: the runner image is wolfi-base, whose
-# `date` is busybox and whose glibc strftime has no `%N`, and coreutils is
-# deliberately not baked into /nix (see docker/Dockerfile). CLOCK_NOTE
-# carries the degraded resolution into the output so three printed
-# decimals are never mistaken for three measured ones.
+# The runner image lands on csec: it's wolfi-base, whose `date` is busybox
+# with no `%N` (glibc's strftime doesn't implement it), and coreutils is
+# deliberately not baked into /nix -- see docker/Dockerfile. /proc/uptime
+# is capped at 10ms because the kernel renders it "%lu.%02lu", two decimal
+# places, so that's the file's format rather than anything lost here.
+#
+# CLOCK_DECIMALS keeps the printed precision honest: report exactly as
+# many decimals as the chosen clock can actually resolve, never more.
 _probe=$(date +%s%N 2>/dev/null || echo x)
 case "$_probe" in
   # Non-digits mean %N came back literal or empty; a short string means it
@@ -70,12 +73,15 @@ case "$_probe" in
   *) if [ "${#_probe}" -ge 19 ]; then CLOCK_MODE=ns; else CLOCK_MODE=none; fi ;;
 esac
 CLOCK_NOTE=""
+CLOCK_DECIMALS=3
 if [ "$CLOCK_MODE" = none ]; then
   if [ -r /proc/uptime ]; then
     CLOCK_MODE=csec
+    CLOCK_DECIMALS=2
     CLOCK_NOTE="  (clock: /proc/uptime, 10ms resolution)"
   else
     CLOCK_MODE=sec
+    CLOCK_DECIMALS=0
     CLOCK_NOTE="  (clock: whole seconds only)"
   fi
 fi
@@ -103,9 +109,10 @@ now_ms() {
   esac
 }
 
-# Milliseconds -> "S.mmm", for display only.
+# Milliseconds -> seconds, at the clock's real precision. Display only.
 fmt_ms() {
-  awk -v ms="$1" 'BEGIN { printf "%.3f", ms / 1000 }'
+  awk -v ms="$1" -v dec="$CLOCK_DECIMALS" \
+    'BEGIN { printf "%." dec "f", ms / 1000 }'
 }
 
 # Wall-clock accounting: the pull's own "Duration" summary below only
@@ -449,5 +456,9 @@ echo "chain-nix-init phase timing${CLOCK_NOTE}"
 # PHASE_TIMES already ends in a newline, so the total is just one more
 # record -- same awk, same column widths, no chance of the summary row
 # formatting differently from the phases above it.
+#
+# Build the format in the shell rather than using awk's `%*.*f`: dynamic
+# field width is not something busybox awk can be relied on for.
 printf '%sTOTAL (kubelet-visible)|%s\n' "$PHASE_TIMES" "$TOTAL_MS" \
-  | awk -F'|' '{ printf "  %-32s %8.3fs\n", $1, $2 / 1000 }'
+  | awk -F'|' -v fmt="  %-32s %8.${CLOCK_DECIMALS}fs\n" \
+      '{ printf fmt, $1, $2 / 1000 }'

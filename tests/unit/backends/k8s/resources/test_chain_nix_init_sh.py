@@ -86,6 +86,19 @@ def _make_failing_du(tmp_path: Path) -> Path:
     return bindir
 
 
+def _make_no_nano_date(tmp_path: Path) -> Path:
+    """A `date` whose `%N` comes back literal, as busybox's does. Everything
+    else delegates to the real binary, since nix-bootstrap.sh needs a working
+    `date +%s`."""
+    real = shutil.which("date")
+    bindir = _bin_dir(tmp_path, "no-nano-date-bin")
+    _write_exe(
+        bindir / "date",
+        f'#!/bin/sh\ncase "$1" in\n  "+%s%N") echo "$({real} +%s)N" ;;\n  *) {real} "$@" ;;\nesac\n',
+    )
+    return bindir
+
+
 def _make_fake_nix(
     tmp_path: Path,
     *,
@@ -171,6 +184,26 @@ class TestChainNixInit:
             "TOTAL (kubelet-visible)",
         ):
             assert phase in result.stdout, f"{phase!r} missing from phase timing"
+
+    def test_precision_follows_the_clock(self, tmp_path):
+        """Without `date +%N` the clock is /proc/uptime, which the kernel
+        renders as "%lu.%02lu" -- 10ms, full stop. Print two decimals there:
+        a third would be a digit we did not measure. The runner image
+        (wolfi-base, busybox date, no coreutils baked) is on this path."""
+        result = _run_init(
+            tmp_path,
+            [
+                _make_no_nano_date(tmp_path),
+                _make_fake_nix(tmp_path),
+                _make_real_bin_dir(tmp_path, real_du=True),
+            ],
+        )
+
+        assert result.returncode == 0, result.stderr
+        assert "(clock: /proc/uptime, 10ms resolution)" in result.stdout
+        two_dp = re.findall(r"^\s+\S.*?\s+(\d+\.\d{2})s$", result.stdout, re.M)
+        assert len(two_dp) >= 7, f"expected 2-decimal rows, got {two_dp}"
+        assert not re.search(r"\d+\.\d{3}s", result.stdout), "three decimals printed from a 10ms clock"
 
     def test_phase_timing_reports_milliseconds(self, tmp_path):
         """Whole seconds can't distinguish a 40ms phase from a 900ms one, which
