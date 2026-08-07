@@ -11,7 +11,7 @@ from pathlib import Path
 import dotenv
 import kubernetes
 
-from seekr_chain import WorkflowConfig, constants, k8s_utils, remote_fs, utils
+from seekr_chain import WorkflowConfig, constants, k8s_api, remote_fs, utils
 from seekr_chain.backends.k8s.job_info import JobInfo, _resolve_datastore_root, get_job_info
 from seekr_chain.backends.k8s.jobset import _INIT_IMAGE, create_jobset_manifest
 from seekr_chain.backends.k8s.parse_logs import DATA_SCHEMA_VERSION
@@ -73,7 +73,7 @@ def _create_secrets(workflow_name: str, s3_creds: dict, config: WorkflowConfig):
             if k.upper() not in secrets:
                 secrets[k.upper()] = v
 
-    v1 = k8s_utils.get_core_v1_api()
+    v1 = k8s_api.get_core_v1_api()
 
     if secrets:
         secret = kubernetes.client.V1Secret(
@@ -439,8 +439,6 @@ def launch_k8s_workflow(
 
         workflow_secrets = _create_workflow_secrets(config, workflow_id, s3_creds)
 
-        kubernetes.config.load_kube_config(config_file=os.environ.get("KUBECONFIG"))
-
         service_account = _user_config.service_account or detect_service_account(config.namespace)
 
         # Create assets dir upfront so _package_assets can write dag.json there
@@ -468,7 +466,7 @@ def launch_k8s_workflow(
         service_account=service_account,
     )
 
-    k8s_batch = kubernetes.client.BatchV1Api()
+    k8s_batch = k8s_api.get_batch_v1_api()
     try:
         k8s_batch.create_namespaced_job(namespace=config.namespace, body=job_manifest)
     except kubernetes.client.exceptions.ApiException as e:

@@ -1,11 +1,9 @@
 #!/usr/bin/env python3
 
-import os
 from datetime import datetime, timezone
 from typing import Optional
 
-import kubernetes
-
+from seekr_chain import k8s_api
 from seekr_chain.backends.k8s.workflow_state import get_completion_time
 
 
@@ -16,12 +14,10 @@ def list_k8s_workflows(
 
     Returns a list of dicts with keys: name, job_name, user, status, created, duration.
     """
-    kubernetes.config.load_kube_config(config_file=os.environ.get("KUBECONFIG"))
-    k8s_batch = kubernetes.client.BatchV1Api()
+    k8s_batch = k8s_api.get_batch_v1_api()
 
     if namespace is None:
-        _, active_ctx = kubernetes.config.list_kube_config_contexts()
-        namespace = active_ctx["context"].get("namespace", "default")
+        namespace = k8s_api.default_namespace()
 
     label_selector = "seekr-chain/job-id"
     if user is not None:

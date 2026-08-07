@@ -3,7 +3,8 @@ Unit tests for K8sWorkflow.watch_controller_status() and get_workflow_job_status
 
 watch_controller_status() delegates to controller_status_watcher() (watched_state.py),
 which list-then-watches: a synchronous seed read via read_namespaced_job(),
-then a background thread replaying kubernetes.watch.Watch().stream() events.
+then a background thread replaying the stream() events of the Watch built by
+k8s_api.new_watch().
 Mirrors test_watched_state.py's mocking style. K8sWorkflow is constructed via
 object.__new__ to skip __init__'s cluster/S3 setup, since watch_controller_status() only
 touches self._k8s_batch/_namespace/_id.
@@ -15,7 +16,7 @@ from types import SimpleNamespace
 import kubernetes as k8s
 from kubernetes.client.rest import ApiException
 
-from seekr_chain.backends.k8s import k8s_workflow as k8s_workflow_mod
+from seekr_chain.backends.k8s import watched_state as watched_state_mod
 from seekr_chain.backends.k8s.k8s_workflow import K8sWorkflow
 from seekr_chain.backends.k8s.workflow_state import get_workflow_job_status
 from seekr_chain.status import WorkflowStatus
@@ -68,7 +69,7 @@ class FakeK8sBatch:
 
 
 def test_watch_controller_status_returns_immediately_when_job_already_gone(monkeypatch):
-    monkeypatch.setattr(k8s_workflow_mod.k8s.watch, "Watch", lambda: FakeWatch([]))
+    monkeypatch.setattr(watched_state_mod.k8s_api, "new_watch", lambda: FakeWatch([]))
 
     workflow = _make_workflow(FakeK8sBatch(job=None))
     statuses = list(workflow.watch_controller_status())
@@ -79,7 +80,7 @@ def test_watch_controller_status_returns_immediately_when_job_already_gone(monke
 def test_watch_controller_status_ends_stream_on_deleted_event(monkeypatch):
     job = _job(active=1)
     events = [{"type": "DELETED", "object": job}]
-    monkeypatch.setattr(k8s_workflow_mod.k8s.watch, "Watch", lambda: FakeWatch(events))
+    monkeypatch.setattr(watched_state_mod.k8s_api, "new_watch", lambda: FakeWatch(events))
 
     workflow = _make_workflow(FakeK8sBatch(job=job))
     statuses = list(workflow.watch_controller_status())
@@ -94,7 +95,7 @@ def test_watch_controller_status_yields_on_change_then_stops_when_finished(monke
         {"type": "MODIFIED", "object": job_running},
         {"type": "MODIFIED", "object": job_succeeded},
     ]
-    monkeypatch.setattr(k8s_workflow_mod.k8s.watch, "Watch", lambda: FakeWatch(events))
+    monkeypatch.setattr(watched_state_mod.k8s_api, "new_watch", lambda: FakeWatch(events))
 
     workflow = _make_workflow(FakeK8sBatch(job=job_running))
     statuses = list(workflow.watch_controller_status())
