@@ -2,7 +2,6 @@
 
 import codecs
 import logging
-import os
 import shutil
 import subprocess
 import threading
@@ -11,7 +10,7 @@ import kubernetes as k8s
 from kubernetes.client.rest import ApiException
 from rich.console import Console
 
-from seekr_chain import k8s_utils, remote_fs
+from seekr_chain import k8s_api, remote_fs
 from seekr_chain.backends.k8s.job_info import JobInfo, get_job_info
 from seekr_chain.backends.k8s.parse_logs import LogStore, parse_logs
 from seekr_chain.backends.k8s.render_status import format_plain, render
@@ -109,14 +108,11 @@ class K8sWorkflow(Workflow):
     def __init__(self, id, namespace=None):
         self._id = id
 
-        self._k8s_v1 = k8s_utils.get_core_v1_api()
-        self._k8s_batch = k8s.client.BatchV1Api()
-        self._k8s_custom = k8s_utils.get_custom_objects_api()
+        self._k8s_v1 = k8s_api.get_core_v1_api()
+        self._k8s_batch = k8s_api.get_batch_v1_api()
+        self._k8s_custom = k8s_api.get_custom_objects_api()
 
-        if namespace is None:
-            _, active_ctx = k8s.config.list_kube_config_contexts(config_file=os.environ.get("KUBECONFIG"))
-            namespace = active_ctx["context"].get("namespace", "default")
-        self._namespace = namespace
+        self._namespace = namespace if namespace is not None else k8s_api.default_namespace()
 
         # Read datastore_root from the controller Job annotation. All other
         # workflow-level metadata (name, status, timing, step count) is
