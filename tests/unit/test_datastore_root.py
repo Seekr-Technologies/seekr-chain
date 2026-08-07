@@ -24,6 +24,16 @@ class TestGetJobInfoError:
                 get_job_info("some-id")
 
 
+class TestGetJobInfoNonS3Root:
+    def test_oci_root_raises(self, monkeypatch):
+        with pytest.raises(ValueError, match="s3://"):
+            get_job_info("some-id", datastore_root="oci://ns/bucket/seekr-chain/")
+
+    def test_error_mentions_fluent_bit(self, monkeypatch):
+        with pytest.raises(ValueError, match="fluent-bit"):
+            get_job_info("some-id", datastore_root="oci://ns/bucket/seekr-chain/")
+
+
 class TestK8sWorkflowReconnect:
     def _make_workflow(self, id="test-id-abc123", datastore_root=None, k8s_status=200):
         """Create a K8sWorkflow with mocked k8s clients."""
@@ -39,14 +49,12 @@ class TestK8sWorkflowReconnect:
 
         with (
             patch("seekr_chain.backends.k8s.k8s_workflow.k8s_utils") as mock_k8s_utils,
-            patch("seekr_chain.backends.k8s.k8s_workflow.boto3") as mock_boto3,
             patch("seekr_chain.backends.k8s.k8s_workflow.k8s") as mock_k8s,
         ):
             mock_k8s.config.list_kube_config_contexts.return_value = (None, {"context": {"namespace": "argo"}})
             mock_k8s_utils.get_core_v1_api.return_value = MagicMock()
             mock_k8s_utils.get_custom_objects_api.return_value = MagicMock()
             mock_k8s.client.BatchV1Api.return_value = mock_batch
-            mock_boto3.client.return_value = MagicMock()
 
             return K8sWorkflow(id=id)
 

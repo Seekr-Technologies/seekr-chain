@@ -8,7 +8,7 @@ import textwrap
 from pathlib import Path
 from typing import Optional
 
-from seekr_chain import constants, k8s_utils, nix_utils, s3_utils
+from seekr_chain import constants, k8s_utils, nix_utils, remote_fs
 from seekr_chain.config import (
     SingleRoleStepConfig,
     StepConfig,
@@ -582,7 +582,7 @@ def _build_role_context(
     master_addr = f"{js_name}-{js_pod_name}-0-0.{subdomain}"
 
     # S3 path where the init container uploads pod metadata
-    remote_md_path = s3_utils.join(
+    remote_md_path = remote_fs.join(
         job_info["remote_step_data_path"],
         f"step={step_name}",
         f"role={role_config.name}",
@@ -598,14 +598,14 @@ def _build_role_context(
     )
 
     # S3 path for log sidecar output
-    remote_step_data_path = s3_utils.join(
+    remote_step_data_path = remote_fs.join(
         job_info["remote_step_data_path"],
         f"step={step_name}",
         f"role={role_config.name}",
         "job_index=${NODE_RANK}",
         "pod_index=${JOB_COMPLETION_INDEX}",
     )
-    s3_bucket, s3_step_data_prefix = s3_utils.parse_s3_uri(remote_step_data_path)
+    s3_bucket, s3_step_data_prefix = remote_fs.parse_uri(remote_step_data_path)
     upload_timeout = int(workflow_config.logging.upload_timeout.total_seconds())
 
     code_path = workflow_config.code.path if workflow_config.code else None
