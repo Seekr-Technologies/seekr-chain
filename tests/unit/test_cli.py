@@ -8,6 +8,7 @@ import pytest
 from click.testing import CliRunner
 from kubernetes.client.rest import ApiException
 
+from seekr_chain.backends.k8s.list_workflows import list_k8s_workflows as list_workflows
 from seekr_chain.cli import main
 
 MINIMAL_CONFIG = textwrap.dedent("""\
@@ -307,7 +308,6 @@ class TestListWorkflows:
     @patch("seekr_chain.backends.k8s.list_workflows.kubernetes")
     def test_label_selector(self, mock_k8s):
         """list_workflows filters to seekr-chain controller JobSets via label selector."""
-        from seekr_chain.backends.k8s.list_workflows import list_k8s_workflows as list_workflows
 
         mock_custom = MagicMock()
         mock_custom.list_namespaced_custom_object.return_value = {"items": []}
@@ -322,7 +322,6 @@ class TestListWorkflows:
     @patch("seekr_chain.backends.k8s.list_workflows.kubernetes")
     def test_label_selector_with_user(self, mock_k8s):
         """list_workflows with user= appends user label selector."""
-        from seekr_chain.backends.k8s.list_workflows import list_k8s_workflows as list_workflows
 
         mock_custom = MagicMock()
         mock_custom.list_namespaced_custom_object.return_value = {"items": []}
@@ -339,7 +338,6 @@ class TestListWorkflows:
     @patch("seekr_chain.backends.k8s.list_workflows.kubernetes")
     def test_returns_job_name_and_user(self, mock_k8s):
         """list_workflows extracts job_name and user from workflow labels."""
-        from seekr_chain.backends.k8s.list_workflows import list_k8s_workflows as list_workflows
 
         jobset = {
             "metadata": {
@@ -368,7 +366,6 @@ class TestListWorkflows:
     @patch("seekr_chain.backends.k8s.list_workflows.kubernetes")
     def test_failed_job_duration_uses_condition_timestamp(self, mock_k8s):
         """Failed jobs freeze duration at the Failed condition's timestamp, not now()."""
-        from seekr_chain.backends.k8s.list_workflows import list_k8s_workflows as list_workflows
 
         start = "2026-01-01T00:00:00Z"
         failed_at = "2026-01-01T00:05:30Z"
@@ -399,7 +396,6 @@ class TestListWorkflows:
     @patch("seekr_chain.backends.k8s.list_workflows.kubernetes")
     def test_cancelled_run_reports_terminated_not_failed(self, mock_k8s):
         """A Failed terminalState with a CANCELLED phase in the ConfigMap reports Terminated."""
-        from seekr_chain.backends.k8s.list_workflows import list_k8s_workflows as list_workflows
 
         jobset = {
             "metadata": {"name": "abc123", "creationTimestamp": None, "labels": {}},
