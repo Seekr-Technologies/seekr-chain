@@ -7,12 +7,11 @@ import shutil
 import subprocess
 import threading
 
-import boto3
 import kubernetes as k8s
 from kubernetes.client.rest import ApiException
 from rich.console import Console
 
-from seekr_chain import k8s_utils, s3_utils
+from seekr_chain import k8s_utils, remote_fs
 from seekr_chain.backends.k8s.job_info import JobInfo, get_job_info
 from seekr_chain.backends.k8s.parse_logs import LogStore, parse_logs
 from seekr_chain.backends.k8s.render_status import format_plain, render
@@ -107,11 +106,8 @@ def _print_interactive_welcome(name):
 
 
 class K8sWorkflow(Workflow):
-    def __init__(self, id, namespace=None, s3_client=None):
+    def __init__(self, id, namespace=None):
         self._id = id
-        if s3_client is None:
-            s3_client = boto3.client("s3")
-        self._s3_client = s3_client
 
         self._k8s_v1 = k8s_utils.get_core_v1_api()
         self._k8s_batch = k8s.client.BatchV1Api()
@@ -147,7 +143,7 @@ class K8sWorkflow(Workflow):
         local_log_path = LOCAL_LOG_PATH / self._id
 
         logger.debug("Syncing logs")
-        s3_utils.download_dir(self._job_info["remote_step_data_path"], local_log_path, self._s3_client, sync=True)
+        remote_fs.download(self._job_info["remote_step_data_path"], local_log_path)
 
         logger.debug("Expanding logs")
         return parse_logs(local_log_path, timestamps)

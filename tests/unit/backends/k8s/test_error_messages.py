@@ -45,22 +45,22 @@ class TestLoadKubeconfig:
 
 class TestS3CredentialError:
     def test_wraps_no_credentials_error(self):
-        """_get_s3_client_and_creds wraps NoCredentialsError into RuntimeError with guidance."""
-        from seekr_chain.backends.k8s.launch_k8s_workflow import _get_s3_client_and_creds
+        """_get_s3_creds wraps NoCredentialsError into RuntimeError with guidance."""
+        from seekr_chain.backends.k8s.launch_k8s_workflow import _get_s3_creds
 
         with patch("boto3.client") as mock_client:
             mock_client.return_value._get_credentials.return_value = None
             with pytest.raises(RuntimeError, match="AWS credentials not found"):
-                _get_s3_client_and_creds()
+                _get_s3_creds()
 
     def test_guidance_mentions_env_vars(self):
         """Error message mentions AWS_ACCESS_KEY_ID."""
-        from seekr_chain.backends.k8s.launch_k8s_workflow import _get_s3_client_and_creds
+        from seekr_chain.backends.k8s.launch_k8s_workflow import _get_s3_creds
 
         with patch("boto3.client") as mock_client:
             mock_client.return_value._get_credentials.return_value = None
             with pytest.raises(RuntimeError, match="AWS_ACCESS_KEY_ID"):
-                _get_s3_client_and_creds()
+                _get_s3_creds()
 
 
 class TestKubectlPreflight:

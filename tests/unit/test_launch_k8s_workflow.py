@@ -37,7 +37,7 @@ def test_package_assets_passes_interactive_through(monkeypatch, tmp_path):
         return "js-name", "yaml: {}"
 
     monkeypatch.setattr(lkw_module, "create_jobset_manifest", fake_create_jobset_manifest)
-    monkeypatch.setattr(lkw_module.s3_utils, "upload_file", lambda *a, **k: None)
+    monkeypatch.setattr(lkw_module.remote_fs, "upload", lambda *a, **k: None)
 
     staging_dir = tmp_path / "staging"
     (staging_dir / "assets").mkdir(parents=True)
@@ -45,7 +45,6 @@ def test_package_assets_passes_interactive_through(monkeypatch, tmp_path):
     _package_assets(
         config=_make_config(),
         args=None,
-        s3_client=MagicMock(),
         job_info={"remote_assets_path": "s3://bucket/assets.tar.gz"},
         staging_dir=staging_dir,
         workflow_name="wf-1",
@@ -66,7 +65,7 @@ class TestCodeStaging:
     def _mock_pipeline(self, monkeypatch, captured):
         from seekr_chain.user_config import UserConfig
 
-        monkeypatch.setattr(lkw_module, "_get_s3_client_and_creds", lambda: (MagicMock(), {}))
+        monkeypatch.setattr(lkw_module, "_get_s3_creds", lambda: {})
         monkeypatch.setattr(lkw_module, "_resolve_datastore_root", lambda: None)
         monkeypatch.setattr(
             lkw_module,

@@ -19,7 +19,6 @@ from __future__ import annotations
 import datetime
 import logging
 import os
-import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -174,77 +173,12 @@ def _run_nix_eval(cmd: list[str], expression: str, attr: str) -> str:
     return out
 
 
-# Minimal OCI URI grammar for narinfo existence checks. Full URI parsing
-# (regions, glob, delimiter listing, etc.) lives in seekr-fs; we only need
-# namespace / bucket / key here.
-_OCI_URI_RE = re.compile(
-    r"^oci://(?P<namespace>[a-zA-Z0-9_\-]+)(?:@(?P<region>[a-zA-Z0-9_\-]+))?/"
-    r"(?P<bucket>[a-zA-Z0-9_\-]+)/(?P<key>.+)$"
-)
-
-
-def _parse_oci_uri(uri: str) -> tuple[str, str, str]:
-    """Return ``(namespace, bucket, key)`` from an oci:// URI."""
-    m = _OCI_URI_RE.match(uri)
-    if not m:
-        raise ValueError(f"Invalid OCI URI: {uri!r}. Expected oci://<namespace>/<bucket>/<key>")
-    return m.group("namespace"), m.group("bucket"), m.group("key")
-
-
-def _default_oci_client():
-    """Build an OCI ObjectStorageClient, preferring config file over InstancePrincipals.
-
-    Prefers ~/.oci/config when present (developer laptop path); falls back to
-    InstancePrincipals when running on an OCI instance without a config
-    file (CI, in-cluster). Mirrors seekr_fs's factory but strips the parts
-    we don't need (no compartment enumeration, no client caching). The
-    import guard lives here (not in _oci_narinfo_exists) so tests can
-    monkeypatch _default_oci_client with a fake and bypass the SDK entirely.
-    """
-    try:
-        import oci
-    except ImportError as e:
-        raise ImportError(
-            "oci:// scheme requires the `oci` SDK on the submit machine. "
-            "Install it with `pip install 'seekr-chain[oci]'` "
-            "(or `pip install oci` directly)."
-        ) from e
-
-    config_path = Path(os.environ.get("OCI_CONFIG_FILE") or (Path.home() / ".oci/config"))
-    if config_path.is_file():
-        config = oci.config.from_file(file_location=str(config_path))
-        return oci.object_storage.ObjectStorageClient(config)
-
-    region = os.environ.get("OCI_REGION", "us-chicago-1")
-    signer = oci.auth.signers.InstancePrincipalsSecurityTokenSigner()
-    return oci.object_storage.ObjectStorageClient({"region": region}, signer=signer)
-
-
-def _oci_narinfo_exists(narinfo_uri: str) -> bool:
-    """Return True iff the narinfo object exists at ``narinfo_uri``.
-
-    Swallow-all-exceptions-as-False matches seekr-fs's own OCIBackend.is_file:
-    a 404 and an auth failure both look like "not present" to us. Wrong-side
-    of the fallback only triggers a rebuild — worse than a cache hit but
-    never wrong in a correctness sense.
-    """
-    namespace, bucket, key = _parse_oci_uri(narinfo_uri)
-    client = _default_oci_client()
-    try:
-        client.head_object(namespace_name=namespace, bucket_name=bucket, object_name=key)
-        return True
-    except Exception:
-        return False
-
-
 def closure_exists(store_uri: str, closure_path: str) -> bool:
     """Return True iff the closure's narinfo exists at the configured store.
 
     Looks up ``{store_uri}/{hash}.narinfo`` in the store:
 
-    - ``s3://`` uses boto3 directly (already a seekr-chain dep).
-    - ``oci://`` uses the OCI SDK directly (minimally ported from
-      seekr-fs; requires ``pip install oci`` on the submit machine).
+    - ``s3://``/``oci://`` route through ``remote_fs``.
     - Other schemes (``azure://``, ``gs://`` …) route through seekr-fs,
       imported lazily — those users need to ``pip install seekr-fs``.
     """
@@ -252,20 +186,14 @@ def closure_exists(store_uri: str, closure_path: str) -> bool:
     # Query params on store_uri (endpoint=, scheme=, region=, ...) configure
     # nix's own S3 client, not boto3 -- boto3 gets its endpoint/region from
     # the environment/AWS config instead. Drop them before appending the
-    # narinfo key, or they'd land inside parse_s3_uri's bucket-name match.
+    # narinfo key, or they'd land inside remote_fs's bucket-name match.
     base = urlsplit(store_uri.rstrip("/"))._replace(query="", fragment="")
     narinfo_uri = f"{urlunsplit(base)}/{hash_}.narinfo"
 
-    if narinfo_uri.startswith("s3://"):
-        import boto3
+    if narinfo_uri.startswith("s3://") or narinfo_uri.startswith("oci://"):
+        from seekr_chain import remote_fs
 
-        from seekr_chain import s3_utils
-
-        s3 = boto3.client("s3")
-        return s3_utils.exists(narinfo_uri, s3)
-
-    if narinfo_uri.startswith("oci://"):
-        return _oci_narinfo_exists(narinfo_uri)
+        return remote_fs.exists(narinfo_uri)
 
     try:
         import seekr_fs as sfs
