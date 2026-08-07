@@ -11,20 +11,22 @@ Public API:
     module and consumers.
   * ``get_workflow_state(...)`` — the main entry point. Returns a
     fully-populated ``WorkflowState``.
-  * ``get_workflow_job_status(...)`` — the controller Job's status,
+  * ``get_workflow_job_status(...)`` — the controller JobSet's status,
     used for the workflow-level header line.
   * ``first_running_or_finished_pod(...)`` — used by ``attach()`` to
     pick a pod to ``kubectl exec`` into.
   * ``is_jobset_suspended(...)`` — used by ``cancel()``.
   * ``build_workflow_state(...)`` — pure tree-builder from already-fetched
-    Job/JobSet/Pod objects; used by ``get_workflow_state()`` and by
-    ``watched_state.workflow_state_watcher()`` (watch-driven caller).
-  * ``read_workflow_job(...)``, ``list_jobsets(...)``, ``list_pods(...)`` —
+    controller JobSet / worker JobSet / Pod objects; used by
+    ``get_workflow_state()`` and by ``watched_state.workflow_state_watcher()``
+    (watch-driven caller).
+  * ``read_controller_jobset(...)``, ``list_jobsets(...)``, ``list_pods(...)`` —
     the individual fetch calls ``get_workflow_state()`` composes; exposed
     so ``watched_state.py`` can seed its watch-based cache with the same calls.
 """
 
 import datetime
+import json
 import logging
 from dataclasses import dataclass
 from typing import Optional
@@ -116,21 +118,6 @@ def _parse_timestamp(ts):
             return datetime.datetime.fromisoformat(ts.replace("Z", "+00:00"))
         except (ValueError, AttributeError):
             return None
-    return None
-
-
-def get_completion_time(status) -> Optional[datetime.datetime]:
-    """Return a Job's terminal timestamp, for either success or failure.
-
-    Kubernetes only populates ``status.completion_time`` on success; for a
-    failed Job the terminal timestamp instead lives on the "Failed"
-    condition's ``last_transition_time``.
-    """
-    if status.completion_time:
-        return _parse_timestamp(status.completion_time)
-    for condition in getattr(status, "conditions", None) or []:
-        if condition.type == "Failed" and condition.status == "True":
-            return _parse_timestamp(condition.last_transition_time)
     return None
 
 
@@ -459,18 +446,40 @@ def _collect_step_state(name, roles, jobset: dict) -> StepState:
 # ---------------------------------------------------------------------------
 
 
-def job_status_and_completion(job) -> tuple[WorkflowStatus, Optional[datetime.datetime]]:
-    """Map a Kubernetes Job's ``.status`` into ``(WorkflowStatus, completion_time)``.
+def controller_jobset_status_and_completion(
+    jobset: dict, cancelled: bool = False
+) -> tuple[WorkflowStatus, Optional[datetime.datetime]]:
+    """Map a controller JobSet's ``.status`` into ``(WorkflowStatus, completion_time)``.
 
+    Reads ``status.terminalState``/``status.conditions`` off the dict-shaped
+    JobSet response — mirrors the per-step handling in ``_jobset_step_pod()``.
     ``completion_time`` is populated only for terminal states.
+
+    ``cancelled`` distinguishes a `chain cancel`-triggered exit from a genuine
+    failure: the controller exits 1 in both cases (so JobSet's own terminalState
+    can't tell them apart), so callers derive it from the phases ConfigMap via
+    ``read_phases_configmap()``/``workflow_cancelled()``.
     """
-    s = job.status
-    completion_time = get_completion_time(s)
-    if s.succeeded and s.succeeded > 0:
-        return WorkflowStatus.SUCCEEDED, completion_time
-    if s.failed and s.failed > 0:
+    status = jobset.get("status", {})
+    terminal_state = status.get("terminalState")
+    conditions = status.get("conditions", []) or []
+
+    if terminal_state in ("Completed", "Failed"):
+        terminal_times = [
+            c.get("lastTransitionTime")
+            for c in conditions
+            if c.get("type") == terminal_state and c.get("lastTransitionTime")
+        ]
+        completion_time = _parse_timestamp(max(terminal_times)) if terminal_times else None
+        if terminal_state == "Completed":
+            return WorkflowStatus.SUCCEEDED, completion_time
+        if cancelled:
+            return WorkflowStatus.TERMINATED, completion_time
         return WorkflowStatus.FAILED, completion_time
-    if s.active and s.active > 0:
+
+    replicated_status = status.get("replicatedJobsStatus", []) or []
+    active = sum(rs.get("active", 0) for rs in replicated_status)
+    if active > 0:
         return WorkflowStatus.RUNNING, None
     return WorkflowStatus.PENDING, None
 
@@ -484,30 +493,42 @@ class _JobMetadata:
     dt_end: Optional[datetime.datetime]
 
 
-def _job_metadata_from_object(job) -> _JobMetadata:
-    """Extract workflow-level metadata from an already-fetched Job.
+def _jobset_metadata_from_object(jobset: Optional[dict], cancelled: bool = False) -> _JobMetadata:
+    """Extract workflow-level metadata from an already-fetched controller JobSet.
 
-    Returns an all-``UNKNOWN``/``None`` ``_JobMetadata`` if ``job`` is ``None`` (not found).
+    Returns an all-``UNKNOWN``/``None`` ``_JobMetadata`` if ``jobset`` is ``None`` (not found).
     """
-    if job is None:
+    if jobset is None:
         return _JobMetadata(name=None, total_steps=None, status=WorkflowStatus.UNKNOWN, dt_start=None, dt_end=None)
 
-    labels = job.metadata.labels or {}
-    annotations = job.metadata.annotations or {}
+    metadata = jobset.get("metadata", {})
+    labels = metadata.get("labels", {}) or {}
+    annotations = metadata.get("annotations", {}) or {}
     name = labels.get("seekr-chain/job-name") or None
     raw_count = annotations.get("seekr-chain/step-count")
     total_steps = int(raw_count) if raw_count else None
-    # Use start_time (pod scheduled) to match what ``chain list`` reports.
-    # Fall back to creation_timestamp if the pod hasn't started yet.
-    dt_start = _parse_timestamp(job.status.start_time) or _parse_timestamp(job.metadata.creation_timestamp)
-    status, dt_end = job_status_and_completion(job)
+
+    # Same heuristic as _jobset_step_pod(): earliest condition transition time,
+    # falling back to creationTimestamp before any condition has been set.
+    status_obj = jobset.get("status", {})
+    conditions = status_obj.get("conditions", []) or []
+    all_times = [c.get("lastTransitionTime") for c in conditions if c.get("lastTransitionTime")]
+    dt_start = _parse_timestamp(min(all_times)) if all_times else _parse_timestamp(metadata.get("creationTimestamp"))
+
+    status, dt_end = controller_jobset_status_and_completion(jobset, cancelled)
     return _JobMetadata(name=name, total_steps=total_steps, status=status, dt_start=dt_start, dt_end=dt_end)
 
 
-def read_workflow_job(k8s_batch, namespace: str, workflow_id: str) -> Optional[k8s.client.models.v1_job.V1Job]:
-    """Fetch the controller Job, or ``None`` if it no longer exists (404)."""
+def read_controller_jobset(k8s_custom, namespace: str, workflow_id: str) -> Optional[dict]:
+    """Fetch the controller JobSet, or ``None`` if it no longer exists (404)."""
     try:
-        return k8s_batch.read_namespaced_job(name=workflow_id, namespace=namespace)
+        return k8s_custom.get_namespaced_custom_object(
+            group="jobset.x-k8s.io",
+            version="v1alpha2",
+            plural="jobsets",
+            namespace=namespace,
+            name=workflow_id,
+        )
     except k8s.client.exceptions.ApiException as e:
         if e.status != 404:
             raise
@@ -568,13 +589,42 @@ def list_pods(k8s_v1, namespace: str, workflow_id: str) -> tuple[list, str]:
     return resp.items, resp.metadata.resource_version or ""
 
 
-def build_workflow_state(workflow_id: str, job, jobsets: list[dict], pods: list) -> WorkflowState:
-    """Build a ``WorkflowState`` from already-fetched Job/JobSet/Pod objects.
+def read_phases_configmap(k8s_v1, namespace: str, workflow_id: str):
+    """Fetch the phases ConfigMap the controller persists step state to
+    (see ``resources/controller.py:_save_phases()``), or ``None`` if absent."""
+    try:
+        return k8s_v1.read_namespaced_config_map(name=f"{workflow_id}-phases", namespace=namespace)
+    except k8s.client.exceptions.ApiException as e:
+        if e.status != 404:
+            raise
+        return None
+
+
+def workflow_cancelled(phases_configmap) -> bool:
+    """True if any step's persisted phase is CANCELLED.
+
+    The controller exits 1 on both genuine failure and `chain cancel`, so
+    JobSet's own terminalState can't distinguish them — this falls back to
+    the phase ConfigMap the controller already persists for restart-resume.
+    """
+    if phases_configmap is None:
+        return False
+    raw = (phases_configmap.data or {}).get("phases")
+    if not raw:
+        return False
+    return "CANCELLED" in json.loads(raw).values()
+
+
+def build_workflow_state(
+    workflow_id: str, controller_jobset: Optional[dict], jobsets: list[dict], pods: list, cancelled: bool = False
+) -> WorkflowState:
+    """Build a ``WorkflowState`` from already-fetched controller JobSet /
+    worker JobSet / Pod objects.
 
     Pure — makes no API calls. Shared by the one-shot ``get_workflow_state()``
     and by watch-driven callers that maintain their own cache of raw objects.
     """
-    meta = _job_metadata_from_object(job)
+    meta = _jobset_metadata_from_object(controller_jobset, cancelled)
     jobset_by_step = _group_jobsets_by_step(jobsets)
     roles_by_step = _group_pods_by_step(pods, jobset_by_step.keys())
     steps = [
@@ -592,35 +642,50 @@ def build_workflow_state(workflow_id: str, job, jobsets: list[dict], pods: list)
     )
 
 
-def get_workflow_state(k8s_custom, k8s_v1, k8s_batch, namespace: str, workflow_id: str) -> WorkflowState:
+def get_workflow_state(k8s_custom, k8s_v1, namespace: str, workflow_id: str) -> WorkflowState:
     """Build a complete ``WorkflowState`` snapshot for the given workflow.
 
-    Reads the controller Job (for workflow-level metadata and status),
-    the JobSets (one per step), and the worker pods. The resulting
+    Reads the controller JobSet (for workflow-level metadata and status),
+    the worker JobSets (one per step), and the worker pods. The resulting
     ``WorkflowState`` carries everything the rendering layer needs — no
     extra context required from the caller.
     """
-    job = read_workflow_job(k8s_batch, namespace, workflow_id)
+    controller_jobset = read_controller_jobset(k8s_custom, namespace, workflow_id)
+    cancelled = False
+    if controller_jobset and controller_jobset.get("status", {}).get("terminalState") == "Failed":
+        cancelled = workflow_cancelled(read_phases_configmap(k8s_v1, namespace, workflow_id))
     jobsets, _ = list_jobsets(k8s_custom, namespace, workflow_id)
     pods, _ = list_pods(k8s_v1, namespace, workflow_id)
-    return build_workflow_state(workflow_id, job, jobsets, pods)
+    return build_workflow_state(workflow_id, controller_jobset, jobsets, pods, cancelled)
 
 
 def get_workflow_job_status(
-    k8s_batch, namespace: str, workflow_id: str
+    k8s_custom, k8s_v1, namespace: str, workflow_id: str
 ) -> tuple[WorkflowStatus, Optional[datetime.datetime]]:
-    """Return ``(status, completion_time)`` for the controller Job — lightweight.
+    """Return ``(status, completion_time)`` for the controller JobSet — lightweight.
 
     Used by ``K8sWorkflow.get_status()`` (called repeatedly by ``wait()``) so
-    callers can poll status without fetching the full workflow state.
+    callers can poll status without fetching the full workflow state. Only
+    reads the phases ConfigMap (for CANCELLED-vs-FAILED disambiguation) once
+    the JobSet has actually reached a Failed terminalState, keeping the
+    common (non-terminal) poll to a single API call.
     """
     try:
-        job = k8s_batch.read_namespaced_job_status(name=workflow_id, namespace=namespace)
+        jobset = k8s_custom.get_namespaced_custom_object_status(
+            group="jobset.x-k8s.io",
+            version="v1alpha2",
+            plural="jobsets",
+            namespace=namespace,
+            name=workflow_id,
+        )
     except k8s.client.exceptions.ApiException as e:
         if e.status != 404:
             raise
         return WorkflowStatus.UNKNOWN, None
-    return job_status_and_completion(job)
+    cancelled = False
+    if jobset.get("status", {}).get("terminalState") == "Failed":
+        cancelled = workflow_cancelled(read_phases_configmap(k8s_v1, namespace, workflow_id))
+    return controller_jobset_status_and_completion(jobset, cancelled)
 
 
 def first_running_or_finished_pod(workflow_state: WorkflowState) -> Optional[PodState]:

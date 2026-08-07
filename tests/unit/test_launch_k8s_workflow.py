@@ -78,8 +78,8 @@ class TestCodeStaging:
         monkeypatch.setattr(lkw_module, "_user_config", UserConfig())
         monkeypatch.setattr(lkw_module, "_package_assets", lambda **k: None)
         monkeypatch.setattr(lkw_module, "_create_secrets", lambda *a, **k: None)
-        monkeypatch.setattr(lkw_module, "_build_controller_job", lambda **k: {})
-        monkeypatch.setattr(lkw_module.kubernetes.client, "BatchV1Api", lambda: MagicMock())
+        monkeypatch.setattr(lkw_module, "_build_controller_jobset", lambda **k: {})
+        monkeypatch.setattr(lkw_module.k8s_utils, "get_custom_objects_api", lambda: MagicMock())
         monkeypatch.setattr("seekr_chain.backends.k8s.k8s_workflow.K8sWorkflow", lambda **k: MagicMock())
 
         def fake_resolve(config, staged_code_dir=None):

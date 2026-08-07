@@ -353,7 +353,6 @@ def _run_main(
         "SEEKR_CHAIN_JOB_ASSET_PATH": "/assets",
         "SEEKR_CHAIN_NAMESPACE": "ns",
         "SEEKR_CHAIN_CONTROLLER_JOB_NAME": "wf-abc",
-        "SEEKR_CHAIN_CONTROLLER_JOB_UID": "uid-123",
     }
 
     call_count = [0]
@@ -371,6 +370,7 @@ def _run_main(
     mock_watch_cls.return_value = mock_watch_instance
 
     mock_k8s = MagicMock()
+    mock_k8s.get_namespaced_custom_object.return_value = {"metadata": {"uid": "uid-123"}}
     mock_k8s.create_namespaced_custom_object.return_value = {}
     if existing_jobsets:
         from kubernetes.client.exceptions import ApiException
@@ -574,13 +574,13 @@ class TestMainWatchReconnect:
         mock_watch_cls.return_value = mock_watch_instance
 
         mock_k8s = MagicMock()
+        mock_k8s.get_namespaced_custom_object.return_value = {"metadata": {"uid": "uid-123"}}
         mock_k8s.create_namespaced_custom_object.return_value = {}
 
         env = {
             "SEEKR_CHAIN_JOB_ASSET_PATH": "/assets",
             "SEEKR_CHAIN_NAMESPACE": "ns",
             "SEEKR_CHAIN_CONTROLLER_JOB_NAME": "wf-abc",
-            "SEEKR_CHAIN_CONTROLLER_JOB_UID": "uid-123",
         }
 
         dag = [{"name": "a", "depends_on": []}]
@@ -628,13 +628,13 @@ class TestMainWatchReconnect:
         mock_watch_cls.return_value = mock_watch_instance
 
         mock_k8s = MagicMock()
+        mock_k8s.get_namespaced_custom_object.return_value = {"metadata": {"uid": "uid-123"}}
         mock_k8s.create_namespaced_custom_object.return_value = {}
 
         env = {
             "SEEKR_CHAIN_JOB_ASSET_PATH": "/assets",
             "SEEKR_CHAIN_NAMESPACE": "ns",
             "SEEKR_CHAIN_CONTROLLER_JOB_NAME": "wf-abc",
-            "SEEKR_CHAIN_CONTROLLER_JOB_UID": "uid-123",
         }
 
         dag = [{"name": "a", "depends_on": []}]
@@ -711,13 +711,13 @@ class TestMainControllerRetry:
         ]
 
         mock_custom = MagicMock()
+        mock_custom.get_namespaced_custom_object.return_value = {"metadata": {"uid": "uid-123"}}
         mock_custom.create_namespaced_custom_object.return_value = {}
 
         env = {
             "SEEKR_CHAIN_JOB_ASSET_PATH": "/assets",
             "SEEKR_CHAIN_NAMESPACE": "ns",
             "SEEKR_CHAIN_CONTROLLER_JOB_NAME": "wf-abc",
-            "SEEKR_CHAIN_CONTROLLER_JOB_UID": "uid-123",
         }
 
         call_count = [0]
@@ -784,13 +784,13 @@ class TestWatchTimeout:
         mock_watch_cls.return_value = mock_watch_instance
 
         mock_k8s = MagicMock()
+        mock_k8s.get_namespaced_custom_object.return_value = {"metadata": {"uid": "uid-123"}}
         mock_k8s.create_namespaced_custom_object.return_value = {}
 
         env = {
             "SEEKR_CHAIN_JOB_ASSET_PATH": "/assets",
             "SEEKR_CHAIN_NAMESPACE": "ns",
             "SEEKR_CHAIN_CONTROLLER_JOB_NAME": "wf-abc",
-            "SEEKR_CHAIN_CONTROLLER_JOB_UID": "uid-123",
         }
 
         with (
@@ -826,6 +826,7 @@ class TestTransientSubmitRetry:
 
         call_count = [0]
         mock_k8s = MagicMock()
+        mock_k8s.get_namespaced_custom_object.return_value = {"metadata": {"uid": "uid-123"}}
 
         def _create_side_effect(*args, **kwargs):
             call_count[0] += 1
@@ -858,7 +859,6 @@ class TestTransientSubmitRetry:
             "SEEKR_CHAIN_JOB_ASSET_PATH": "/assets",
             "SEEKR_CHAIN_NAMESPACE": "ns",
             "SEEKR_CHAIN_CONTROLLER_JOB_NAME": "wf-abc",
-            "SEEKR_CHAIN_CONTROLLER_JOB_UID": "uid-123",
         }
 
         with (

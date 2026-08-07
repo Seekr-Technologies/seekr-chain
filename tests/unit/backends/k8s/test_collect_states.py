@@ -16,9 +16,12 @@ from seekr_chain.backends.k8s.workflow_state import (
     _group_jobsets_by_step,
     _resolve_status,
     _trim_pull_message,
+    controller_jobset_status_and_completion,
     get_workflow_job_status,
     is_jobset_suspended,
     list_jobsets,
+    read_phases_configmap,
+    workflow_cancelled,
 )
 from seekr_chain.status import ContainerStatus, PodStatus, WorkflowStatus
 
@@ -696,35 +699,119 @@ class TestListJobsets:
 # ---------------------------------------------------------------------------
 
 
-class _FakeBatchApi:
+class _FakeCustomStatusApi:
     def __init__(self, response=None, exc=None):
         self._response = response
         self._exc = exc
 
-    def read_namespaced_job_status(self, **kwargs):
+    def get_namespaced_custom_object_status(self, **kwargs):
         if self._exc:
             raise self._exc
         return self._response
 
 
+class _FakeV1NoConfigMap:
+    def read_namespaced_config_map(self, **kwargs):
+        raise ApiException(status=404)
+
+
 class TestGetWorkflowJobStatus:
     def test_404_returns_unknown(self):
-        """After ttlSecondsAfterFinished deletes the Job, status should be UNKNOWN."""
-        api = _FakeBatchApi(exc=ApiException(status=404))
-        status, dt = get_workflow_job_status(api, "ns", "wf-abc")
+        """After ttlSecondsAfterFinished deletes the JobSet, status should be UNKNOWN."""
+        api = _FakeCustomStatusApi(exc=ApiException(status=404))
+        status, dt = get_workflow_job_status(api, _FakeV1NoConfigMap(), "ns", "wf-abc")
         assert status == WorkflowStatus.UNKNOWN
         assert dt is None
 
     def test_non_404_api_exception_raises(self):
-        api = _FakeBatchApi(exc=ApiException(status=403))
+        api = _FakeCustomStatusApi(exc=ApiException(status=403))
         with pytest.raises(ApiException):
-            get_workflow_job_status(api, "ns", "wf-abc")
+            get_workflow_job_status(api, _FakeV1NoConfigMap(), "ns", "wf-abc")
 
     def test_running_job(self):
-        from types import SimpleNamespace
-
-        job = SimpleNamespace(status=SimpleNamespace(succeeded=0, failed=0, active=1, completion_time=None))
-        api = _FakeBatchApi(response=job)
-        status, dt = get_workflow_job_status(api, "ns", "wf-abc")
+        jobset = {"status": {"replicatedJobsStatus": [{"active": 1}]}}
+        api = _FakeCustomStatusApi(response=jobset)
+        status, dt = get_workflow_job_status(api, _FakeV1NoConfigMap(), "ns", "wf-abc")
         assert status == WorkflowStatus.RUNNING
         assert dt is None
+
+    def test_failed_job_reads_phases_configmap_to_detect_cancellation(self):
+        jobset = {"status": {"terminalState": "Failed"}}
+        api = _FakeCustomStatusApi(response=jobset)
+        cm = SimpleNamespace(data={"phases": '{"step-a": "CANCELLED"}'})
+        status, _ = get_workflow_job_status(api, _FakeV1WithConfigMap(cm), "ns", "wf-abc")
+        assert status == WorkflowStatus.TERMINATED
+
+    def test_failed_job_without_cancelled_phase_stays_failed(self):
+        jobset = {"status": {"terminalState": "Failed"}}
+        api = _FakeCustomStatusApi(response=jobset)
+        status, _ = get_workflow_job_status(api, _FakeV1NoConfigMap(), "ns", "wf-abc")
+        assert status == WorkflowStatus.FAILED
+
+
+# ---------------------------------------------------------------------------
+# controller_jobset_status_and_completion
+# ---------------------------------------------------------------------------
+
+
+class TestControllerJobsetStatusAndCompletion:
+    def test_failed_without_cancelled_flag(self):
+        jobset = {"status": {"terminalState": "Failed"}}
+        status, _ = controller_jobset_status_and_completion(jobset)
+        assert status == WorkflowStatus.FAILED
+
+    def test_failed_with_cancelled_flag_maps_to_terminated(self):
+        jobset = {"status": {"terminalState": "Failed"}}
+        status, _ = controller_jobset_status_and_completion(jobset, cancelled=True)
+        assert status == WorkflowStatus.TERMINATED
+
+    def test_completed_ignores_cancelled_flag(self):
+        jobset = {"status": {"terminalState": "Completed"}}
+        status, _ = controller_jobset_status_and_completion(jobset, cancelled=True)
+        assert status == WorkflowStatus.SUCCEEDED
+
+
+# ---------------------------------------------------------------------------
+# read_phases_configmap / workflow_cancelled
+# ---------------------------------------------------------------------------
+
+
+class _FakeV1WithConfigMap:
+    def __init__(self, configmap):
+        self._configmap = configmap
+
+    def read_namespaced_config_map(self, **kwargs):
+        return self._configmap
+
+
+class TestReadPhasesConfigmap:
+    def test_returns_none_on_404(self):
+        assert read_phases_configmap(_FakeV1NoConfigMap(), "ns", "wf-abc") is None
+
+    def test_non_404_api_exception_raises(self):
+        class _FakeV1Broken:
+            def read_namespaced_config_map(self, **kwargs):
+                raise ApiException(status=500)
+
+        with pytest.raises(ApiException):
+            read_phases_configmap(_FakeV1Broken(), "ns", "wf-abc")
+
+    def test_returns_configmap_when_present(self):
+        cm = SimpleNamespace(data={"phases": "{}"})
+        assert read_phases_configmap(_FakeV1WithConfigMap(cm), "ns", "wf-abc") is cm
+
+
+class TestWorkflowCancelled:
+    def test_none_configmap_is_not_cancelled(self):
+        assert workflow_cancelled(None) is False
+
+    def test_missing_phases_key_is_not_cancelled(self):
+        assert workflow_cancelled(SimpleNamespace(data={})) is False
+
+    def test_no_cancelled_step_is_not_cancelled(self):
+        cm = SimpleNamespace(data={"phases": '{"step-a": "FAILED", "step-b": "SUCCEEDED"}'})
+        assert workflow_cancelled(cm) is False
+
+    def test_any_cancelled_step_is_cancelled(self):
+        cm = SimpleNamespace(data={"phases": '{"step-a": "SUCCEEDED", "step-b": "CANCELLED"}'})
+        assert workflow_cancelled(cm) is True

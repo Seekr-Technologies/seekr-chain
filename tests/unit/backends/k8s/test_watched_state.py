@@ -6,7 +6,9 @@ Mirrors test_state_fetcher.py's mocking style, but instead of faking a
 fetch_fn, fakes the Kubernetes Watch API: kubernetes.watch.Watch().stream()
 is patched to replay a scripted list of events per resource kind (job,
 jobset, or pod — classified by the call's distinguishing kwargs, see
-_stream_kind()).
+_stream_kind()). Both the controller JobSet ("job") and worker JobSets
+("jobset") go through CustomObjectsApi and pass group= in their kwargs;
+they're told apart by the controller's is-controller=true label selector.
 """
 
 import time
@@ -32,14 +34,17 @@ from seekr_chain.status import WorkflowStatus
 def _stream_kind(kwargs):
     """Classify a Watch().stream() call by its kwargs — bound methods get a
     fresh id() on every attribute access, so we can't key off the func
-    argument's identity. The three watchers pass distinguishable kwargs:
-    the job watch always passes field_selector, the jobset watch always
-    passes group=, and the pod watch passes neither.
+    argument's identity. The controller-JobSet and worker-JobSet watches both
+    pass group=, told apart by the is-controller=true label selector; the
+    phases-ConfigMap watch is the only one with a field_selector; the pod
+    watch passes neither.
     """
     if "group" in kwargs:
+        if "is-controller=true" in kwargs.get("label_selector", ""):
+            return "job"
         return "jobset"
     if "field_selector" in kwargs:
-        return "job"
+        return "phases"
     return "pod"
 
 
@@ -77,19 +82,21 @@ def make_fake_watch_class(events_by_kind):
 # ---------------------------------------------------------------------------
 
 
-def _job(resource_version="1", succeeded=0, failed=0, active=0, labels=None):
-    return SimpleNamespace(
-        metadata=SimpleNamespace(
-            name="wf-1",
-            resource_version=resource_version,
-            labels=labels or {},
-            annotations={},
-            creation_timestamp=None,
-        ),
-        status=SimpleNamespace(
-            succeeded=succeeded, failed=failed, active=active, start_time=None, completion_time=None
-        ),
-    )
+def _controller_jobset(resource_version="1", active=0, terminal_state=None, labels=None):
+    status = {}
+    if active:
+        status["replicatedJobsStatus"] = [{"active": active}]
+    if terminal_state:
+        status["terminalState"] = terminal_state
+    return {
+        "metadata": {
+            "name": "wf-1",
+            "resourceVersion": resource_version,
+            "labels": labels or {},
+            "annotations": {},
+        },
+        "status": status,
+    }
 
 
 def _pod(name, step, resource_version="1"):
@@ -117,24 +124,15 @@ def _jobset_dict(name, step_name, resource_version="1"):
     }
 
 
-class FakeK8sBatch:
-    def __init__(self, job):
-        self._job = job
-
-    def read_namespaced_job(self, name, namespace):
-        if self._job is None:
-            from kubernetes.client.rest import ApiException
-
-            raise ApiException(status=404)
-        return self._job
-
-    def list_namespaced_job(self, **kwargs):
-        raise AssertionError("should never be called directly — only used as a Watch() function reference")
-
-
 class FakeK8sCustom:
-    def __init__(self, jobsets):
-        self._jobsets = jobsets
+    def __init__(self, controller_jobset, jobsets=None):
+        self._controller_jobset = controller_jobset
+        self._jobsets = jobsets or []
+
+    def get_namespaced_custom_object(self, **kwargs):
+        if self._controller_jobset is None:
+            raise ApiException(status=404)
+        return self._controller_jobset
 
     def list_namespaced_custom_object(self, **kwargs):
         return {"items": self._jobsets, "metadata": {"resourceVersion": "1"}}
@@ -147,6 +145,12 @@ class FakeK8sV1:
     def list_namespaced_pod(self, **kwargs):
         return SimpleNamespace(items=self._pods, metadata=SimpleNamespace(resource_version="1"))
 
+    def read_namespaced_config_map(self, **kwargs):
+        raise ApiException(status=404)
+
+    def list_namespaced_config_map(self, **kwargs):
+        return SimpleNamespace(items=[], metadata=SimpleNamespace(resource_version="1"))
+
 
 # ---------------------------------------------------------------------------
 # Tests
@@ -154,15 +158,14 @@ class FakeK8sV1:
 
 
 def test_seed_produces_first_snapshot_without_waiting_for_watch_events(monkeypatch):
-    job = _job(active=1, labels={"seekr-chain/job-name": "my-job"})
-    k8s_batch = FakeK8sBatch(job)
-    k8s_custom = FakeK8sCustom([])
+    controller_jobset = _controller_jobset(active=1, labels={"seekr-chain/job-name": "my-job"})
+    k8s_custom = FakeK8sCustom(controller_jobset)
     k8s_v1 = FakeK8sV1([])
 
     fake_watch_cls = make_fake_watch_class({})
     monkeypatch.setattr(watched_state_mod.k8s.watch, "Watch", fake_watch_cls)
 
-    with workflow_state_watcher(k8s_custom, k8s_v1, k8s_batch, "ns", "wf-1") as w:
+    with workflow_state_watcher(k8s_custom, k8s_v1, "ns", "wf-1") as w:
         state = w.wait_for_first(timeout=1)
         assert state.name == "my-job"
         assert state.status == WorkflowStatus.RUNNING
@@ -188,30 +191,28 @@ def _wait_until(predicate, watcher, timeout=1.0):
 
 
 def test_job_modified_event_updates_status(monkeypatch):
-    job_v1 = _job(resource_version="1", active=1)
-    job_v2 = _job(resource_version="2", succeeded=1)
-    k8s_batch = FakeK8sBatch(job_v1)
-    k8s_custom = FakeK8sCustom([])
+    jobset_v1 = _controller_jobset(resource_version="1", active=1)
+    jobset_v2 = _controller_jobset(resource_version="2", terminal_state="Completed")
+    k8s_custom = FakeK8sCustom(jobset_v1)
     k8s_v1 = FakeK8sV1([])
 
     fake_watch_cls = make_fake_watch_class(
         {
-            "job": [[{"type": "MODIFIED", "object": job_v2}]],
+            "job": [[{"type": "MODIFIED", "object": jobset_v2}]],
         }
     )
     monkeypatch.setattr(watched_state_mod.k8s.watch, "Watch", fake_watch_cls)
 
-    with workflow_state_watcher(k8s_custom, k8s_v1, k8s_batch, "ns", "wf-1") as w:
+    with workflow_state_watcher(k8s_custom, k8s_v1, "ns", "wf-1") as w:
         w.wait_for_first(timeout=1)
         state = _wait_until(lambda s: s.status == WorkflowStatus.SUCCEEDED, w)
         assert state.status == WorkflowStatus.SUCCEEDED
 
 
 def test_pod_added_event_appears_in_next_snapshot(monkeypatch):
-    job = _job(active=1)
+    controller_jobset = _controller_jobset(active=1)
     jobsets = [_jobset_dict("wf-1-step-a", "step-a")]
-    k8s_batch = FakeK8sBatch(job)
-    k8s_custom = FakeK8sCustom(jobsets)
+    k8s_custom = FakeK8sCustom(controller_jobset, jobsets)
     k8s_v1 = FakeK8sV1([])
 
     new_pod = _pod("wf-1-step-a-0", "step-a")
@@ -222,18 +223,17 @@ def test_pod_added_event_appears_in_next_snapshot(monkeypatch):
     )
     monkeypatch.setattr(watched_state_mod.k8s.watch, "Watch", fake_watch_cls)
 
-    with workflow_state_watcher(k8s_custom, k8s_v1, k8s_batch, "ns", "wf-1") as w:
+    with workflow_state_watcher(k8s_custom, k8s_v1, "ns", "wf-1") as w:
         w.wait_for_first(timeout=1)
         state = _wait_until(lambda s: s.steps[0].roles != [], w)
         assert [p.name for p in state.steps[0].roles[0].pods] == ["wf-1-step-a-0"]
 
 
 def test_pod_deleted_event_removes_pod_from_next_snapshot(monkeypatch):
-    job = _job(active=1)
+    controller_jobset = _controller_jobset(active=1)
     existing_pod = _pod("wf-1-step-a-0", "step-a")
     jobsets = [_jobset_dict("wf-1-step-a", "step-a")]
-    k8s_batch = FakeK8sBatch(job)
-    k8s_custom = FakeK8sCustom(jobsets)
+    k8s_custom = FakeK8sCustom(controller_jobset, jobsets)
     k8s_v1 = FakeK8sV1([existing_pod])
 
     fake_watch_cls = make_fake_watch_class(
@@ -243,36 +243,34 @@ def test_pod_deleted_event_removes_pod_from_next_snapshot(monkeypatch):
     )
     monkeypatch.setattr(watched_state_mod.k8s.watch, "Watch", fake_watch_cls)
 
-    with workflow_state_watcher(k8s_custom, k8s_v1, k8s_batch, "ns", "wf-1") as w:
+    with workflow_state_watcher(k8s_custom, k8s_v1, "ns", "wf-1") as w:
         w.wait_for_first(timeout=1)
         state = _wait_until(lambda s: s.steps[0].roles == [], w)
         assert state.steps[0].roles == []
 
 
 def test_wait_for_update_times_out_when_nothing_changes(monkeypatch):
-    job = _job(active=1)
-    k8s_batch = FakeK8sBatch(job)
-    k8s_custom = FakeK8sCustom([])
+    controller_jobset = _controller_jobset(active=1)
+    k8s_custom = FakeK8sCustom(controller_jobset)
     k8s_v1 = FakeK8sV1([])
 
     fake_watch_cls = make_fake_watch_class({})
     monkeypatch.setattr(watched_state_mod.k8s.watch, "Watch", fake_watch_cls)
 
-    with workflow_state_watcher(k8s_custom, k8s_v1, k8s_batch, "ns", "wf-1") as w:
+    with workflow_state_watcher(k8s_custom, k8s_v1, "ns", "wf-1") as w:
         w.wait_for_first(timeout=1)
         assert w.wait_for_update(timeout=0.05) is False
 
 
 def test_stop_joins_watcher_threads_promptly(monkeypatch):
-    job = _job(active=1)
-    k8s_batch = FakeK8sBatch(job)
-    k8s_custom = FakeK8sCustom([])
+    controller_jobset = _controller_jobset(active=1)
+    k8s_custom = FakeK8sCustom(controller_jobset)
     k8s_v1 = FakeK8sV1([])
 
     fake_watch_cls = make_fake_watch_class({})
     monkeypatch.setattr(watched_state_mod.k8s.watch, "Watch", fake_watch_cls)
 
-    w = workflow_state_watcher(k8s_custom, k8s_v1, k8s_batch, "ns", "wf-1")
+    w = workflow_state_watcher(k8s_custom, k8s_v1, "ns", "wf-1")
     w.start()
     w.wait_for_first(timeout=1)
     w.stop(join_timeout=1.0)
@@ -298,9 +296,8 @@ class _FailingWatch:
 
 
 def test_continuous_watch_failures_escalate_to_watch_stalled_error(monkeypatch):
-    job = _job(active=1)
-    k8s_batch = FakeK8sBatch(job)
-    k8s_custom = FakeK8sCustom([])
+    controller_jobset = _controller_jobset(active=1)
+    k8s_custom = FakeK8sCustom(controller_jobset)
     k8s_v1 = FakeK8sV1([])
 
     monkeypatch.setattr(watched_state_mod.k8s.watch, "Watch", _FailingWatch)
@@ -308,7 +305,7 @@ def test_continuous_watch_failures_escalate_to_watch_stalled_error(monkeypatch):
     monkeypatch.setattr(watched_state_mod, "_WATCH_BACKOFF_BASE_SECONDS", 0.01)
     monkeypatch.setattr(watched_state_mod, "_WATCH_BACKOFF_MAX_SECONDS", 0.01)
 
-    with workflow_state_watcher(k8s_custom, k8s_v1, k8s_batch, "ns", "wf-1", max_attempts=3) as w:
+    with workflow_state_watcher(k8s_custom, k8s_v1, "ns", "wf-1", max_attempts=3) as w:
         w.wait_for_first(timeout=1)
         with pytest.raises(WatchStalledError, match="job watch failed after 3 attempts.*401 Unauthorized"):
             w.wait_for_update(timeout=2.0)
@@ -352,71 +349,76 @@ def _wait_until_status(predicate, watcher, timeout=1.0):
 
 
 def test_controller_seed_produces_first_status_without_waiting_for_watch_events(monkeypatch):
-    job = _job(active=1)
-    k8s_batch = FakeK8sBatch(job)
+    controller_jobset = _controller_jobset(active=1)
+    k8s_custom = FakeK8sCustom(controller_jobset)
+    k8s_v1 = FakeK8sV1([])
 
     fake_watch_cls = make_fake_watch_class({})
     monkeypatch.setattr(watched_state_mod.k8s.watch, "Watch", fake_watch_cls)
 
-    with controller_status_watcher(k8s_batch, "ns", "wf-1") as w:
+    with controller_status_watcher(k8s_custom, k8s_v1, "ns", "wf-1") as w:
         status = w.wait_for_first(timeout=1)
         assert status == WorkflowStatus.RUNNING
 
 
 def test_controller_returns_none_when_job_does_not_exist(monkeypatch):
-    k8s_batch = FakeK8sBatch(None)
+    k8s_custom = FakeK8sCustom(None)
+    k8s_v1 = FakeK8sV1([])
 
     fake_watch_cls = make_fake_watch_class({})
     monkeypatch.setattr(watched_state_mod.k8s.watch, "Watch", fake_watch_cls)
 
-    with controller_status_watcher(k8s_batch, "ns", "wf-1") as w:
+    with controller_status_watcher(k8s_custom, k8s_v1, "ns", "wf-1") as w:
         status = w.wait_for_first(timeout=1)
         assert status is None
 
 
 def test_controller_job_modified_event_updates_status(monkeypatch):
-    job_v1 = _job(resource_version="1", active=1)
-    job_v2 = _job(resource_version="2", succeeded=1)
-    k8s_batch = FakeK8sBatch(job_v1)
+    jobset_v1 = _controller_jobset(resource_version="1", active=1)
+    jobset_v2 = _controller_jobset(resource_version="2", terminal_state="Completed")
+    k8s_custom = FakeK8sCustom(jobset_v1)
+    k8s_v1 = FakeK8sV1([])
 
     fake_watch_cls = make_fake_watch_class(
         {
-            "job": [[{"type": "MODIFIED", "object": job_v2}]],
+            "job": [[{"type": "MODIFIED", "object": jobset_v2}]],
         }
     )
     monkeypatch.setattr(watched_state_mod.k8s.watch, "Watch", fake_watch_cls)
 
-    with controller_status_watcher(k8s_batch, "ns", "wf-1") as w:
+    with controller_status_watcher(k8s_custom, k8s_v1, "ns", "wf-1") as w:
         w.wait_for_first(timeout=1)
         status = _wait_until_status(lambda s: s == WorkflowStatus.SUCCEEDED, w)
         assert status == WorkflowStatus.SUCCEEDED
 
 
 def test_controller_deleted_event_clears_status(monkeypatch):
-    job = _job(active=1)
-    k8s_batch = FakeK8sBatch(job)
+    controller_jobset = _controller_jobset(active=1)
+    k8s_custom = FakeK8sCustom(controller_jobset)
+    k8s_v1 = FakeK8sV1([])
 
     fake_watch_cls = make_fake_watch_class(
         {
-            "job": [[{"type": "DELETED", "object": job}]],
+            "job": [[{"type": "DELETED", "object": controller_jobset}]],
         }
     )
     monkeypatch.setattr(watched_state_mod.k8s.watch, "Watch", fake_watch_cls)
 
-    with controller_status_watcher(k8s_batch, "ns", "wf-1") as w:
+    with controller_status_watcher(k8s_custom, k8s_v1, "ns", "wf-1") as w:
         w.wait_for_first(timeout=1)
         status = _wait_until_status(lambda s: s is None, w)
         assert status is None
 
 
 def test_controller_stop_joins_watcher_thread_promptly(monkeypatch):
-    job = _job(active=1)
-    k8s_batch = FakeK8sBatch(job)
+    controller_jobset = _controller_jobset(active=1)
+    k8s_custom = FakeK8sCustom(controller_jobset)
+    k8s_v1 = FakeK8sV1([])
 
     fake_watch_cls = make_fake_watch_class({})
     monkeypatch.setattr(watched_state_mod.k8s.watch, "Watch", fake_watch_cls)
 
-    w = controller_status_watcher(k8s_batch, "ns", "wf-1")
+    w = controller_status_watcher(k8s_custom, k8s_v1, "ns", "wf-1")
     w.start()
     w.wait_for_first(timeout=1)
     w.stop(join_timeout=1.0)
@@ -424,15 +426,16 @@ def test_controller_stop_joins_watcher_thread_promptly(monkeypatch):
 
 
 def test_controller_continuous_watch_failures_escalate_to_watch_stalled_error(monkeypatch):
-    job = _job(active=1)
-    k8s_batch = FakeK8sBatch(job)
+    controller_jobset = _controller_jobset(active=1)
+    k8s_custom = FakeK8sCustom(controller_jobset)
+    k8s_v1 = FakeK8sV1([])
 
     monkeypatch.setattr(watched_state_mod.k8s.watch, "Watch", _FailingWatch)
     monkeypatch.setattr(watched_state_mod, "_WATCH_RECONNECT_DELAY", 0.01)
     monkeypatch.setattr(watched_state_mod, "_WATCH_BACKOFF_BASE_SECONDS", 0.01)
     monkeypatch.setattr(watched_state_mod, "_WATCH_BACKOFF_MAX_SECONDS", 0.01)
 
-    with controller_status_watcher(k8s_batch, "ns", "wf-1", max_attempts=3) as w:
+    with controller_status_watcher(k8s_custom, k8s_v1, "ns", "wf-1", max_attempts=3) as w:
         w.wait_for_first(timeout=1)
         with pytest.raises(WatchStalledError, match="job watch failed after 3 attempts.*401 Unauthorized"):
             w.wait_for_update(timeout=2.0)
