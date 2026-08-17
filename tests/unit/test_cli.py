@@ -2,12 +2,13 @@
 
 import os
 import textwrap
-from datetime import datetime, timezone
 from unittest.mock import MagicMock, patch
 
 import pytest
 from click.testing import CliRunner
+from kubernetes.client.rest import ApiException
 
+from seekr_chain.backends.k8s.list_workflows import list_k8s_workflows as list_workflows
 from seekr_chain.cli import main
 
 MINIMAL_CONFIG = textwrap.dedent("""\
@@ -306,62 +307,57 @@ class TestListWorkflows:
 
     @patch("seekr_chain.backends.k8s.list_workflows.kube")
     def test_label_selector(self, mock_kube):
-        """list_workflows filters to seekr-chain workflows via label selector."""
-        from seekr_chain.backends.k8s.list_workflows import list_k8s_workflows as list_workflows
+        """list_workflows filters to seekr-chain controller JobSets via label selector."""
 
-        mock_batch = MagicMock()
-        mock_result = MagicMock()
-        mock_result.items = []
-        mock_batch.list_namespaced_job.return_value = mock_result
-        mock_kube.batch_v1 = mock_batch
+        mock_custom = MagicMock()
+        mock_custom.list_namespaced_custom_object.return_value = {"items": []}
+        mock_kube.custom_objects = mock_custom
         mock_kube.namespace = "default"
 
         list_workflows()
 
-        call_kwargs = mock_batch.list_namespaced_job.call_args.kwargs
-        assert call_kwargs["label_selector"] == "seekr-chain/job-id"
+        call_kwargs = mock_custom.list_namespaced_custom_object.call_args.kwargs
+        assert call_kwargs["label_selector"] == "seekr-chain/job-id,seekr-chain/is-controller=true"
 
     @patch("seekr_chain.backends.k8s.list_workflows.kube")
     def test_label_selector_with_user(self, mock_kube):
         """list_workflows with user= appends user label selector."""
-        from seekr_chain.backends.k8s.list_workflows import list_k8s_workflows as list_workflows
 
-        mock_batch = MagicMock()
-        mock_result = MagicMock()
-        mock_result.items = []
-        mock_batch.list_namespaced_job.return_value = mock_result
-        mock_kube.batch_v1 = mock_batch
+        mock_custom = MagicMock()
+        mock_custom.list_namespaced_custom_object.return_value = {"items": []}
+        mock_kube.custom_objects = mock_custom
         mock_kube.namespace = "default"
 
         list_workflows(user="alice")
 
-        call_kwargs = mock_batch.list_namespaced_job.call_args.kwargs
-        assert call_kwargs["label_selector"] == "seekr-chain/job-id,seekr-chain/user=alice"
+        call_kwargs = mock_custom.list_namespaced_custom_object.call_args.kwargs
+        assert (
+            call_kwargs["label_selector"] == "seekr-chain/job-id,seekr-chain/is-controller=true,seekr-chain/user=alice"
+        )
 
     @patch("seekr_chain.backends.k8s.list_workflows.kube")
     def test_returns_job_name_and_user(self, mock_kube):
         """list_workflows extracts job_name and user from workflow labels."""
-        from seekr_chain.backends.k8s.list_workflows import list_k8s_workflows as list_workflows
 
-        mock_job = MagicMock()
-        mock_job.metadata.name = "abc123"
-        mock_job.metadata.creation_timestamp = None
-        mock_job.metadata.labels = {
-            "seekr-chain/job-id": "abc123",
-            "seekr-chain/job-name": "my-training",
-            "seekr-chain/user": "bob",
+        jobset = {
+            "metadata": {
+                "name": "abc123",
+                "creationTimestamp": None,
+                "labels": {
+                    "seekr-chain/job-id": "abc123",
+                    "seekr-chain/job-name": "my-training",
+                    "seekr-chain/user": "bob",
+                },
+            },
+            "status": {"replicatedJobsStatus": [], "terminalState": "Completed", "conditions": []},
         }
-        mock_job.status.succeeded = 1
-        mock_job.status.failed = None
-        mock_job.status.active = None
-        mock_job.status.start_time = None
-        mock_job.status.completion_time = None
 
-        mock_batch = MagicMock()
-        mock_result = MagicMock()
-        mock_result.items = [mock_job]
-        mock_batch.list_namespaced_job.return_value = mock_result
-        mock_kube.batch_v1 = mock_batch
+        mock_custom = MagicMock()
+        mock_custom.list_namespaced_custom_object.return_value = {"items": [jobset]}
+        mock_v1 = MagicMock()
+        mock_v1.read_namespaced_config_map.side_effect = ApiException(status=404)
+        mock_kube.custom_objects = mock_custom
+        mock_kube.core_v1 = mock_v1
         mock_kube.namespace = "default"
 
         result = list_workflows()
@@ -371,39 +367,90 @@ class TestListWorkflows:
         assert result[0]["user"] == "bob"
 
     @patch("seekr_chain.backends.k8s.list_workflows.kube")
-    def test_failed_job_duration_uses_condition_timestamp(self, mock_kube):
-        """Failed jobs freeze duration at the Failed condition's timestamp, not now()."""
-        from seekr_chain.backends.k8s.list_workflows import list_k8s_workflows as list_workflows
+    def test_crashed_controller_reports_error(self, mock_kube):
+        """A Failed terminalState now only means the controller process itself
+        crashed — freezes duration at the Failed condition's timestamp."""
 
-        start = datetime(2026, 1, 1, 0, 0, 0, tzinfo=timezone.utc)
-        failed_at = datetime(2026, 1, 1, 0, 5, 30, tzinfo=timezone.utc)
+        start = "2026-01-01T00:00:00Z"
+        failed_at = "2026-01-01T00:05:30Z"
 
-        mock_job = MagicMock()
-        mock_job.metadata.name = "abc123"
-        mock_job.metadata.creation_timestamp = None
-        mock_job.metadata.labels = {}
-        mock_job.status.succeeded = None
-        mock_job.status.failed = 1
-        mock_job.status.active = None
-        mock_job.status.start_time = start
-        mock_job.status.completion_time = None
-        mock_condition = MagicMock()
-        mock_condition.type = "Failed"
-        mock_condition.status = "True"
-        mock_condition.last_transition_time = failed_at
-        mock_job.status.conditions = [mock_condition]
+        jobset = {
+            "metadata": {"name": "abc123", "creationTimestamp": start, "labels": {}},
+            "status": {
+                "replicatedJobsStatus": [],
+                "terminalState": "Failed",
+                "conditions": [
+                    {"type": "StartupPolicyCompleted", "status": "True", "lastTransitionTime": start},
+                    {"type": "Failed", "status": "True", "lastTransitionTime": failed_at},
+                ],
+            },
+        }
 
-        mock_batch = MagicMock()
-        mock_result = MagicMock()
-        mock_result.items = [mock_job]
-        mock_batch.list_namespaced_job.return_value = mock_result
-        mock_kube.batch_v1 = mock_batch
+        mock_custom = MagicMock()
+        mock_custom.list_namespaced_custom_object.return_value = {"items": [jobset]}
+        mock_kube.custom_objects = mock_custom
+        mock_kube.namespace = "default"
+
+        result = list_workflows()
+
+        assert result[0]["status"] == "Error"
+        assert result[0]["duration"] == "5:30"
+
+    @patch("seekr_chain.backends.k8s.list_workflows.kube")
+    def test_cancelled_run_reports_terminated_not_failed(self, mock_kube):
+        """A Completed terminalState with a CANCELLED phase in the ConfigMap reports Terminated."""
+
+        jobset = {
+            "metadata": {"name": "abc123", "creationTimestamp": None, "labels": {}},
+            "status": {
+                "replicatedJobsStatus": [],
+                "terminalState": "Completed",
+                "conditions": [{"type": "Completed", "status": "True", "lastTransitionTime": "2026-01-01T00:00:00Z"}],
+            },
+        }
+
+        mock_configmap = MagicMock()
+        mock_configmap.data = {"phases": '{"step-a": "CANCELLED"}'}
+
+        mock_custom = MagicMock()
+        mock_custom.list_namespaced_custom_object.return_value = {"items": [jobset]}
+        mock_v1 = MagicMock()
+        mock_v1.read_namespaced_config_map.return_value = mock_configmap
+        mock_kube.custom_objects = mock_custom
+        mock_kube.core_v1 = mock_v1
+        mock_kube.namespace = "default"
+
+        result = list_workflows()
+
+        assert result[0]["status"] == "Terminated"
+
+    @patch("seekr_chain.backends.k8s.list_workflows.kube")
+    def test_completed_with_failed_phase_reports_failed(self, mock_kube):
+        """A Completed terminalState with a FAILED phase in the ConfigMap reports Failed."""
+
+        jobset = {
+            "metadata": {"name": "abc123", "creationTimestamp": None, "labels": {}},
+            "status": {
+                "replicatedJobsStatus": [],
+                "terminalState": "Completed",
+                "conditions": [{"type": "Completed", "status": "True", "lastTransitionTime": "2026-01-01T00:00:00Z"}],
+            },
+        }
+
+        mock_configmap = MagicMock()
+        mock_configmap.data = {"phases": '{"step-a": "FAILED"}'}
+
+        mock_custom = MagicMock()
+        mock_custom.list_namespaced_custom_object.return_value = {"items": [jobset]}
+        mock_v1 = MagicMock()
+        mock_v1.read_namespaced_config_map.return_value = mock_configmap
+        mock_kube.custom_objects = mock_custom
+        mock_kube.core_v1 = mock_v1
         mock_kube.namespace = "default"
 
         result = list_workflows()
 
         assert result[0]["status"] == "Failed"
-        assert result[0]["duration"] == "5:30"
 
 
 class TestList:

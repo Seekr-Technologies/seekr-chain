@@ -277,18 +277,14 @@ class TestConsumersUseTheModule:
     def test_k8s_workflow_builds_all_clients_from_kube(self):
         from seekr_chain.backends.k8s.k8s_workflow import K8sWorkflow
 
-        mock_batch = MagicMock()
-        mock_batch.read_namespaced_job.return_value.metadata.annotations = {
-            "seekr-chain/datastore-root": "s3://bucket/"
-        }
-
         with patch("seekr_chain.backends.k8s.k8s_workflow.kube") as mock_kube:
-            mock_kube.batch_v1 = mock_batch
+            mock_kube.custom_objects.get_namespaced_custom_object.return_value = {
+                "metadata": {"annotations": {"seekr-chain/datastore-root": "s3://bucket/"}}
+            }
             mock_kube.namespace = "argo"
             workflow = K8sWorkflow(id="wf-1")
 
         assert workflow._k8s_v1 is mock_kube.core_v1
-        assert workflow._k8s_batch is mock_batch
         assert workflow._k8s_custom is mock_kube.custom_objects
         assert workflow._namespace == "argo"
 
@@ -296,8 +292,8 @@ class TestConsumersUseTheModule:
         from seekr_chain.backends.k8s.k8s_workflow import K8sWorkflow
 
         with patch("seekr_chain.backends.k8s.k8s_workflow.kube") as mock_kube:
-            mock_kube.batch_v1.read_namespaced_job.return_value.metadata.annotations = {
-                "seekr-chain/datastore-root": "s3://bucket/"
+            mock_kube.custom_objects.get_namespaced_custom_object.return_value = {
+                "metadata": {"annotations": {"seekr-chain/datastore-root": "s3://bucket/"}}
             }
             mock_kube.namespace = "should-not-be-used"
             workflow = K8sWorkflow(id="wf-1", namespace="explicit")

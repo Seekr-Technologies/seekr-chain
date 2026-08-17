@@ -1,5 +1,7 @@
+import hashlib
 import os
 import shutil
+from concurrent.futures import ThreadPoolExecutor
 from fnmatch import fnmatch
 from pathlib import Path
 from typing import Iterator
@@ -169,6 +171,8 @@ def _iter_included_files(
     """Yield (src_file, relative_path) for every file passing include/exclude."""
     for root, dirs, files in os.walk(src_path, followlinks=follow_links, topdown=True):
         root_path = Path(root)
+        dirs.sort()
+        files.sort()
 
         # Prune subdirectories that provably can't contain an included file, so
         # os.walk never descends into (or stats) huge unrelated trees.
@@ -261,3 +265,45 @@ def copy_filtered(
         # copy2 follows symlinks (copies target content), matching tar_directory's
         # file_path.resolve() dereference so both produce the same bytes.
         shutil.copy2(src_file, dst_file)
+
+
+def _hash_one_file(src_file: Path, rel: str) -> tuple[str, bytes]:
+    resolved = src_file.resolve()
+    st = resolved.stat()
+    h = hashlib.sha256()
+    h.update(f"{rel}\0{st.st_mode & 0o777}\0{st.st_size}\0".encode())
+    with resolved.open("rb") as f:
+        while chunk := f.read(1024 * 1024):
+            h.update(chunk)
+    return rel, h.digest()
+
+
+def fingerprint_filtered_tree(
+    src, include: list[str] | None = None, exclude: list[str] | None = None, follow_links: bool = True
+) -> str:
+    """Return a deterministic digest of the filtered file set.
+
+    Per-file hashing runs on a thread pool (file I/O and hashlib both release
+    the GIL), then per-file digests are combined in sorted relative-path order
+    so the result doesn't depend on completion order.
+    """
+    src_path = Path(src).resolve()
+    include = include or []
+    exclude = exclude or []
+
+    files = list(_iter_included_files(src_path, include, exclude, follow_links))
+    # Hashing is I/O-bound (disk read dominates over hashlib's C-level
+    # update), so oversubscribing cores is fine and hides read latency;
+    # capped so a huge tree doesn't spin up hundreds of threads.
+    max_workers = min(32, (os.cpu_count() or 4) * 4)
+    with ThreadPoolExecutor(max_workers=max_workers) as pool:
+        per_file = pool.map(
+            lambda item: _hash_one_file(item[0], item[1].as_posix()),
+            files,
+        )
+
+    h = hashlib.sha256()
+    for rel, digest in sorted(per_file):
+        h.update(f"{rel}\0".encode())
+        h.update(digest)
+    return h.hexdigest()

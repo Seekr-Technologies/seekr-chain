@@ -18,8 +18,8 @@ from seekr_chain.backends.k8s.parse_logs import DATA_SCHEMA_VERSION
 from seekr_chain.backends.k8s.rbac import detect_service_account
 from seekr_chain.config import EnvSource, SecretRefSource
 from seekr_chain.k8s_api import kube
-from seekr_chain.nix_resolution import has_nix_roles, resolve_nix_steps
-from seekr_chain.symlink import copy_filtered, symlink
+from seekr_chain.nix_resolution import process_nix
+from seekr_chain.symlink import symlink
 from seekr_chain.tar_directory import tar_directory
 from seekr_chain.user_config import config as _user_config
 
@@ -261,7 +261,7 @@ def _generate_job_info(datastore_root: str = None) -> JobInfo:
     return job_info
 
 
-def _build_controller_job(
+def _build_controller_jobset(
     workflow_id: str,
     config: WorkflowConfig,
     job_info: JobInfo,
@@ -270,7 +270,14 @@ def _build_controller_job(
     interactive: bool,
     service_account: str,
 ) -> dict:
-    """Build the batch/v1 Job manifest for the controller pod."""
+    """Build the jobset.x-k8s.io/v1alpha2 JobSet manifest for the controller pod.
+
+    Runs the controller as a JobSet (rather than a plain batch/v1 Job) so its
+    ``status.terminalState`` is derivable the same way as worker JobSets, using
+    only the jobset.x-k8s.io RBAC workers already need — no ``batch/jobs``
+    permissions, which neither the dedicated SA nor the Argo Workflows
+    fallback SA grants.
+    """
     # Per-workflow config.controller_image overrides user config and default.
     controller_image = config.controller_image or _CONTROLLER_IMAGE
     controller_command = ["python", f"{constants.JOB_RESOURCES_PATH}/controller.py"]
@@ -299,16 +306,7 @@ def _build_controller_job(
     controller_env = [
         {"name": "SEEKR_CHAIN_NAMESPACE", "value": config.namespace},
         {"name": "SEEKR_CHAIN_JOB_ASSET_PATH", "value": constants.JOB_ASSET_PATH},
-        {
-            "name": "SEEKR_CHAIN_CONTROLLER_JOB_NAME",
-            "valueFrom": {"fieldRef": {"fieldPath": "metadata.labels['batch.kubernetes.io/job-name']"}},
-        },
-        {
-            # batch.kubernetes.io/controller-uid is automatically stamped on every pod
-            # created by a Job — gives us the Job's UID without any API call or RBAC.
-            "name": "SEEKR_CHAIN_CONTROLLER_JOB_UID",
-            "valueFrom": {"fieldRef": {"fieldPath": "metadata.labels['batch.kubernetes.io/controller-uid']"}},
-        },
+        {"name": "SEEKR_CHAIN_CONTROLLER_JOB_NAME", "value": workflow_id},
     ] + workflow_secrets
 
     # Add SEEKRCHAIN_DATASTORE_ROOT so the controller can call get_job_info if needed
@@ -333,8 +331,8 @@ def _build_controller_job(
     ]
 
     return {
-        "apiVersion": "batch/v1",
-        "kind": "Job",
+        "apiVersion": "jobset.x-k8s.io/v1alpha2",
+        "kind": "JobSet",
         "metadata": {
             "name": workflow_id,
             "namespace": config.namespace,
@@ -342,6 +340,7 @@ def _build_controller_job(
                 "seekr-chain/job-id": workflow_id,
                 "seekr-chain/job-name": config.name[:63],
                 "seekr-chain/user": os.environ.get("USER", "unknown")[:63],
+                "seekr-chain/is-controller": "true",
             },
             "annotations": {
                 "seekr-chain/datastore-root": datastore_root or "",
@@ -349,47 +348,57 @@ def _build_controller_job(
             },
         },
         "spec": {
-            "backoffLimit": 10,
-            "ttlSecondsAfterFinished": int(config.ttl.total_seconds()),
-            "template": {
-                "metadata": {
-                    "labels": {
-                        "seekr-chain/job-id": workflow_id,
-                        "seekr-chain/is-controller": "true",
-                    }
-                },
-                "spec": {
-                    "serviceAccountName": service_account,
-                    "restartPolicy": "Never",
-                    "initContainers": init_containers,
-                    "volumes": [{"name": "workspace", "emptyDir": {}}],
-                    "containers": [
-                        {
-                            "name": "controller",
-                            "image": controller_image,
-                            "command": controller_command,
-                            "env": controller_env,
-                            "volumeMounts": [{"name": "workspace", "mountPath": "/seekr-chain"}],
-                            "resources": {
-                                "requests": {"cpu": "250m", "memory": "256Mi"},
-                                "limits": {"cpu": "500m", "memory": "512Mi"},
-                            },
-                            "livenessProbe": {
-                                "exec": {
-                                    "command": [
-                                        "sh",
-                                        "-c",
-                                        "[ $(( $(date +%s) - $(date +%s -r /tmp/controller-heartbeat) )) -lt 300 ]",
-                                    ]
+            "replicatedJobs": [
+                {
+                    "name": "controller",
+                    "replicas": 1,
+                    "template": {
+                        "spec": {
+                            "backoffLimit": 10,
+                            "ttlSecondsAfterFinished": int(config.ttl.total_seconds()),
+                            "template": {
+                                "metadata": {
+                                    "labels": {
+                                        "seekr-chain/job-id": workflow_id,
+                                        "seekr-chain/is-controller": "true",
+                                    }
                                 },
-                                "initialDelaySeconds": 30,
-                                "periodSeconds": 60,
-                                "failureThreshold": 5,
+                                "spec": {
+                                    "serviceAccountName": service_account,
+                                    "restartPolicy": "Never",
+                                    "initContainers": init_containers,
+                                    "volumes": [{"name": "workspace", "emptyDir": {}}],
+                                    "containers": [
+                                        {
+                                            "name": "controller",
+                                            "image": controller_image,
+                                            "command": controller_command,
+                                            "env": controller_env,
+                                            "volumeMounts": [{"name": "workspace", "mountPath": "/seekr-chain"}],
+                                            "resources": {
+                                                "requests": {"cpu": "250m", "memory": "256Mi"},
+                                                "limits": {"cpu": "500m", "memory": "512Mi"},
+                                            },
+                                            "livenessProbe": {
+                                                "exec": {
+                                                    "command": [
+                                                        "sh",
+                                                        "-c",
+                                                        "[ $(( $(date +%s) - $(date +%s -r /tmp/controller-heartbeat) )) -lt 300 ]",
+                                                    ]
+                                                },
+                                                "initialDelaySeconds": 30,
+                                                "periodSeconds": 60,
+                                                "failureThreshold": 5,
+                                            },
+                                        }
+                                    ],
+                                },
                             },
                         }
-                    ],
-                },
-            },
+                    },
+                }
+            ],
         },
     }
 
@@ -413,24 +422,17 @@ def launch_k8s_workflow(
         # Stage code and resolve nix closures first, before any S3/kube/secrets
         # setup below -- nix eval is the step most likely to fail (bad flake,
         # missing store path), so it should fail fast and cheaply rather than
-        # after that other setup has already run. Staged once here, real files
-        # for nix-mode (nix `path:` can't eval off symlinks -- it'd leave
-        # dangling store links) or the cheap symlink tree otherwise, so eval
-        # and upload share a single materialization instead of each building
-        # their own copy.
+        # after that other setup has already run. The general user workspace
+        # stays as the cheap symlink tree; nix-mode roles get their own copied,
+        # content-addressed source tree linked into staging under
+        # nix-workspaces/<digest>/workspace so eval and the in-cluster build see
+        # identical bytes.
         local_code_dest = None
         if config.code is not None:
             local_code_dest = staging_dir / "workspace"
-            if has_nix_roles(config):
-                copy_filtered(
-                    config.code.path, local_code_dest, include=config.code.include, exclude=config.code.exclude
-                )
-            else:
-                symlink(
-                    Path(config.code.path), local_code_dest, exclude=config.code.exclude, include=config.code.include
-                )
+            symlink(Path(config.code.path), local_code_dest, exclude=config.code.exclude, include=config.code.include)
 
-        config = resolve_nix_steps(config, staged_code_dir=local_code_dest)
+        config = process_nix(config, staged_code_dir=local_code_dest, staging_dir=staging_dir)
 
         s3_creds = _get_s3_creds()
 
@@ -457,7 +459,7 @@ def launch_k8s_workflow(
 
     _create_secrets(workflow_id, s3_creds, config)
 
-    job_manifest = _build_controller_job(
+    jobset_manifest = _build_controller_jobset(
         workflow_id=workflow_id,
         config=config,
         job_info=job_info,
@@ -467,9 +469,15 @@ def launch_k8s_workflow(
         service_account=service_account,
     )
 
-    k8s_batch = kube.batch_v1
+    k8s_custom = kube.custom_objects
     try:
-        k8s_batch.create_namespaced_job(namespace=config.namespace, body=job_manifest)
+        k8s_custom.create_namespaced_custom_object(
+            group="jobset.x-k8s.io",
+            version="v1alpha2",
+            plural="jobsets",
+            namespace=config.namespace,
+            body=jobset_manifest,
+        )
     except kubernetes.client.exceptions.ApiException as e:
         if _user_config.service_account:
             hint = (
@@ -484,10 +492,10 @@ def launch_k8s_workflow(
                 "or set the `service_account` config option to use a specific ServiceAccount."
             )
         raise RuntimeError(
-            f"Failed to launch controller job using ServiceAccount {service_account!r} "
+            f"Failed to launch controller JobSet using ServiceAccount {service_account!r} "
             f"in namespace {config.namespace!r}: {e.reason} (status={e.status}).\n\n{hint}"
         ) from e
-    logger.info(f"Launched controller job: {workflow_id}")
+    logger.info(f"Launched controller JobSet: {workflow_id}")
 
     workflow = K8sWorkflow(id=workflow_id, namespace=config.namespace)
 

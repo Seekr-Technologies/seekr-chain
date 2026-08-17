@@ -16,13 +16,21 @@ seekr-chain hands off to an in-cluster build step.
 
 from __future__ import annotations
 
-import datetime
+import hashlib
+import json
 import logging
 import os
+import re
 import shutil
 import subprocess
+import tempfile
+import time
+from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urlsplit, urlunsplit
+
+from seekr_chain import constants, remote_fs
+from seekr_chain.symlink import copy_filtered, fingerprint_filtered_tree
 
 logger = logging.getLogger(__name__)
 
@@ -43,6 +51,19 @@ class NixEvalError(RuntimeError):
 # uses for the same "multi-GB / cold-cache fetch can legitimately take a
 # while" reasoning.
 _NIX_EVAL_TIMEOUT_S = int(os.environ.get("SEEKR_CHAIN_NIX_EVAL_TIMEOUT_S", "600"))
+_NIX_CLOSURE_CACHE_ROOT = constants.LOCAL_CACHE / "nix" / "closure-cache" / "v1"
+
+
+@dataclass(frozen=True)
+class MaybeEvalClosureResult:
+    closure_path: str
+    expression_rel: str
+    source_digest: str | None = None
+    source_subdir: str | None = None
+    staged_source_dir: Path | None = None
+    # Default True: with no store_uri there's no remote store to check, and
+    # callers that never asked for one shouldn't be told to schedule a build.
+    closure_in_store: bool = True
 
 
 def is_nix_installed() -> bool:
@@ -125,6 +146,301 @@ def eval_closure_path(expression: str, attr: str = "default", system: str = "x86
     return _run_nix_eval(cmd, expression, attr)
 
 
+def materialize_nix_source_tree(
+    src: str | Path,
+    staging_dir: str | Path,
+    *,
+    include: list[str] | None = None,
+    exclude: list[str] | None = None,
+) -> tuple[str, Path]:
+    """Materialize the filtered nix source set into this submit's staging dir.
+
+    Returns ``(digest, workspace_path)`` where ``workspace_path`` is the copied
+    real-file tree under ``<staging_dir>/nix-workspaces/<digest>/workspace`` —
+    already the location asset packaging tars up, so no separate linking step
+    is needed.
+    """
+    digest = fingerprint_filtered_tree(src, include=include, exclude=exclude)
+    workspace = Path(staging_dir) / "nix-workspaces" / digest / "workspace"
+    if workspace.is_dir():
+        return digest, workspace
+
+    try:
+        copy_filtered(src, workspace, include=include, exclude=exclude)
+    except Exception:
+        shutil.rmtree(workspace, ignore_errors=True)
+        raise
+    return digest, workspace
+
+
+def fingerprint_nix_source_tree(
+    src: str | Path,
+    *,
+    include: list[str] | None = None,
+    exclude: list[str] | None = None,
+) -> str:
+    """Return the content digest for the filtered nix source set."""
+    return fingerprint_filtered_tree(src, include=include, exclude=exclude)
+
+
+def _closure_in_store(store_uri: str | None, closure_path: str) -> bool:
+    """True if the closure needs no build, i.e. there's nothing to check or it's already there."""
+    if store_uri is None:
+        return True
+    return closure_exists(store_uri, closure_path)
+
+
+def maybe_eval_closure(
+    *,
+    code_path: str,
+    staged_root: str,
+    staging_dir: str | Path,
+    resolved_expression: str,
+    role_name: str,
+    expression: str,
+    attr: str = "default",
+    system: str = "x86_64-linux",
+    source_include: list[str] | None = None,
+    source_exclude: list[str] | None = None,
+    store_uri: str | None = None,
+) -> MaybeEvalClosureResult:
+    """Resolve a closure path, using local/remote memo stores when available.
+
+    When ``source_include`` or ``source_exclude`` is provided, the closure is
+    keyed by the digest of that filtered nix source set. A cache miss
+    materializes the copied source tree into ``staging_dir``, evals there,
+    and writes both local and best-effort remote memo entries. A remote hit
+    backfills the local cache.
+    """
+    expression_rel = os.path.relpath(resolved_expression, os.path.normpath(code_path))
+    separate_nix_source = source_include is not None or source_exclude is not None
+    if not separate_nix_source:
+        staged_expression = os.path.normpath(os.path.join(staged_root, expression_rel))
+        closure = eval_closure_path(staged_expression, attr=attr, system=system)
+        return MaybeEvalClosureResult(
+            closure_path=closure,
+            expression_rel=expression_rel,
+            closure_in_store=_closure_in_store(store_uri, closure),
+        )
+
+    source_digest = fingerprint_nix_source_tree(
+        code_path,
+        include=source_include,
+        exclude=source_exclude,
+    )
+    closure = lookup_cached_closure_path(
+        source_digest,
+        expression_rel,
+        attr=attr,
+        system=system,
+        store_uri=store_uri,
+    )
+    source_subdir = f"nix-workspaces/{source_digest}/workspace"
+    if closure is not None:
+        closure_in_store = _closure_in_store(store_uri, closure)
+        staged_source_dir = None
+        if not closure_in_store:
+            _digest, staged_source_dir = materialize_nix_source_tree(
+                code_path,
+                staging_dir,
+                include=source_include,
+                exclude=source_exclude,
+            )
+        return MaybeEvalClosureResult(
+            closure_path=closure,
+            expression_rel=expression_rel,
+            source_digest=source_digest,
+            source_subdir=source_subdir,
+            staged_source_dir=staged_source_dir,
+            closure_in_store=closure_in_store,
+        )
+
+    # Cache miss — no cross-process lock: the materialize target is private
+    # to this submit's staging_dir, and duplicate materialize+eval work
+    # across racing submits is cheap (~10s) and tolerated rather than
+    # coordinated against.
+    _digest, source_root = materialize_nix_source_tree(
+        code_path,
+        staging_dir,
+        include=source_include,
+        exclude=source_exclude,
+    )
+    staged_expression = os.path.normpath(os.path.join(source_root, expression_rel))
+    if not os.path.exists(staged_expression):
+        raise ValueError(
+            f"role {role_name!r}: nix.expression={expression!r} is not present in the staged nix source tree. "
+            "Expand nix.include / nix.exclude so the flake and its inputs are copied for submit-time eval and "
+            "in-cluster builds."
+        )
+    closure = eval_closure_path(staged_expression, attr=attr, system=system)
+    store_cached_closure_path(
+        source_digest,
+        expression_rel,
+        closure,
+        attr=attr,
+        system=system,
+        store_uri=store_uri,
+    )
+    closure_in_store = _closure_in_store(store_uri, closure)
+    staged_source_dir = source_root
+    if closure_in_store:
+        # Already in the store — the copy we just made won't be uploaded
+        # for a build, so don't leave it sitting in the staging dir.
+        shutil.rmtree(source_root, ignore_errors=True)
+        staged_source_dir = None
+    return MaybeEvalClosureResult(
+        closure_path=closure,
+        expression_rel=expression_rel,
+        source_digest=source_digest,
+        source_subdir=source_subdir,
+        staged_source_dir=staged_source_dir,
+        closure_in_store=closure_in_store,
+    )
+
+
+def lookup_cached_closure_path(
+    source_digest: str,
+    expression: str,
+    attr: str = "default",
+    system: str = "x86_64-linux",
+    store_uri: str | None = None,
+) -> str | None:
+    key_hash = _closure_memo_key_hash(source_digest, expression, attr, system)
+    closure = _read_local_closure_memo(key_hash)
+    if closure is not None:
+        logger.info(
+            "Reusing cached nix closure from local memo for source=%s expression=%r", source_digest[:12], expression
+        )
+        return closure
+
+    if store_uri is None:
+        return None
+
+    closure = _read_remote_closure_memo(store_uri, key_hash)
+    if closure is None:
+        return None
+    logger.info(
+        "Reusing cached nix closure from remote memo for source=%s expression=%r", source_digest[:12], expression
+    )
+    _write_local_closure_memo(key_hash, closure)
+    return closure
+
+
+def store_cached_closure_path(
+    source_digest: str,
+    expression: str,
+    closure_path: str,
+    attr: str = "default",
+    system: str = "x86_64-linux",
+    store_uri: str | None = None,
+) -> None:
+    if not closure_path.startswith("/nix/store/"):
+        raise ValueError(f"expected /nix/store closure path, got {closure_path!r}")
+    key_hash = _closure_memo_key_hash(source_digest, expression, attr, system)
+    _write_local_closure_memo(key_hash, closure_path)
+    if store_uri is not None:
+        _write_remote_closure_memo(store_uri, key_hash, closure_path)
+
+
+def _closure_memo_key_hash(source_digest: str, expression: str, attr: str, system: str) -> str:
+    payload = json.dumps(
+        {
+            "source": source_digest,
+            "expression": os.path.normpath(expression),
+            "attr": attr,
+            "system": system,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode()
+    return hashlib.sha256(payload).hexdigest()
+
+
+def _local_closure_memo_path(key_hash: str) -> Path:
+    return _NIX_CLOSURE_CACHE_ROOT / key_hash[:2] / f"{key_hash[2:]}.txt"
+
+
+def _closure_memo_uri(store_uri: str, key_hash: str) -> str:
+    base = urlsplit(store_uri.rstrip("/"))._replace(query="", fragment="")
+    return f"{urlunsplit(base)}/closure-cache/v1/{key_hash[:2]}/{key_hash[2:]}.txt"
+
+
+def _read_local_closure_memo(key_hash: str) -> str | None:
+    path = _local_closure_memo_path(key_hash)
+    if not path.is_file():
+        return None
+    try:
+        return _validate_closure_memo_value(path.read_text().strip())
+    except OSError as e:
+        logger.warning("could not read nix closure memo %s: %s; ignoring it", path, e)
+        return None
+
+
+def _write_local_closure_memo(key_hash: str, closure_path: str) -> None:
+    path = _local_closure_memo_path(key_hash)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile("w", dir=path.parent, delete=False) as tmp:
+        tmp.write(closure_path)
+        tmp.flush()
+        os.fsync(tmp.fileno())
+        tmp_path = Path(tmp.name)
+    tmp_path.replace(path)
+
+
+def _read_remote_closure_memo(store_uri: str, key_hash: str) -> str | None:
+    uri = _closure_memo_uri(store_uri, key_hash)
+    try:
+        if uri.startswith("s3://"):
+            import boto3
+
+            s3 = boto3.client("s3")
+            bucket, key = remote_fs.parse_uri(uri)
+            body = s3.get_object(Bucket=bucket, Key=key)["Body"].read().decode().strip()
+            return _validate_closure_memo_value(body)
+        if uri.startswith("oci://"):
+            namespace, bucket, key = _parse_oci_uri(uri)
+            client = _default_oci_client()
+            body = client.get_object(namespace_name=namespace, bucket_name=bucket, object_name=key).data.content
+            return _validate_closure_memo_value(body.decode().strip())
+    except Exception:
+        return None
+    logger.debug("remote nix closure memo unsupported for store=%r", store_uri)
+    return None
+
+
+def _write_remote_closure_memo(store_uri: str, key_hash: str, closure_path: str) -> None:
+    uri = _closure_memo_uri(store_uri, key_hash)
+    try:
+        if uri.startswith("s3://"):
+            import boto3
+
+            s3 = boto3.client("s3")
+            bucket, key = remote_fs.parse_uri(uri)
+            s3.put_object(Bucket=bucket, Key=key, Body=closure_path.encode(), ContentType="text/plain")
+            return
+        if uri.startswith("oci://"):
+            namespace, bucket, key = _parse_oci_uri(uri)
+            client = _default_oci_client()
+            client.put_object(
+                namespace_name=namespace,
+                bucket_name=bucket,
+                object_name=key,
+                put_object_body=closure_path.encode(),
+                content_type="text/plain",
+            )
+            return
+    except Exception as e:
+        logger.warning("could not write nix closure memo to %s: %s; continuing without remote backfill", uri, e)
+        return
+    logger.debug("remote nix closure memo unsupported for store=%r", store_uri)
+
+
+def _validate_closure_memo_value(value: str) -> str | None:
+    if value.startswith("/nix/store/"):
+        return value
+    return None
+
+
 def _run_nix_eval(cmd: list[str], expression: str, attr: str) -> str:
     """Run `nix eval`, returning the closure path on stdout.
 
@@ -173,6 +489,51 @@ def _run_nix_eval(cmd: list[str], expression: str, attr: str) -> str:
     return out
 
 
+# Minimal OCI URI grammar for the closure memo's remote read/write. Full URI
+# parsing (regions, glob, delimiter listing, etc.) lives in remote_fs; we
+# only need namespace / bucket / key here.
+_OCI_URI_RE = re.compile(
+    r"^oci://(?P<namespace>[a-zA-Z0-9_\-]+)(?:@(?P<region>[a-zA-Z0-9_\-]+))?/"
+    r"(?P<bucket>[a-zA-Z0-9_\-]+)/(?P<key>.+)$"
+)
+
+
+def _parse_oci_uri(uri: str) -> tuple[str, str, str]:
+    """Return ``(namespace, bucket, key)`` from an oci:// URI."""
+    m = _OCI_URI_RE.match(uri)
+    if not m:
+        raise ValueError(f"Invalid OCI URI: {uri!r}. Expected oci://<namespace>/<bucket>/<key>")
+    return m.group("namespace"), m.group("bucket"), m.group("key")
+
+
+def _default_oci_client():
+    """Build an OCI ObjectStorageClient, preferring config file over InstancePrincipals.
+
+    Prefers ~/.oci/config when present (developer laptop path); falls back to
+    InstancePrincipals when running on an OCI instance without a config
+    file (CI, in-cluster). The import guard lives here (not in the caller)
+    so tests can monkeypatch _default_oci_client with a fake and bypass the
+    SDK entirely.
+    """
+    try:
+        import oci
+    except ImportError as e:
+        raise ImportError(
+            "oci:// scheme requires the `oci` SDK on the submit machine. "
+            "Install it with `pip install 'seekr-chain[oci]'` "
+            "(or `pip install oci` directly)."
+        ) from e
+
+    config_path = Path(os.environ.get("OCI_CONFIG_FILE") or (Path.home() / ".oci/config"))
+    if config_path.is_file():
+        config = oci.config.from_file(file_location=str(config_path))
+        return oci.object_storage.ObjectStorageClient(config)
+
+    region = os.environ.get("OCI_REGION", "us-chicago-1")
+    signer = oci.auth.signers.InstancePrincipalsSecurityTokenSigner()
+    return oci.object_storage.ObjectStorageClient({"region": region}, signer=signer)
+
+
 def closure_exists(store_uri: str, closure_path: str) -> bool:
     """Return True iff the closure's narinfo exists at the configured store.
 
@@ -182,6 +543,7 @@ def closure_exists(store_uri: str, closure_path: str) -> bool:
     - Other schemes (``azure://``, ``gs://`` …) route through seekr-fs,
       imported lazily — those users need to ``pip install seekr-fs``.
     """
+    started = time.perf_counter()
     hash_ = closure_hash_from_path(closure_path)
     # Query params on store_uri (endpoint=, scheme=, region=, ...) configure
     # nix's own S3 client, not boto3 -- boto3 gets its endpoint/region from
@@ -191,9 +553,14 @@ def closure_exists(store_uri: str, closure_path: str) -> bool:
     narinfo_uri = f"{urlunsplit(base)}/{hash_}.narinfo"
 
     if narinfo_uri.startswith("s3://") or narinfo_uri.startswith("oci://"):
-        from seekr_chain import remote_fs
-
-        return remote_fs.exists(narinfo_uri)
+        exists = remote_fs.exists(narinfo_uri)
+        logger.info(
+            "Checked nix closure in store %s via remote_fs in %.3fs (exists=%s)",
+            narinfo_uri,
+            time.perf_counter() - started,
+            exists,
+        )
+        return exists
 
     try:
         import seekr_fs as sfs
@@ -203,121 +570,11 @@ def closure_exists(store_uri: str, closure_path: str) -> bool:
             "required for that. Install it with `pip install seekr-fs` (or any "
             "compatible internal source)."
         ) from e
-    return sfs.exists(narinfo_uri)
-
-
-# Label every nix-mode pod (consumer or build) carries: identifies the
-# closure that pod fetched/produced. Used both by the rendered podAffinity
-# (concurrent co-scheduling) and by find_warm_nodes() below.
-NIX_CLOSURE_LABEL = "seekr-chain.nix/closure"
-
-
-def find_warm_nodes(
-    closure_hash: str,
-    namespace: str,
-    limit: int = 10,
-    partial_limit: int = 20,
-) -> tuple[list[str], list[str]]:
-    """Return (exact, partial) warm-cache node names for a closure.
-
-    One k8s API call (label-existence selector for ``NIX_CLOSURE_LABEL``);
-    partitioning happens client-side, in two passes:
-
-    - **exact**: nodes whose nix-mode pods carry
-      ``NIX_CLOSURE_LABEL == closure_hash``. The closure literally lives
-      at ``<hostpath>/nix/store/<hash>-...`` on that node (surfaced at
-      ``/nix/store/<hash>-...`` inside any pod mounting it with
-      ``subPath=nix``) — substituters hit local disk for the full
-      closure on next consume. Rendered as a
-      high-weight nodeAffinity preference (weight 90 in jobset.py).
-
-    - **partial**: nodes whose nix-mode pods carry the label with *any
-      other* value (and never the requested one). The exact closure isn't
-      there, but other closures' paths are — many will be shared
-      (glibc, gcc, bash, openssl, …), so substituters hit local disk for
-      the overlap even on a "cold" closure. Rendered as a low-weight
-      nodeAffinity preference (weight 30 in jobset.py). Disjoint from
-      ``exact`` — a node never appears in both.
-
-    Recency ordering uses the most-recent pod's ``creation_timestamp``
-    per node; each list is independently capped.
-
-    Returns ``([], [])`` on any error (kubeconfig not set, RBAC denied,
-    network unreachable, …). Warm-cache is a soft hint; a missing one
-    means the scheduler falls back to a cold pull. Never raises.
-    """
-    try:
-        from seekr_chain.k8s_api import kube
-    except ImportError:
-        return [], []
-
-    try:
-        v1 = kube.core_v1
-        # Existence-only selector: returns every nix-mode pod, regardless
-        # of which closure it pulled. Partitioning is cheap in Python and
-        # halves the API load compared to two separate queries.
-        result = v1.list_namespaced_pod(
-            namespace=namespace,
-            label_selector=NIX_CLOSURE_LABEL,
-        )
-    except Exception as e:
-        logger.warning(
-            "could not query warm nodes for closure %s in %s: %s; scheduler will pick without warm-cache hint",
-            closure_hash,
-            namespace,
-            e,
-        )
-        return [], []
-
-    try:
-        pods = [p for p in result.items if p.spec.node_name]
-        # A bare int 0 fallback would raise TypeError when sorted against
-        # real datetimes, so the fallback must be datetime-typed too. If a
-        # mix of aware/naive datetimes still slips through (e.g. a
-        # partially-populated object from a flaky watch), the outer
-        # try/except below catches the resulting TypeError and degrades to
-        # ([], []) rather than propagating it.
-        pods.sort(
-            key=lambda p: p.metadata.creation_timestamp or datetime.datetime.min,
-            reverse=True,
-        )
-
-        # Pass 1: which nodes have AT LEAST ONE exact-match pod? Those are
-        # always exact — even if a more recent pod on the same node belongs
-        # to a different closure. The closure paths are on disk either way.
-        exact_nodes: set[str] = set()
-        for p in pods:
-            labels = p.metadata.labels or {}
-            if labels.get(NIX_CLOSURE_LABEL) == closure_hash:
-                exact_nodes.add(p.spec.node_name)
-
-        # Pass 2: recency walk. Each node lands in its pre-determined bucket
-        # at the timestamp of its most-recent pod (which sorted to the front).
-        # Pods without the closure label are skipped — defensive guard for the
-        # case where the API returns rows the selector should have filtered.
-        exact: list[str] = []
-        partial: list[str] = []
-        seen_exact: set[str] = set()
-        seen_partial: set[str] = set()
-        for p in pods:
-            labels = p.metadata.labels or {}
-            if NIX_CLOSURE_LABEL not in labels:
-                continue
-            node = p.spec.node_name
-            if node in exact_nodes:
-                if node not in seen_exact and len(exact) < limit:
-                    exact.append(node)
-                    seen_exact.add(node)
-            else:
-                if node not in seen_partial and len(partial) < partial_limit:
-                    partial.append(node)
-                    seen_partial.add(node)
-        return exact, partial
-    except Exception as e:
-        logger.warning(
-            "error partitioning warm nodes for closure %s in %s: %s; scheduler will pick without warm-cache hint",
-            closure_hash,
-            namespace,
-            e,
-        )
-        return [], []
+    exists = sfs.exists(narinfo_uri)
+    logger.info(
+        "Checked nix closure in store %s via generic backend in %.3fs (exists=%s)",
+        narinfo_uri,
+        time.perf_counter() - started,
+        exists,
+    )
+    return exists
