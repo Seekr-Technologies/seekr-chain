@@ -32,6 +32,12 @@ spec:
     rules:
     {% for rule in failure_policy.rules %}
     - action: {{ rule.action }}
+      {% if rule.onJobFailureReasons %}
+      onJobFailureReasons:
+      {% for reason in rule.onJobFailureReasons %}
+      - {{ reason }}
+      {% endfor %}
+      {% endif %}
       {% if rule.targetReplicatedJobs %}
       targetReplicatedJobs:
       {% for role_name in rule.targetReplicatedJobs %}
@@ -43,11 +49,22 @@ spec:
   {% endif %}
   replicatedJobs:
   {% for role in roles %}
-  - name: {{ role.name }}
+  - name: {{ role.replicated_job_name }}
     replicas: {{ role.replicas }}
     template:
       spec:
         backoffLimit: 0
+        {% if role.pod_failure_policy %}
+        podFailurePolicy:
+          rules:
+          {% for r in role.pod_failure_policy.rules %}
+          - action: {{ r.action }}
+            onExitCodes:
+              containerName: {{ r.onExitCodes.containerName }}
+              operator: {{ r.onExitCodes.operator }}
+              values: [{{ r.onExitCodes['values'] | join(', ') }}]
+          {% endfor %}
+        {% endif %}
         template:
           metadata:
             labels:

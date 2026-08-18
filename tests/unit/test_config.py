@@ -103,3 +103,34 @@ class TestSecretConfig:
     def test_no_secrets_is_none(self):
         config = self._minimal_config(None)
         assert config.secrets is None
+
+
+class TestFailureRuleOnExitCodes:
+    def _config_with_rule(self, rule):
+        return WorkflowConfig.model_validate(
+            {
+                "name": "test",
+                "steps": [
+                    {
+                        **_minimal_step("a"),
+                        "failure_policy": {"max_restarts": 3, "rules": [rule]},
+                    }
+                ],
+            }
+        )
+
+    def test_fail_job_set_with_on_exit_codes_validates(self):
+        config = self._config_with_rule({"action": "FAIL_JOB_SET", "on_exit_codes": [43, 42]})
+        assert config.steps[0].failure_policy.rules[0].on_exit_codes == [42, 43]
+
+    def test_non_fail_job_set_action_with_on_exit_codes_rejected(self):
+        with pytest.raises(ValidationError, match="requires `action == FAIL_JOB_SET`"):
+            self._config_with_rule({"action": "RESTART_JOB_SET", "on_exit_codes": [42]})
+
+    def test_exit_code_outside_1_to_255_rejected(self):
+        with pytest.raises(ValidationError, match="must all be in 1..255"):
+            self._config_with_rule({"action": "FAIL_JOB_SET", "on_exit_codes": [0]})
+
+    def test_operator_without_on_exit_codes_rejected(self):
+        with pytest.raises(ValidationError, match="requires `on_exit_codes` to be set"):
+            self._config_with_rule({"action": "FAIL_JOB_SET", "operator": "NOT_IN"})
