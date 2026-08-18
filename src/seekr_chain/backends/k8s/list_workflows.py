@@ -1,16 +1,14 @@
 #!/usr/bin/env python3
 
-import os
 from datetime import datetime, timezone
 from typing import Optional
-
-import kubernetes
 
 from seekr_chain.backends.k8s.workflow_state import (
     _parse_timestamp,
     controller_jobset_status_and_completion,
     read_phases_configmap,
 )
+from seekr_chain.k8s_api import kube
 
 _PHASE_BY_STATUS = {
     "SUCCEEDED": "Succeeded",
@@ -28,13 +26,11 @@ def list_k8s_workflows(
 
     Returns a list of dicts with keys: name, job_name, user, status, created, duration.
     """
-    kubernetes.config.load_kube_config(config_file=os.environ.get("KUBECONFIG"))
-    k8s_custom = kubernetes.client.CustomObjectsApi()
-    k8s_v1 = kubernetes.client.CoreV1Api()
+    k8s_custom = kube.custom_objects
+    k8s_v1 = kube.core_v1
 
     if namespace is None:
-        _, active_ctx = kubernetes.config.list_kube_config_contexts()
-        namespace = active_ctx["context"].get("namespace", "default")
+        namespace = kube.namespace
 
     label_selector = "seekr-chain/job-id,seekr-chain/is-controller=true"
     if user is not None:

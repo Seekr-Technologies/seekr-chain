@@ -46,13 +46,10 @@ class TestK8sWorkflowReconnect:
             annotations = {"seekr-chain/datastore-root": datastore_root} if datastore_root else {}
             mock_custom.get_namespaced_custom_object.return_value = {"metadata": {"annotations": annotations}}
 
-        with (
-            patch("seekr_chain.backends.k8s.k8s_workflow.k8s_utils") as mock_k8s_utils,
-            patch("seekr_chain.backends.k8s.k8s_workflow.k8s") as mock_k8s,
-        ):
-            mock_k8s.config.list_kube_config_contexts.return_value = (None, {"context": {"namespace": "argo"}})
-            mock_k8s_utils.get_core_v1_api.return_value = MagicMock()
-            mock_k8s_utils.get_custom_objects_api.return_value = mock_custom
+        with patch("seekr_chain.backends.k8s.k8s_workflow.kube") as mock_kube:
+            mock_kube.namespace = "argo"
+            mock_kube.core_v1 = MagicMock()
+            mock_kube.custom_objects = mock_custom
 
             return K8sWorkflow(id=id)
 
@@ -93,13 +90,10 @@ class TestK8sWorkflowReconnect:
 class TestK8sWorkflowCancel:
     def _make_workflow(self, mock_custom, id="test-id-abc123"):
         mock_custom.get_namespaced_custom_object.return_value = {"metadata": {"annotations": {}}}
-        with (
-            patch("seekr_chain.backends.k8s.k8s_workflow.k8s_utils") as mock_k8s_utils,
-            patch("seekr_chain.backends.k8s.k8s_workflow.k8s") as mock_k8s,
-        ):
-            mock_k8s.config.list_kube_config_contexts.return_value = (None, {"context": {"namespace": "argo"}})
-            mock_k8s_utils.get_core_v1_api.return_value = MagicMock()
-            mock_k8s_utils.get_custom_objects_api.return_value = mock_custom
+        with patch("seekr_chain.backends.k8s.k8s_workflow.kube") as mock_kube:
+            mock_kube.namespace = "argo"
+            mock_kube.core_v1 = MagicMock()
+            mock_kube.custom_objects = mock_custom
             return K8sWorkflow(id=id)
 
     def test_excludes_controller_jobset_from_suspend(self, monkeypatch):

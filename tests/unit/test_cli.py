@@ -303,30 +303,30 @@ class TestAttach:
 
 
 class TestListWorkflows:
-    """Unit tests for the list_workflows k8s_utils function."""
+    """Unit tests for the list_k8s_workflows function."""
 
-    @patch("seekr_chain.backends.k8s.list_workflows.kubernetes")
-    def test_label_selector(self, mock_k8s):
+    @patch("seekr_chain.backends.k8s.list_workflows.kube")
+    def test_label_selector(self, mock_kube):
         """list_workflows filters to seekr-chain controller JobSets via label selector."""
 
         mock_custom = MagicMock()
         mock_custom.list_namespaced_custom_object.return_value = {"items": []}
-        mock_k8s.client.CustomObjectsApi.return_value = mock_custom
-        mock_k8s.config.list_kube_config_contexts.return_value = ([], {"context": {"namespace": "default"}})
+        mock_kube.custom_objects = mock_custom
+        mock_kube.namespace = "default"
 
         list_workflows()
 
         call_kwargs = mock_custom.list_namespaced_custom_object.call_args.kwargs
         assert call_kwargs["label_selector"] == "seekr-chain/job-id,seekr-chain/is-controller=true"
 
-    @patch("seekr_chain.backends.k8s.list_workflows.kubernetes")
-    def test_label_selector_with_user(self, mock_k8s):
+    @patch("seekr_chain.backends.k8s.list_workflows.kube")
+    def test_label_selector_with_user(self, mock_kube):
         """list_workflows with user= appends user label selector."""
 
         mock_custom = MagicMock()
         mock_custom.list_namespaced_custom_object.return_value = {"items": []}
-        mock_k8s.client.CustomObjectsApi.return_value = mock_custom
-        mock_k8s.config.list_kube_config_contexts.return_value = ([], {"context": {"namespace": "default"}})
+        mock_kube.custom_objects = mock_custom
+        mock_kube.namespace = "default"
 
         list_workflows(user="alice")
 
@@ -335,8 +335,8 @@ class TestListWorkflows:
             call_kwargs["label_selector"] == "seekr-chain/job-id,seekr-chain/is-controller=true,seekr-chain/user=alice"
         )
 
-    @patch("seekr_chain.backends.k8s.list_workflows.kubernetes")
-    def test_returns_job_name_and_user(self, mock_k8s):
+    @patch("seekr_chain.backends.k8s.list_workflows.kube")
+    def test_returns_job_name_and_user(self, mock_kube):
         """list_workflows extracts job_name and user from workflow labels."""
 
         jobset = {
@@ -354,9 +354,11 @@ class TestListWorkflows:
 
         mock_custom = MagicMock()
         mock_custom.list_namespaced_custom_object.return_value = {"items": [jobset]}
-        mock_k8s.client.CustomObjectsApi.return_value = mock_custom
-        mock_k8s.client.CoreV1Api.return_value.read_namespaced_config_map.side_effect = ApiException(status=404)
-        mock_k8s.config.list_kube_config_contexts.return_value = ([], {"context": {"namespace": "default"}})
+        mock_v1 = MagicMock()
+        mock_v1.read_namespaced_config_map.side_effect = ApiException(status=404)
+        mock_kube.custom_objects = mock_custom
+        mock_kube.core_v1 = mock_v1
+        mock_kube.namespace = "default"
 
         result = list_workflows()
 
@@ -364,8 +366,8 @@ class TestListWorkflows:
         assert result[0]["job_name"] == "my-training"
         assert result[0]["user"] == "bob"
 
-    @patch("seekr_chain.backends.k8s.list_workflows.kubernetes")
-    def test_crashed_controller_reports_error(self, mock_k8s):
+    @patch("seekr_chain.backends.k8s.list_workflows.kube")
+    def test_crashed_controller_reports_error(self, mock_kube):
         """A Failed terminalState now only means the controller process itself
         crashed — freezes duration at the Failed condition's timestamp."""
 
@@ -386,16 +388,16 @@ class TestListWorkflows:
 
         mock_custom = MagicMock()
         mock_custom.list_namespaced_custom_object.return_value = {"items": [jobset]}
-        mock_k8s.client.CustomObjectsApi.return_value = mock_custom
-        mock_k8s.config.list_kube_config_contexts.return_value = ([], {"context": {"namespace": "default"}})
+        mock_kube.custom_objects = mock_custom
+        mock_kube.namespace = "default"
 
         result = list_workflows()
 
         assert result[0]["status"] == "Error"
         assert result[0]["duration"] == "5:30"
 
-    @patch("seekr_chain.backends.k8s.list_workflows.kubernetes")
-    def test_cancelled_run_reports_terminated_not_failed(self, mock_k8s):
+    @patch("seekr_chain.backends.k8s.list_workflows.kube")
+    def test_cancelled_run_reports_terminated_not_failed(self, mock_kube):
         """A Completed terminalState with a CANCELLED phase in the ConfigMap reports Terminated."""
 
         jobset = {
@@ -412,16 +414,18 @@ class TestListWorkflows:
 
         mock_custom = MagicMock()
         mock_custom.list_namespaced_custom_object.return_value = {"items": [jobset]}
-        mock_k8s.client.CustomObjectsApi.return_value = mock_custom
-        mock_k8s.client.CoreV1Api.return_value.read_namespaced_config_map.return_value = mock_configmap
-        mock_k8s.config.list_kube_config_contexts.return_value = ([], {"context": {"namespace": "default"}})
+        mock_v1 = MagicMock()
+        mock_v1.read_namespaced_config_map.return_value = mock_configmap
+        mock_kube.custom_objects = mock_custom
+        mock_kube.core_v1 = mock_v1
+        mock_kube.namespace = "default"
 
         result = list_workflows()
 
         assert result[0]["status"] == "Terminated"
 
-    @patch("seekr_chain.backends.k8s.list_workflows.kubernetes")
-    def test_completed_with_failed_phase_reports_failed(self, mock_k8s):
+    @patch("seekr_chain.backends.k8s.list_workflows.kube")
+    def test_completed_with_failed_phase_reports_failed(self, mock_kube):
         """A Completed terminalState with a FAILED phase in the ConfigMap reports Failed."""
 
         jobset = {
@@ -438,9 +442,11 @@ class TestListWorkflows:
 
         mock_custom = MagicMock()
         mock_custom.list_namespaced_custom_object.return_value = {"items": [jobset]}
-        mock_k8s.client.CustomObjectsApi.return_value = mock_custom
-        mock_k8s.client.CoreV1Api.return_value.read_namespaced_config_map.return_value = mock_configmap
-        mock_k8s.config.list_kube_config_contexts.return_value = ([], {"context": {"namespace": "default"}})
+        mock_v1 = MagicMock()
+        mock_v1.read_namespaced_config_map.return_value = mock_configmap
+        mock_kube.custom_objects = mock_custom
+        mock_kube.core_v1 = mock_v1
+        mock_kube.namespace = "default"
 
         result = list_workflows()
 

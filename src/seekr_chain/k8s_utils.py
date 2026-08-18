@@ -1,44 +1,23 @@
 #!/usr/bin/env python3
+"""
+Domain helpers built on top of the Kubernetes API.
+
+Client construction and kubeconfig loading live in ``seekr_chain.k8s_api``.
+"""
 
 import logging
-import os
 import time
 from collections import defaultdict
 from functools import lru_cache
 from typing import Optional
 
-import kubernetes
 import kubernetes as k8s
 from kubernetes.client.models import V1Pod
 from kubernetes.client.rest import ApiException
 
+from seekr_chain.k8s_api import kube
+
 logger = logging.getLogger(__name__)
-
-
-@lru_cache()
-def load_kubeconfig():
-    """Load kubeconfig once with a friendly error on failure."""
-    try:
-        kubernetes.config.load_kube_config(config_file=os.environ.get("KUBECONFIG"))
-    except kubernetes.config.ConfigException as e:
-        raise RuntimeError(
-            f"Failed to load Kubernetes config: {e}\n\n"
-            "Ensure a valid kubeconfig is available:\n"
-            "  - Set the KUBECONFIG environment variable, or\n"
-            "  - Place a config file at ~/.kube/config"
-        ) from e
-
-
-@lru_cache()
-def get_core_v1_api() -> kubernetes.client.CoreV1Api:
-    load_kubeconfig()
-    return kubernetes.client.CoreV1Api()
-
-
-@lru_cache()
-def get_custom_objects_api() -> kubernetes.client.CustomObjectsApi:
-    load_kubeconfig()
-    return kubernetes.client.CustomObjectsApi()
 
 
 def _mem_str_to_bytes(mem_str: str) -> int:
@@ -55,7 +34,7 @@ def _mem_str_to_bytes(mem_str: str) -> int:
 @lru_cache()
 def get_node_resources_by_gpu() -> dict[str, dict]:
     logger.info("Collecting node info")
-    v1 = get_core_v1_api()
+    v1 = kube.core_v1
     nodes = v1.list_node().items
 
     # Collect node allocations

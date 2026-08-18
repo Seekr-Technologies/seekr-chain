@@ -139,13 +139,15 @@ class TestCodeStaging:
             lambda *a, **k: {"id": "job-1", "remote_assets_path": "s3://b/a", "s3_path": "s3://b"},
         )
         monkeypatch.setattr(lkw_module, "_create_workflow_secrets", lambda *a, **k: [])
-        monkeypatch.setattr(lkw_module.kubernetes.config, "load_kube_config", lambda **k: None)
         monkeypatch.setattr(lkw_module, "detect_service_account", lambda ns: "sa")
         monkeypatch.setattr(lkw_module, "_user_config", UserConfig())
         monkeypatch.setattr(lkw_module, "_package_assets", lambda **k: None)
         monkeypatch.setattr(lkw_module, "_create_secrets", lambda *a, **k: None)
         monkeypatch.setattr(lkw_module, "_build_controller_jobset", lambda **k: {})
-        monkeypatch.setattr(lkw_module.k8s_utils, "get_custom_objects_api", lambda: MagicMock())
+        # Direct __dict__ write, not monkeypatch.setattr: setattr's internal
+        # getattr(target, name) to snapshot the old value would trigger the
+        # real lazy construction (and load_kubeconfig()) before we overwrite it.
+        lkw_module.kube.__dict__["custom_objects"] = MagicMock()
         monkeypatch.setattr("seekr_chain.backends.k8s.k8s_workflow.K8sWorkflow", lambda **k: MagicMock())
 
         def fake_process_nix(config, *, staged_code_dir=None, staging_dir=None):

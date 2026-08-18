@@ -25,8 +25,8 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from seekr_chain import k8s_utils, nix_utils
 from seekr_chain import nix_resolution as nr_mod
+from seekr_chain import nix_utils
 from seekr_chain.backends.k8s.jobset import _eval_role_closure
 from seekr_chain.config import NixConfig, WorkflowConfig
 from seekr_chain.nix_resolution import (
@@ -1155,7 +1155,8 @@ class TestFindWarmNodes:
         return pod
 
     def _mock_api(self, monkeypatch, pods=None, raises=None):
-        """Stub get_core_v1_api so find_warm_nodes can be exercised offline."""
+        """Stub kube.core_v1 so find_warm_nodes can be exercised offline."""
+        from seekr_chain.k8s_api import kube
 
         v1 = MagicMock()
         if raises:
@@ -1165,7 +1166,10 @@ class TestFindWarmNodes:
             result.items = pods or []
             v1.list_namespaced_pod.return_value = result
 
-        monkeypatch.setattr(k8s_utils, "get_core_v1_api", lambda: v1)
+        # Direct __dict__ write, not monkeypatch.setattr: setattr's internal
+        # getattr(target, name) to snapshot the old value would trigger the
+        # real lazy construction (and load_kubeconfig()) before we overwrite it.
+        kube.__dict__["core_v1"] = v1
         return v1
 
     def test_returns_unique_nodes_newest_first(self, monkeypatch):

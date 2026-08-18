@@ -133,12 +133,12 @@ def find_warm_nodes(
     """
     started = time.perf_counter()
     try:
-        from seekr_chain import k8s_utils
+        from seekr_chain.k8s_api import kube
     except ImportError:
         return []
 
     try:
-        v1 = k8s_utils.get_core_v1_api()
+        v1 = kube.core_v1
         result = v1.list_namespaced_pod(
             namespace=namespace,
             label_selector=f"{NIX_CLOSURE_LABEL}={closure_hash}",

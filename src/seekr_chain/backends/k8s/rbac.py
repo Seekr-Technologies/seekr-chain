@@ -23,6 +23,8 @@ from pathlib import Path
 
 import kubernetes
 
+from seekr_chain.k8s_api import kube
+
 logger = logging.getLogger(__name__)
 
 # Probed in order; first match wins.
@@ -45,7 +47,7 @@ def detect_service_account(namespace: str) -> str:
     narrow, named-resource RBAC rather than a blanket list grant. Raises
     ``RuntimeError`` with setup instructions if none are found or accessible.
     """
-    core_v1 = kubernetes.client.CoreV1Api()
+    core_v1 = kube.core_v1
 
     for name in _CANDIDATE_SERVICE_ACCOUNTS:
         try:

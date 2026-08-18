@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 
 import seekr_chain
+from seekr_chain.k8s_api import kube
 
 # Make the tests/ package importable (needed for tests.hermetic.*)
 _TESTS_DIR = Path(__file__).parent
@@ -57,6 +58,19 @@ def pytest_collection_modifyitems(config, items):
         for item in items:
             if "gpu" in item.keywords:
                 item.add_marker(skip_gpu)
+
+
+@pytest.fixture(autouse=True)
+def reset_k8s_api():
+    """Keep k8s_api's process-lifetime client cache from leaking between tests.
+
+    The clients are cached for the life of the process by design, so without
+    this a client (or namespace) built under one test's mocks or KUBECONFIG
+    would be handed to every later test.
+    """
+    kube.reset()
+    yield
+    kube.reset()
 
 
 @pytest.fixture

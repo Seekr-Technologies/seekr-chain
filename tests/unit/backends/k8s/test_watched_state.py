@@ -3,8 +3,8 @@ Unit tests for ReconnectingWatcher, via its workflow_state_watcher() and
 controller_status_watcher() factories.
 
 Mirrors test_state_fetcher.py's mocking style, but instead of faking a
-fetch_fn, fakes the Kubernetes Watch API: kubernetes.watch.Watch().stream()
-is patched to replay a scripted list of events per resource kind (job,
+fetch_fn, fakes the Kubernetes Watch API: kube.new_watch() is patched so
+that stream() replays a scripted list of events per resource kind (job,
 jobset, or pod — classified by the call's distinguishing kwargs, see
 _stream_kind()). Both the controller JobSet ("job") and worker JobSets
 ("jobset") go through CustomObjectsApi and pass group= in their kwargs;
@@ -49,7 +49,7 @@ def _stream_kind(kwargs):
 
 
 def make_fake_watch_class(events_by_kind):
-    """Return a fake replacement for kubernetes.watch.Watch.
+    """Return a fake replacement for the Watch class kube.new_watch builds.
 
     ``events_by_kind``: {"job"|"jobset"|"pod": [ [event, ...], [event, ...], ... ]}
     Each inner list is replayed on successive calls to stream() for that
@@ -163,7 +163,7 @@ def test_seed_produces_first_snapshot_without_waiting_for_watch_events(monkeypat
     k8s_v1 = FakeK8sV1([])
 
     fake_watch_cls = make_fake_watch_class({})
-    monkeypatch.setattr(watched_state_mod.k8s.watch, "Watch", fake_watch_cls)
+    monkeypatch.setattr(watched_state_mod.kube, "new_watch", fake_watch_cls)
 
     with workflow_state_watcher(k8s_custom, k8s_v1, "ns", "wf-1") as w:
         state = w.wait_for_first(timeout=1)
@@ -201,7 +201,7 @@ def test_job_modified_event_updates_status(monkeypatch):
             "job": [[{"type": "MODIFIED", "object": jobset_v2}]],
         }
     )
-    monkeypatch.setattr(watched_state_mod.k8s.watch, "Watch", fake_watch_cls)
+    monkeypatch.setattr(watched_state_mod.kube, "new_watch", fake_watch_cls)
 
     with workflow_state_watcher(k8s_custom, k8s_v1, "ns", "wf-1") as w:
         w.wait_for_first(timeout=1)
@@ -221,7 +221,7 @@ def test_pod_added_event_appears_in_next_snapshot(monkeypatch):
             "pod": [[{"type": "ADDED", "object": new_pod}]],
         }
     )
-    monkeypatch.setattr(watched_state_mod.k8s.watch, "Watch", fake_watch_cls)
+    monkeypatch.setattr(watched_state_mod.kube, "new_watch", fake_watch_cls)
 
     with workflow_state_watcher(k8s_custom, k8s_v1, "ns", "wf-1") as w:
         w.wait_for_first(timeout=1)
@@ -241,7 +241,7 @@ def test_pod_deleted_event_removes_pod_from_next_snapshot(monkeypatch):
             "pod": [[{"type": "DELETED", "object": existing_pod}]],
         }
     )
-    monkeypatch.setattr(watched_state_mod.k8s.watch, "Watch", fake_watch_cls)
+    monkeypatch.setattr(watched_state_mod.kube, "new_watch", fake_watch_cls)
 
     with workflow_state_watcher(k8s_custom, k8s_v1, "ns", "wf-1") as w:
         w.wait_for_first(timeout=1)
@@ -255,7 +255,7 @@ def test_wait_for_update_times_out_when_nothing_changes(monkeypatch):
     k8s_v1 = FakeK8sV1([])
 
     fake_watch_cls = make_fake_watch_class({})
-    monkeypatch.setattr(watched_state_mod.k8s.watch, "Watch", fake_watch_cls)
+    monkeypatch.setattr(watched_state_mod.kube, "new_watch", fake_watch_cls)
 
     with workflow_state_watcher(k8s_custom, k8s_v1, "ns", "wf-1") as w:
         w.wait_for_first(timeout=1)
@@ -268,7 +268,7 @@ def test_stop_joins_watcher_threads_promptly(monkeypatch):
     k8s_v1 = FakeK8sV1([])
 
     fake_watch_cls = make_fake_watch_class({})
-    monkeypatch.setattr(watched_state_mod.k8s.watch, "Watch", fake_watch_cls)
+    monkeypatch.setattr(watched_state_mod.kube, "new_watch", fake_watch_cls)
 
     w = workflow_state_watcher(k8s_custom, k8s_v1, "ns", "wf-1")
     w.start()
@@ -300,7 +300,7 @@ def test_continuous_watch_failures_escalate_to_watch_stalled_error(monkeypatch):
     k8s_custom = FakeK8sCustom(controller_jobset)
     k8s_v1 = FakeK8sV1([])
 
-    monkeypatch.setattr(watched_state_mod.k8s.watch, "Watch", _FailingWatch)
+    monkeypatch.setattr(watched_state_mod.kube, "new_watch", _FailingWatch)
     monkeypatch.setattr(watched_state_mod, "_WATCH_RECONNECT_DELAY", 0.01)
     monkeypatch.setattr(watched_state_mod, "_WATCH_BACKOFF_BASE_SECONDS", 0.01)
     monkeypatch.setattr(watched_state_mod, "_WATCH_BACKOFF_MAX_SECONDS", 0.01)
@@ -354,7 +354,7 @@ def test_controller_seed_produces_first_status_without_waiting_for_watch_events(
     k8s_v1 = FakeK8sV1([])
 
     fake_watch_cls = make_fake_watch_class({})
-    monkeypatch.setattr(watched_state_mod.k8s.watch, "Watch", fake_watch_cls)
+    monkeypatch.setattr(watched_state_mod.kube, "new_watch", fake_watch_cls)
 
     with controller_status_watcher(k8s_custom, k8s_v1, "ns", "wf-1") as w:
         status = w.wait_for_first(timeout=1)
@@ -366,7 +366,7 @@ def test_controller_returns_none_when_job_does_not_exist(monkeypatch):
     k8s_v1 = FakeK8sV1([])
 
     fake_watch_cls = make_fake_watch_class({})
-    monkeypatch.setattr(watched_state_mod.k8s.watch, "Watch", fake_watch_cls)
+    monkeypatch.setattr(watched_state_mod.kube, "new_watch", fake_watch_cls)
 
     with controller_status_watcher(k8s_custom, k8s_v1, "ns", "wf-1") as w:
         status = w.wait_for_first(timeout=1)
@@ -384,7 +384,7 @@ def test_controller_job_modified_event_updates_status(monkeypatch):
             "job": [[{"type": "MODIFIED", "object": jobset_v2}]],
         }
     )
-    monkeypatch.setattr(watched_state_mod.k8s.watch, "Watch", fake_watch_cls)
+    monkeypatch.setattr(watched_state_mod.kube, "new_watch", fake_watch_cls)
 
     with controller_status_watcher(k8s_custom, k8s_v1, "ns", "wf-1") as w:
         w.wait_for_first(timeout=1)
@@ -402,7 +402,7 @@ def test_controller_deleted_event_clears_status(monkeypatch):
             "job": [[{"type": "DELETED", "object": controller_jobset}]],
         }
     )
-    monkeypatch.setattr(watched_state_mod.k8s.watch, "Watch", fake_watch_cls)
+    monkeypatch.setattr(watched_state_mod.kube, "new_watch", fake_watch_cls)
 
     with controller_status_watcher(k8s_custom, k8s_v1, "ns", "wf-1") as w:
         w.wait_for_first(timeout=1)
@@ -416,7 +416,7 @@ def test_controller_stop_joins_watcher_thread_promptly(monkeypatch):
     k8s_v1 = FakeK8sV1([])
 
     fake_watch_cls = make_fake_watch_class({})
-    monkeypatch.setattr(watched_state_mod.k8s.watch, "Watch", fake_watch_cls)
+    monkeypatch.setattr(watched_state_mod.kube, "new_watch", fake_watch_cls)
 
     w = controller_status_watcher(k8s_custom, k8s_v1, "ns", "wf-1")
     w.start()
@@ -430,7 +430,7 @@ def test_controller_continuous_watch_failures_escalate_to_watch_stalled_error(mo
     k8s_custom = FakeK8sCustom(controller_jobset)
     k8s_v1 = FakeK8sV1([])
 
-    monkeypatch.setattr(watched_state_mod.k8s.watch, "Watch", _FailingWatch)
+    monkeypatch.setattr(watched_state_mod.kube, "new_watch", _FailingWatch)
     monkeypatch.setattr(watched_state_mod, "_WATCH_RECONNECT_DELAY", 0.01)
     monkeypatch.setattr(watched_state_mod, "_WATCH_BACKOFF_BASE_SECONDS", 0.01)
     monkeypatch.setattr(watched_state_mod, "_WATCH_BACKOFF_MAX_SECONDS", 0.01)

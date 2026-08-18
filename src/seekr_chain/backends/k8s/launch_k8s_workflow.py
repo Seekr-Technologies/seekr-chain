@@ -11,12 +11,13 @@ from pathlib import Path
 import dotenv
 import kubernetes
 
-from seekr_chain import WorkflowConfig, constants, k8s_utils, remote_fs, utils
+from seekr_chain import WorkflowConfig, constants, remote_fs, utils
 from seekr_chain.backends.k8s.job_info import JobInfo, _resolve_datastore_root, get_job_info
 from seekr_chain.backends.k8s.jobset import _INIT_IMAGE, create_jobset_manifest
 from seekr_chain.backends.k8s.parse_logs import DATA_SCHEMA_VERSION
 from seekr_chain.backends.k8s.rbac import detect_service_account
 from seekr_chain.config import EnvSource, SecretRefSource
+from seekr_chain.k8s_api import kube
 from seekr_chain.nix_resolution import process_nix
 from seekr_chain.symlink import symlink
 from seekr_chain.tar_directory import tar_directory
@@ -73,7 +74,7 @@ def _create_secrets(workflow_name: str, s3_creds: dict, config: WorkflowConfig):
             if k.upper() not in secrets:
                 secrets[k.upper()] = v
 
-    v1 = k8s_utils.get_core_v1_api()
+    v1 = kube.core_v1
 
     if secrets:
         secret = kubernetes.client.V1Secret(
@@ -441,8 +442,6 @@ def launch_k8s_workflow(
 
         workflow_secrets = _create_workflow_secrets(config, workflow_id, s3_creds)
 
-        kubernetes.config.load_kube_config(config_file=os.environ.get("KUBECONFIG"))
-
         service_account = _user_config.service_account or detect_service_account(config.namespace)
 
         # Create assets dir upfront so _package_assets can write dag.json there
@@ -470,7 +469,7 @@ def launch_k8s_workflow(
         service_account=service_account,
     )
 
-    k8s_custom = k8s_utils.get_custom_objects_api()
+    k8s_custom = kube.custom_objects
     try:
         k8s_custom.create_namespaced_custom_object(
             group="jobset.x-k8s.io",
