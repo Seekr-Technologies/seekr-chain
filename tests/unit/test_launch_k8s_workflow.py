@@ -144,7 +144,10 @@ class TestCodeStaging:
         monkeypatch.setattr(lkw_module, "_package_assets", lambda **k: None)
         monkeypatch.setattr(lkw_module, "_create_secrets", lambda *a, **k: None)
         monkeypatch.setattr(lkw_module, "_build_controller_jobset", lambda **k: {})
-        monkeypatch.setattr(lkw_module.kube, "custom_objects", MagicMock())
+        # Direct __dict__ write, not monkeypatch.setattr: setattr's internal
+        # getattr(target, name) to snapshot the old value would trigger the
+        # real lazy construction (and load_kubeconfig()) before we overwrite it.
+        lkw_module.kube.__dict__["custom_objects"] = MagicMock()
         monkeypatch.setattr("seekr_chain.backends.k8s.k8s_workflow.K8sWorkflow", lambda **k: MagicMock())
 
         def fake_process_nix(config, *, staged_code_dir=None, staging_dir=None):

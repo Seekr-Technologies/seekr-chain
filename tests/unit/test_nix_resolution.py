@@ -1166,7 +1166,10 @@ class TestFindWarmNodes:
             result.items = pods or []
             v1.list_namespaced_pod.return_value = result
 
-        monkeypatch.setattr(kube, "core_v1", v1)
+        # Direct __dict__ write, not monkeypatch.setattr: setattr's internal
+        # getattr(target, name) to snapshot the old value would trigger the
+        # real lazy construction (and load_kubeconfig()) before we overwrite it.
+        kube.__dict__["core_v1"] = v1
         return v1
 
     def test_returns_unique_nodes_newest_first(self, monkeypatch):
