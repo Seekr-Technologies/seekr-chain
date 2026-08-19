@@ -401,12 +401,12 @@ class TestExitHandlers:
 
     def test_on_exit_codes_gates_on_step_exit_code(self, tmp_path):
         marker = tmp_path / "ran.txt"
-        matching = self._config_with_handler("exit 42", marker, when="ALWAYS", on_exit_codes=[42])
+        matching = self._config_with_handler("exit 42", marker, when="ON_FAILURE", on_exit_codes=[42])
         launch_local_workflow(matching)
         assert marker.exists()
 
         marker.unlink()
-        non_matching = self._config_with_handler("exit 1", marker, when="ALWAYS", on_exit_codes=[42])
+        non_matching = self._config_with_handler("exit 1", marker, when="ON_FAILURE", on_exit_codes=[42])
         launch_local_workflow(non_matching)
         assert not marker.exists()
 

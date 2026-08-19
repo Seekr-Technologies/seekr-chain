@@ -10,7 +10,7 @@ from seekr_chain.backends.k8s.jobset import (
     build_handler_jobset_context,
     build_jobset_context,
 )
-from seekr_chain.config import ExitHandlerConfig, WorkflowConfig, handler_step_name
+from seekr_chain.config import OnFailureHandler, WorkflowConfig, handler_step_name
 
 DATASTORE_ROOT = "s3://test-bucket/seekr-chain/"
 
@@ -583,7 +583,7 @@ class TestHandlerJobsetRendering:
 
     def _config_with_handler(self, run_kwargs=None, **handler_kwargs):
         run = {"name": "notify", "image": "curl:latest", "script": "echo notify", **(run_kwargs or {})}
-        handler = {"run": run, **handler_kwargs}
+        handler = {"run": run, "when": "ALWAYS", **handler_kwargs}
         return _minimal_config(
             steps=[
                 {
@@ -777,7 +777,7 @@ class TestPlanHandlers:
             ("eval", "eval-eh-report"),
         ]
         assert all(isinstance(p, HandlerPlan) for p in plans)
-        assert isinstance(plans[0].handler, ExitHandlerConfig)
+        assert isinstance(plans[0].handler, OnFailureHandler)
         assert plans[0].handler.run.name == "notify"
 
     def test_plan_handlers_empty_for_config_without_handlers(self):

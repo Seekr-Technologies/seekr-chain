@@ -3,9 +3,18 @@
 import datetime
 
 import pytest
-from pydantic import ValidationError
+from pydantic import TypeAdapter, ValidationError
 
-from seekr_chain.config import EnvSource, ExitHandlerConfig, SecretRefSource, WorkflowConfig, handler_step_name
+from seekr_chain.config import (
+    AlwaysHandler,
+    EnvSource,
+    ExitHandlerConfig,
+    OnFailureHandler,
+    OnSuccessHandler,
+    SecretRefSource,
+    WorkflowConfig,
+    handler_step_name,
+)
 
 
 def _minimal_step(name, depends_on=None):
@@ -153,42 +162,61 @@ def _minimal_run(name, **overrides):
 
 
 def _minimal_handler(name, run_overrides=None, **overrides):
-    return {"run": _minimal_run(name, **(run_overrides or {})), **overrides}
+    return {"run": _minimal_run(name, **(run_overrides or {})), "when": "ALWAYS", **overrides}
+
+
+_WHEN_TO_CLS = {"ON_SUCCESS": OnSuccessHandler, "ON_FAILURE": OnFailureHandler, "ALWAYS": AlwaysHandler}
 
 
 class TestExitHandlerConfig:
     def test_default_when_is_always(self):
-        handler = ExitHandlerConfig(**_minimal_handler("h"))
+        handler = AlwaysHandler(**_minimal_handler("h"))
         assert handler.when == "ALWAYS"
 
     @pytest.mark.parametrize("when", ["ON_SUCCESS", "ON_FAILURE", "ALWAYS"])
     def test_explicit_when_accepted(self, when):
-        handler = ExitHandlerConfig(**_minimal_handler("h", when=when))
+        handler = _WHEN_TO_CLS[when](**_minimal_handler("h", when=when))
         assert handler.when == when
 
     def test_lowercase_when_rejected(self):
-        with pytest.raises(ValidationError, match="Input should be"):
-            ExitHandlerConfig(**_minimal_handler("h", when="on_success"))
+        with pytest.raises(ValidationError):
+            TypeAdapter(ExitHandlerConfig).validate_python(_minimal_handler("h", when="on_success"))
 
     def test_nix_mode_handler_accepted(self):
-        handler = ExitHandlerConfig(run={"name": "h", "nix": {}, "script": "echo hi"})
+        handler = AlwaysHandler(run={"name": "h", "nix": {}, "script": "echo hi"})
         assert handler.run.nix is not None
 
     def test_multi_node_handler_rejected(self):
         with pytest.raises(ValidationError, match="Input should be 1"):
-            ExitHandlerConfig(**_minimal_handler("h", run_overrides={"resources": {"num_nodes": 2}}))
+            AlwaysHandler(**_minimal_handler("h", run_overrides={"resources": {"num_nodes": 2}}))
 
     def test_depends_on_handler_rejected(self):
         with pytest.raises(ValidationError, match="`depends_on` is not supported for handlers"):
-            ExitHandlerConfig(**_minimal_handler("h", run_overrides={"depends_on": ["other"]}))
+            AlwaysHandler(**_minimal_handler("h", run_overrides={"depends_on": ["other"]}))
 
     def test_on_exit_codes_out_of_range_rejected(self):
         with pytest.raises(ValidationError, match="less than or equal to 255"):
-            ExitHandlerConfig(**_minimal_handler("h", on_exit_codes=[256]))
+            OnFailureHandler(**_minimal_handler("h", when="ON_FAILURE", on_exit_codes=[256]))
 
     def test_on_exit_codes_valid_accepted(self):
-        handler = ExitHandlerConfig(**_minimal_handler("h", on_exit_codes=[0, 1, 255]))
+        handler = OnFailureHandler(**_minimal_handler("h", when="ON_FAILURE", on_exit_codes=[0, 1, 255]))
         assert handler.on_exit_codes == [0, 1, 255]
+
+    def test_on_exit_codes_with_on_success_rejected(self):
+        with pytest.raises(ValidationError, match="Extra inputs are not permitted"):
+            TypeAdapter(ExitHandlerConfig).validate_python(
+                _minimal_handler("h", when="ON_SUCCESS", on_exit_codes=[1])
+            )
+
+    def test_on_exit_codes_with_always_rejected(self):
+        with pytest.raises(ValidationError, match="Extra inputs are not permitted"):
+            TypeAdapter(ExitHandlerConfig).validate_python(_minimal_handler("h", when="ALWAYS", on_exit_codes=[1]))
+
+    def test_missing_when_rejected(self):
+        handler = _minimal_handler("h")
+        del handler["when"]
+        with pytest.raises(ValidationError):
+            TypeAdapter(ExitHandlerConfig).validate_python(handler)
 
 
 class TestExitHandlersOnStep:
