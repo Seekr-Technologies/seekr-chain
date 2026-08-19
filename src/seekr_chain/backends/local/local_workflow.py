@@ -124,6 +124,11 @@ def launch_local_workflow(
     # Collect num_nodes overrides without mutating the caller's config.
     num_nodes_override: dict[str, int] = {}
     for step in config.steps:
+        if step.exit_handlers:
+            raise NotImplementedError(
+                f"Local mode does not support exit handlers (step: '{step.name}'). "
+                "Use the k8s backend for exit handlers."
+            )
         if isinstance(step, MultiRoleStepConfig):
             raise ValueError(
                 f"Local mode does not support multi-role steps (step: '{step.name}'). "

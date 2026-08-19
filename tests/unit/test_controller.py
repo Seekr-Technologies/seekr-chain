@@ -4,7 +4,10 @@ controller.py runs inside the controller pod and has no seekr_chain dependency,
 so we import it directly via importlib to avoid any packaging side effects.
 """
 
+import contextlib
+import datetime
 import importlib.util
+import json
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -29,6 +32,15 @@ _submit_ready_steps = controller._submit_ready_steps
 _load_manifest = controller._load_manifest
 _load_phases = controller._load_phases
 _save_phases = controller._save_phases
+_load_handlers = controller._load_handlers
+_read_step_exit_info = controller._read_step_exit_info
+_handler_env = controller._handler_env
+_inject_handler_env = controller._inject_handler_env
+_load_handler_states = controller._load_handler_states
+_save_handler_states = controller._save_handler_states
+_workflow_settled = controller._workflow_settled
+_submit_handlers_for_step = controller._submit_handlers_for_step
+_dispatch_handlers_for_terminal_steps = controller._dispatch_handlers_for_terminal_steps
 
 
 # ---------------------------------------------------------------------------
@@ -75,6 +87,47 @@ def _make_k8s_custom(events: list[dict], existing_jobsets: list[str] | None = No
 
         mock.create_namespaced_custom_object.side_effect = _create_side_effect
 
+    return mock
+
+
+def _make_pod(
+    name: str,
+    role: str = "worker",
+    exit_code: int | None = None,
+    reason: str = "",
+    message: str = "",
+    finished_at=None,
+    main_terminated: bool = True,
+):
+    """Build a fake k8s Pod object shaped like the real client's attribute-access model."""
+    pod = MagicMock()
+    pod.metadata.name = name
+    pod.metadata.labels = {"seekr-chain/role": role}
+
+    main_container = MagicMock()
+    main_container.name = "main"
+    if main_terminated:
+        terminated = MagicMock()
+        terminated.exit_code = exit_code
+        terminated.reason = reason
+        terminated.message = message
+        terminated.finished_at = finished_at
+        main_container.state.terminated = terminated
+    else:
+        main_container.state.terminated = None
+
+    pod.status.container_statuses = [main_container]
+    return pod
+
+
+def _make_core_v1_for_pods(pods: list, raises: Exception | None = None):
+    mock = MagicMock()
+    if raises is not None:
+        mock.list_namespaced_pod.side_effect = raises
+    else:
+        resp = MagicMock()
+        resp.items = pods
+        mock.list_namespaced_pod.return_value = resp
     return mock
 
 
@@ -343,17 +396,32 @@ def _run_main(
     event_sequences: list[list[dict]],
     existing_jobsets: list[str] | None = None,
     initial_phases: dict[str, str] | None = None,
+    handlers: dict[str, list[dict]] | None = None,
+    initial_handler_states: dict[str, str] | None = None,
+    pods_by_step: dict[str, list] | None = None,
+    drain_timeout: float | None = None,
+    time_values: list[float] | None = None,
+    return_extra: bool = False,
 ):
     """Run controller.main() with a mocked environment and watch stream.
 
     event_sequences: list of event batches, one per watch stream open() call.
     Each batch is exhausted before the next watch reconnect (if any).
+
+    handlers / initial_handler_states / pods_by_step configure exit-handler
+    dispatch (see TestHandlerDispatch). When return_extra is True, returns
+    (result, mock_k8s, handler_state_snapshots) instead of just result;
+    handler_state_snapshots is the list of dicts passed to
+    _save_handler_states over the course of the run (last entry == final
+    state).
     """
     env = {
         "SEEKR_CHAIN_JOB_ASSET_PATH": "/assets",
         "SEEKR_CHAIN_NAMESPACE": "ns",
         "SEEKR_CHAIN_CONTROLLER_JOB_NAME": "wf-abc",
     }
+    if drain_timeout is not None:
+        env["SEEKR_CHAIN_HANDLER_DRAIN_TIMEOUT"] = str(drain_timeout)
 
     call_count = [0]
 
@@ -384,11 +452,26 @@ def _run_main(
         mock_k8s.create_namespaced_custom_object.side_effect = _create_side_effect
 
     mock_custom_api_cls = MagicMock(return_value=mock_k8s)
+
     mock_core_v1 = MagicMock()
+    if pods_by_step is not None:
+
+        def _list_pods(namespace, label_selector):
+            step = label_selector.rsplit("seekr-chain/step=", 1)[1]
+            resp = MagicMock()
+            resp.items = pods_by_step.get(step, [])
+            return resp
+
+        mock_core_v1.list_namespaced_pod.side_effect = _list_pods
     mock_core_v1_cls = MagicMock(return_value=mock_core_v1)
 
     def _load_manifest_mock(_assets, name):
-        return {"metadata": {"name": f"{name}-js", "resourceVersion": "1"}, "spec": {}}
+        return {
+            "metadata": {"name": f"{name}-js", "resourceVersion": "1"},
+            "spec": {
+                "replicatedJobs": [{"template": {"spec": {"template": {"spec": {"containers": [{"name": "main"}]}}}}}]
+            },
+        }
 
     # _load_phases: return persisted state if provided, otherwise all-PENDING
     def _load_phases_mock(_v1, _ns, _wid, dag):
@@ -396,7 +479,12 @@ def _run_main(
             return dict(initial_phases)
         return {s["name"]: "PENDING" for s in dag}
 
-    with (
+    handler_state_snapshots: list[dict] = []
+
+    def _save_handler_states_mock(_v1, _ns, _wid, states):
+        handler_state_snapshots.append(dict(states))
+
+    patches = [
         patch.dict("os.environ", env),
         patch.object(controller.kubernetes.config, "load_incluster_config"),
         patch.object(controller.kubernetes.client, "CustomObjectsApi", mock_custom_api_cls),
@@ -405,7 +493,9 @@ def _run_main(
         patch.object(controller, "_load_manifest", side_effect=_load_manifest_mock),
         patch.object(controller, "_load_phases", side_effect=_load_phases_mock),
         patch.object(controller, "_save_phases"),
-        patch.object(controller, "_emit_event"),
+        patch.object(controller, "_load_handlers", return_value=dict(handlers or {})),
+        patch.object(controller, "_load_handler_states", return_value=dict(initial_handler_states or {})),
+        patch.object(controller, "_save_handler_states", side_effect=_save_handler_states_mock),
         patch.object(controller, "_touch_heartbeat"),
         patch(
             "builtins.open",
@@ -418,9 +508,18 @@ def _run_main(
             ),
         ),
         patch.object(controller.json, "load", return_value=dag_json),
-    ):
+    ]
+    if time_values is not None:
+        patches.append(patch.object(controller.time, "time", side_effect=time_values))
+
+    with contextlib.ExitStack() as stack:
+        mock_emit_event = stack.enter_context(patch.object(controller, "_emit_event"))
+        for p in patches:
+            stack.enter_context(p)
         result = controller.main()
 
+    if return_extra:
+        return result, mock_k8s, handler_state_snapshots, mock_emit_event
     return result
 
 
@@ -598,6 +697,9 @@ class TestMainWatchReconnect:
             patch.object(controller, "_save_phases"),
             patch.object(controller, "_emit_event"),
             patch.object(controller, "_touch_heartbeat"),
+            patch.object(controller, "_load_handlers", return_value={}),
+            patch.object(controller, "_load_handler_states", return_value={}),
+            patch.object(controller, "_save_handler_states"),
             patch.object(controller.json, "load", return_value=dag),
             patch.object(controller.time, "sleep"),
             patch("builtins.open", MagicMock(__enter__=lambda s, *a: s, __exit__=lambda s, *a: None)),
@@ -652,6 +754,9 @@ class TestMainWatchReconnect:
             patch.object(controller, "_save_phases"),
             patch.object(controller, "_emit_event"),
             patch.object(controller, "_touch_heartbeat"),
+            patch.object(controller, "_load_handlers", return_value={}),
+            patch.object(controller, "_load_handler_states", return_value={}),
+            patch.object(controller, "_save_handler_states"),
             patch.object(controller.json, "load", return_value=dag),
             patch.object(controller.time, "sleep"),
             patch("builtins.open", MagicMock(__enter__=lambda s, *a: s, __exit__=lambda s, *a: None)),
@@ -748,6 +853,9 @@ class TestMainControllerRetry:
             patch.object(controller, "_save_phases"),
             patch.object(controller, "_emit_event"),
             patch.object(controller, "_touch_heartbeat"),
+            patch.object(controller, "_load_handlers", return_value={}),
+            patch.object(controller, "_load_handler_states", return_value={}),
+            patch.object(controller, "_save_handler_states"),
             patch.object(controller.json, "load", return_value=dag),
             patch("builtins.open", MagicMock(__enter__=lambda s, *a: s, __exit__=lambda s, *a: None)),
         ):
@@ -806,6 +914,9 @@ class TestWatchTimeout:
             patch.object(controller, "_save_phases"),
             patch.object(controller, "_emit_event"),
             patch.object(controller, "_touch_heartbeat"),
+            patch.object(controller, "_load_handlers", return_value={}),
+            patch.object(controller, "_load_handler_states", return_value={}),
+            patch.object(controller, "_save_handler_states"),
             patch.object(controller.json, "load", return_value=dag),
             patch("builtins.open", MagicMock(__enter__=lambda s, *a: s, __exit__=lambda s, *a: None)),
         ):
@@ -874,6 +985,9 @@ class TestTransientSubmitRetry:
             patch.object(controller, "_save_phases"),
             patch.object(controller, "_emit_event"),
             patch.object(controller, "_touch_heartbeat"),
+            patch.object(controller, "_load_handlers", return_value={}),
+            patch.object(controller, "_load_handler_states", return_value={}),
+            patch.object(controller, "_save_handler_states"),
             patch.object(controller.json, "load", return_value=dag),
             patch("builtins.open", MagicMock(__enter__=lambda s, *a: s, __exit__=lambda s, *a: None)),
         ):
@@ -882,3 +996,596 @@ class TestTransientSubmitRetry:
         assert result == 0
         # Submit was called twice: first failed, second succeeded
         assert call_count[0] == 2
+
+
+# ---------------------------------------------------------------------------
+# _load_handlers
+# ---------------------------------------------------------------------------
+
+
+class TestLoadHandlers:
+    def test_groups_by_parent(self, tmp_path):
+        entries = [
+            {"parent": "a", "name": "notify", "step": "a-eh-notify", "when": "always", "on_exit_codes": None},
+            {"parent": "a", "name": "cleanup", "step": "a-eh-cleanup", "when": "on_failure", "on_exit_codes": None},
+            {"parent": "b", "name": "notify", "step": "b-eh-notify", "when": "on_success", "on_exit_codes": None},
+        ]
+        (tmp_path / "handlers.json").write_text(json.dumps(entries))
+
+        grouped = _load_handlers(str(tmp_path))
+
+        assert [e["name"] for e in grouped["a"]] == ["notify", "cleanup"]
+        assert [e["name"] for e in grouped["b"]] == ["notify"]
+
+    def test_missing_file_returns_empty_dict(self, tmp_path):
+        assert _load_handlers(str(tmp_path)) == {}
+
+
+# ---------------------------------------------------------------------------
+# _read_step_exit_info
+# ---------------------------------------------------------------------------
+
+
+class TestReadStepExitInfo:
+    def test_picks_nonzero_exit_pod_over_success(self):
+        pods = [
+            _make_pod("a-0", exit_code=0, finished_at=datetime.datetime(2026, 1, 1, tzinfo=datetime.timezone.utc)),
+            _make_pod(
+                "a-1",
+                exit_code=42,
+                reason="Error",
+                finished_at=datetime.datetime(2026, 1, 1, 0, 0, 1, tzinfo=datetime.timezone.utc),
+            ),
+        ]
+        core_v1 = _make_core_v1_for_pods(pods)
+
+        info = _read_step_exit_info(core_v1, "ns", "wf-abc", "a")
+
+        assert info["exit_code"] == 42
+        assert info["reason"] == "Error"
+        assert info["pod"] == "a-1"
+        assert len(info["pod_exits"]) == 2
+
+    def test_prefers_oom_killed_pod(self):
+        pods = [
+            _make_pod(
+                "a-0",
+                exit_code=1,
+                reason="Error",
+                finished_at=datetime.datetime(2026, 1, 1, 0, 0, 5, tzinfo=datetime.timezone.utc),
+            ),
+            _make_pod(
+                "a-1",
+                exit_code=137,
+                reason="OOMKilled",
+                finished_at=datetime.datetime(2026, 1, 1, 0, 0, 1, tzinfo=datetime.timezone.utc),
+            ),
+        ]
+        core_v1 = _make_core_v1_for_pods(pods)
+
+        info = _read_step_exit_info(core_v1, "ns", "wf-abc", "a")
+
+        assert info["oom_killed"] is True
+        assert info["pod"] == "a-1"
+
+    def test_returns_default_when_list_pods_raises(self):
+        from kubernetes.client.exceptions import ApiException
+
+        core_v1 = _make_core_v1_for_pods([], raises=ApiException(status=500))
+
+        info = _read_step_exit_info(core_v1, "ns", "wf-abc", "a")
+
+        assert info == controller._default_exit_info()
+
+    def test_returns_default_when_no_pods_found(self):
+        core_v1 = _make_core_v1_for_pods([])
+
+        info = _read_step_exit_info(core_v1, "ns", "wf-abc", "a")
+
+        assert info == controller._default_exit_info()
+
+    def test_uses_expected_label_selector(self):
+        core_v1 = _make_core_v1_for_pods([])
+        _read_step_exit_info(core_v1, "ns", "wf-abc", "a")
+        core_v1.list_namespaced_pod.assert_called_once_with(
+            namespace="ns",
+            label_selector="seekr-chain/job-id=wf-abc,seekr-chain/step=a",
+        )
+
+
+# ---------------------------------------------------------------------------
+# _handler_env
+# ---------------------------------------------------------------------------
+
+
+class TestHandlerEnv:
+    def test_builds_full_env_list(self):
+        handler_entry = {"parent": "a", "name": "notify", "step": "a-eh-notify", "when": "on_failure"}
+        exit_info = {
+            "exit_code": 42,
+            "reason": "Error",
+            "message": "boom",
+            "oom_killed": False,
+            "pod": "a-1",
+            "role": "worker",
+            "pod_exits": [{"pod": "a-1", "role": "worker", "exit_code": 42}],
+        }
+
+        env = _handler_env(handler_entry, "a", "a-js", "FAILED", exit_info)
+
+        assert env == [
+            {"name": "SEEKR_CHAIN_HANDLER_NAME", "value": "notify"},
+            {"name": "SEEKR_CHAIN_HANDLER_WHEN", "value": "on_failure"},
+            {"name": "SEEKR_CHAIN_PARENT_STEP", "value": "a"},
+            {"name": "SEEKR_CHAIN_PARENT_JOBSET", "value": "a-js"},
+            {"name": "SEEKR_CHAIN_PARENT_STATUS", "value": "FAILED"},
+            {"name": "SEEKR_CHAIN_PARENT_EXIT_CODE", "value": "42"},
+            {"name": "SEEKR_CHAIN_PARENT_FAILURE_REASON", "value": "Error"},
+            {"name": "SEEKR_CHAIN_PARENT_FAILURE_MESSAGE", "value": "boom"},
+            {"name": "SEEKR_CHAIN_PARENT_OOM_KILLED", "value": "false"},
+            {"name": "SEEKR_CHAIN_PARENT_POD", "value": "a-1"},
+            {"name": "SEEKR_CHAIN_PARENT_ROLE", "value": "worker"},
+            {
+                "name": "SEEKR_CHAIN_PARENT_POD_EXITS",
+                "value": json.dumps([{"pod": "a-1", "role": "worker", "exit_code": 42}]),
+            },
+        ]
+
+    def test_none_exit_code_and_oom_true(self):
+        handler_entry = {"parent": "a", "name": "notify", "step": "a-eh-notify", "when": "always"}
+        exit_info = controller._default_exit_info()
+        exit_info["oom_killed"] = True
+
+        env = _handler_env(handler_entry, "a", "a-js", "SUCCEEDED", exit_info)
+
+        env_by_name = {e["name"]: e["value"] for e in env}
+        assert env_by_name["SEEKR_CHAIN_PARENT_EXIT_CODE"] == ""
+        assert env_by_name["SEEKR_CHAIN_PARENT_OOM_KILLED"] == "true"
+
+
+# ---------------------------------------------------------------------------
+# _inject_handler_env
+# ---------------------------------------------------------------------------
+
+
+class TestInjectHandlerEnv:
+    def _manifest(self):
+        return {
+            "spec": {
+                "replicatedJobs": [
+                    {
+                        "template": {
+                            "spec": {
+                                "template": {
+                                    "spec": {
+                                        "containers": [
+                                            {"name": "log-sidecar", "env": [{"name": "EXISTING", "value": "1"}]},
+                                            {"name": "main", "env": [{"name": "EXISTING", "value": "1"}]},
+                                        ],
+                                    }
+                                }
+                            }
+                        }
+                    }
+                ]
+            }
+        }
+
+    def test_appends_only_to_main_container(self):
+        manifest = self._manifest()
+        env_entries = [{"name": "SEEKR_CHAIN_HANDLER_NAME", "value": "notify"}]
+
+        _inject_handler_env(manifest, env_entries)
+
+        containers = manifest["spec"]["replicatedJobs"][0]["template"]["spec"]["template"]["spec"]["containers"]
+        sidecar = next(c for c in containers if c["name"] == "log-sidecar")
+        main = next(c for c in containers if c["name"] == "main")
+
+        assert sidecar["env"] == [{"name": "EXISTING", "value": "1"}]
+        assert main["env"] == [
+            {"name": "EXISTING", "value": "1"},
+            {"name": "SEEKR_CHAIN_HANDLER_NAME", "value": "notify"},
+        ]
+
+
+# ---------------------------------------------------------------------------
+# _load_handler_states / _save_handler_states
+# ---------------------------------------------------------------------------
+
+
+class TestHandlerStates:
+    def test_round_trips_through_configmap(self):
+        mock_v1 = MagicMock()
+        cm = MagicMock()
+        cm.data = {"phases": json.dumps({"a": "SUCCEEDED"}), "handlers": json.dumps({"a-eh-notify": "SUBMITTED"})}
+        mock_v1.read_namespaced_config_map.return_value = cm
+
+        states = _load_handler_states(mock_v1, "ns", "wf-abc")
+
+        assert states == {"a-eh-notify": "SUBMITTED"}
+
+    def test_submitted_restored_as_is_not_reset_to_pending(self):
+        mock_v1 = MagicMock()
+        cm = MagicMock()
+        cm.data = {"handlers": json.dumps({"a-eh-notify": "SUBMITTED", "a-eh-cleanup": "PENDING"})}
+        mock_v1.read_namespaced_config_map.return_value = cm
+
+        states = _load_handler_states(mock_v1, "ns", "wf-abc")
+
+        assert states["a-eh-notify"] == "SUBMITTED"
+        assert states["a-eh-cleanup"] == "PENDING"
+
+    def test_missing_configmap_returns_empty_dict(self):
+        from kubernetes.client.exceptions import ApiException
+
+        mock_v1 = MagicMock()
+        mock_v1.read_namespaced_config_map.side_effect = ApiException(status=404)
+
+        assert _load_handler_states(mock_v1, "ns", "wf-abc") == {}
+
+    def test_save_does_not_clobber_phases_key(self):
+        mock_v1 = MagicMock()
+
+        _save_handler_states(mock_v1, "ns", "wf-abc", {"a-eh-notify": "SUBMITTED"})
+
+        call = mock_v1.patch_namespaced_config_map.call_args
+        assert call.kwargs["name"] == "wf-abc-phases"
+        assert call.kwargs["body"] == {"data": {"handlers": json.dumps({"a-eh-notify": "SUBMITTED"})}}
+        assert "phases" not in call.kwargs["body"]["data"]
+
+    def test_save_api_error_does_not_raise(self):
+        from kubernetes.client.exceptions import ApiException
+
+        mock_v1 = MagicMock()
+        mock_v1.patch_namespaced_config_map.side_effect = ApiException(status=500)
+
+        # Should not raise
+        _save_handler_states(mock_v1, "ns", "wf-abc", {"a-eh-notify": "SUBMITTED"})
+
+
+# ---------------------------------------------------------------------------
+# _workflow_settled
+# ---------------------------------------------------------------------------
+
+
+class TestWorkflowSettled:
+    def test_true_when_all_terminal_and_no_handlers(self):
+        dag = [{"name": "a", "depends_on": []}]
+        phases = {"a": "SUCCEEDED"}
+        assert _workflow_settled(dag, phases, {}, {}) is True
+
+    def test_false_when_a_step_still_pending(self):
+        dag = [{"name": "a", "depends_on": []}]
+        phases = {"a": "PENDING"}
+        assert _workflow_settled(dag, phases, {}, {}) is False
+
+    def test_false_when_handler_pending_on_terminal_parent(self):
+        dag = [{"name": "a", "depends_on": []}]
+        phases = {"a": "SUCCEEDED"}
+        handlers = {"a": [{"parent": "a", "name": "notify", "step": "a-eh-notify", "when": "always"}]}
+        handler_states = {}  # defaults to PENDING
+        assert _workflow_settled(dag, phases, handlers, handler_states) is False
+
+    def test_false_when_handler_submitted(self):
+        dag = [{"name": "a", "depends_on": []}]
+        phases = {"a": "SUCCEEDED"}
+        handlers = {"a": [{"parent": "a", "name": "notify", "step": "a-eh-notify", "when": "always"}]}
+        handler_states = {"a-eh-notify": "SUBMITTED"}
+        assert _workflow_settled(dag, phases, handlers, handler_states) is False
+
+    def test_true_when_all_handlers_terminal(self):
+        dag = [{"name": "a", "depends_on": []}]
+        phases = {"a": "SUCCEEDED"}
+        handlers = {"a": [{"parent": "a", "name": "notify", "step": "a-eh-notify", "when": "always"}]}
+        handler_states = {"a-eh-notify": "SUCCEEDED"}
+        assert _workflow_settled(dag, phases, handlers, handler_states) is True
+
+
+# ---------------------------------------------------------------------------
+# _submit_handlers_for_step / watch-loop handler dispatch (step 4b wiring)
+# ---------------------------------------------------------------------------
+
+
+def _handler_entry(parent="a", name="notify", when="always", on_exit_codes=None, step=None):
+    return {
+        "parent": parent,
+        "name": name,
+        "step": step or f"{parent}-eh-{name}",
+        "when": when,
+        "on_exit_codes": on_exit_codes,
+    }
+
+
+def _call_submit_handlers(
+    step_name,
+    phases,
+    handlers,
+    handler_states,
+    js_names=None,
+    existing_jobsets=None,
+    pods=None,
+):
+    js_names = js_names or {}
+    js_to_handler: dict[str, str] = {}
+    mock_k8s = _make_k8s_custom([], existing_jobsets=existing_jobsets)
+    mock_v1 = _make_core_v1_for_pods(pods or [])
+
+    with patch.object(controller, "_load_manifest") as mock_load:
+        mock_load.side_effect = lambda _assets, name: {
+            "metadata": {"name": f"{name}-js"},
+            "spec": {
+                "replicatedJobs": [{"template": {"spec": {"template": {"spec": {"containers": [{"name": "main"}]}}}}}]
+            },
+        }
+        _submit_handlers_for_step(
+            step_name,
+            phases,
+            handlers,
+            handler_states,
+            js_names,
+            js_to_handler,
+            "/assets",
+            "ns",
+            "wf-abc",
+            [],
+            mock_k8s,
+            mock_v1,
+        )
+
+    return handler_states, js_to_handler, mock_k8s
+
+
+class TestHandlerDispatchGating:
+    def test_on_success_fires_on_succeeded(self):
+        handlers = {"a": [_handler_entry(when="on_success")]}
+        handler_states: dict[str, str] = {}
+        states, js_to_handler, mock_k8s = _call_submit_handlers("a", {"a": "SUCCEEDED"}, handlers, handler_states)
+        assert states["a-eh-notify"] == "SUBMITTED"
+        assert js_to_handler == {"a-eh-notify-js": "a-eh-notify"}
+        mock_k8s.create_namespaced_custom_object.assert_called_once()
+
+    def test_on_success_does_not_fire_on_failed(self):
+        handlers = {"a": [_handler_entry(when="on_success")]}
+        handler_states: dict[str, str] = {}
+        states, _, mock_k8s = _call_submit_handlers("a", {"a": "FAILED"}, handlers, handler_states)
+        assert states["a-eh-notify"] == "SKIPPED"
+        mock_k8s.create_namespaced_custom_object.assert_not_called()
+
+    def test_on_failure_fires_on_failed_not_succeeded(self):
+        handlers = {"a": [_handler_entry(when="on_failure")]}
+
+        failed_states, _, failed_k8s = _call_submit_handlers("a", {"a": "FAILED"}, handlers, {})
+        assert failed_states["a-eh-notify"] == "SUBMITTED"
+        failed_k8s.create_namespaced_custom_object.assert_called_once()
+
+        succeeded_states, _, succeeded_k8s = _call_submit_handlers("a", {"a": "SUCCEEDED"}, handlers, {})
+        assert succeeded_states["a-eh-notify"] == "SKIPPED"
+        succeeded_k8s.create_namespaced_custom_object.assert_not_called()
+
+    def test_always_fires_on_both_success_and_failure(self):
+        handlers = {"a": [_handler_entry(when="always")]}
+
+        succeeded_states, _, _ = _call_submit_handlers("a", {"a": "SUCCEEDED"}, handlers, {})
+        assert succeeded_states["a-eh-notify"] == "SUBMITTED"
+
+        failed_states, _, _ = _call_submit_handlers("a", {"a": "FAILED"}, handlers, {})
+        assert failed_states["a-eh-notify"] == "SUBMITTED"
+
+    def test_cancelled_skips_all_handlers_regardless_of_when(self):
+        handlers = {
+            "a": [
+                _handler_entry(name="always-h", when="always"),
+                _handler_entry(name="success-h", when="on_success"),
+                _handler_entry(name="failure-h", when="on_failure"),
+            ]
+        }
+        states, _, mock_k8s = _call_submit_handlers("a", {"a": "CANCELLED"}, handlers, {})
+        assert states["a-eh-always-h"] == "SKIPPED"
+        assert states["a-eh-success-h"] == "SKIPPED"
+        assert states["a-eh-failure-h"] == "SKIPPED"
+        mock_k8s.create_namespaced_custom_object.assert_not_called()
+
+    def test_on_exit_codes_fires_when_exit_code_matches(self):
+        handlers = {"a": [_handler_entry(when="always", on_exit_codes=[42])]}
+        pods = [_make_pod("a-0", exit_code=42, reason="Error")]
+        states, _, mock_k8s = _call_submit_handlers("a", {"a": "FAILED"}, handlers, {}, pods=pods)
+        assert states["a-eh-notify"] == "SUBMITTED"
+        mock_k8s.create_namespaced_custom_object.assert_called_once()
+
+    def test_on_exit_codes_skips_when_exit_code_does_not_match(self):
+        handlers = {"a": [_handler_entry(when="always", on_exit_codes=[42])]}
+        pods = [_make_pod("a-0", exit_code=1, reason="Error")]
+        states, _, mock_k8s = _call_submit_handlers("a", {"a": "FAILED"}, handlers, {}, pods=pods)
+        assert states["a-eh-notify"] == "SKIPPED"
+        mock_k8s.create_namespaced_custom_object.assert_not_called()
+
+    def test_no_handlers_for_step_is_a_noop(self):
+        states, js_to_handler, mock_k8s = _call_submit_handlers("a", {"a": "SUCCEEDED"}, {}, {})
+        assert states == {}
+        assert js_to_handler == {}
+        mock_k8s.create_namespaced_custom_object.assert_not_called()
+
+    def test_already_terminal_handler_state_is_not_resubmitted(self):
+        handlers = {"a": [_handler_entry(when="always")]}
+        handler_states = {"a-eh-notify": "SUCCEEDED"}
+        states, _, mock_k8s = _call_submit_handlers("a", {"a": "SUCCEEDED"}, handlers, handler_states)
+        assert states["a-eh-notify"] == "SUCCEEDED"
+        mock_k8s.create_namespaced_custom_object.assert_not_called()
+
+    def test_409_on_submit_marks_submitted_without_crashing(self):
+        """Pre-seeded PENDING + a JobSet that already exists (prior partial submit):
+        the 409 guard treats it as already running, same as _submit_ready_steps."""
+        handlers = {"a": [_handler_entry(when="always")]}
+        states, js_to_handler, mock_k8s = _call_submit_handlers(
+            "a", {"a": "SUCCEEDED"}, handlers, {}, existing_jobsets=["a-eh-notify-js"]
+        )
+        assert states["a-eh-notify"] == "SUBMITTED"
+        assert js_to_handler == {"a-eh-notify-js": "a-eh-notify"}
+
+    def test_missing_exit_info_degrades_gracefully_but_still_submits(self):
+        """on_exit_codes is None -> the env-var mechanism is primary; a handler
+        with no gate still fires even though _read_step_exit_info returns the
+        all-empty default (e.g. pods already GC'd)."""
+        handlers = {"a": [_handler_entry(when="on_failure")]}
+        states, _, mock_k8s = _call_submit_handlers("a", {"a": "FAILED"}, handlers, {}, pods=[])
+        assert states["a-eh-notify"] == "SUBMITTED"
+        body = mock_k8s.create_namespaced_custom_object.call_args.kwargs["body"]
+        containers = body["spec"]["replicatedJobs"][0]["template"]["spec"]["template"]["spec"]["containers"]
+        main = next(c for c in containers if c["name"] == "main")
+        env_by_name = {e["name"]: e["value"] for e in main["env"]}
+        assert env_by_name["SEEKR_CHAIN_PARENT_EXIT_CODE"] == ""
+        assert env_by_name["SEEKR_CHAIN_PARENT_FAILURE_REASON"] == ""
+
+
+class TestHandlerDispatchIntegration:
+    """End-to-end via controller.main() with a mocked watch stream."""
+
+    def test_diamond_dag_handler_failure_does_not_cascade(self):
+        """a -> b; a has an 'always' handler that itself fails. b must still run
+        and the run must not be affected by the handler's failure."""
+        dag = [
+            {"name": "a", "depends_on": []},
+            {"name": "b", "depends_on": ["a"]},
+        ]
+        handlers = {"a": [_handler_entry(when="always")]}
+        events = [
+            [
+                _make_event("a-js", "Completed", rv="2"),
+                _make_event("a-eh-notify-js", "Failed", rv="3"),
+                _make_event("b-js", "Completed", rv="4"),
+            ],
+        ]
+
+        result, mock_k8s, snapshots, mock_emit_event = _run_main(dag, events, handlers=handlers, return_extra=True)
+
+        assert result == 0
+        assert snapshots[-1]["a-eh-notify"] == "FAILED"
+
+        submitted = [
+            call.kwargs["body"]["metadata"]["name"] for call in mock_k8s.create_namespaced_custom_object.call_args_list
+        ]
+        assert "b-js" in submitted  # downstream step still ran
+
+        reasons = [call.args[4] for call in mock_emit_event.call_args_list]
+        assert "WorkflowFailed" not in reasons
+        assert "HandlerFailed" in reasons
+
+    def test_env_injection_from_mocked_pod_status_reaches_handler_pod(self):
+        dag = [{"name": "a", "depends_on": []}]
+        handlers = {"a": [_handler_entry(when="on_failure")]}
+        events = [
+            [_make_event("a-js", "Failed", rv="2")],
+            [_make_event("a-eh-notify-js", "Completed", rv="3")],
+        ]
+        pods_by_step = {"a": [_make_pod("a-0", exit_code=137, reason="OOMKilled", message="killed: OOM")]}
+
+        result, mock_k8s, snapshots, _ = _run_main(
+            dag, events, handlers=handlers, pods_by_step=pods_by_step, return_extra=True
+        )
+
+        assert result == 0
+        assert snapshots[-1]["a-eh-notify"] == "SUCCEEDED"
+
+        handler_call = next(
+            call
+            for call in mock_k8s.create_namespaced_custom_object.call_args_list
+            if call.kwargs["body"]["metadata"]["name"] == "a-eh-notify-js"
+        )
+        containers = handler_call.kwargs["body"]["spec"]["replicatedJobs"][0]["template"]["spec"]["template"]["spec"][
+            "containers"
+        ]
+        main = next(c for c in containers if c["name"] == "main")
+        env_by_name = {e["name"]: e["value"] for e in main["env"]}
+        assert env_by_name["SEEKR_CHAIN_PARENT_EXIT_CODE"] == "137"
+        assert env_by_name["SEEKR_CHAIN_PARENT_OOM_KILLED"] == "true"
+        assert env_by_name["SEEKR_CHAIN_PARENT_FAILURE_MESSAGE"] == "killed: OOM"
+
+    def test_controller_does_not_settle_until_handler_terminates(self):
+        """First watch stream delivers only the step's completion; the handler
+        JobSet's own terminal event arrives on the reconnect. main() must not
+        return until that second event lands."""
+        dag = [{"name": "a", "depends_on": []}]
+        handlers = {"a": [_handler_entry(when="always")]}
+        events = [
+            [_make_event("a-js", "Completed", rv="2")],
+            [_make_event("a-eh-notify-js", "Completed", rv="3")],
+        ]
+
+        result, _, snapshots, _ = _run_main(dag, events, handlers=handlers, return_extra=True)
+
+        assert result == 0
+        assert snapshots[-1]["a-eh-notify"] == "SUCCEEDED"
+
+    def test_drain_timeout_breaks_the_wait(self):
+        """A handler is SUBMITTED but never reports a terminal watch event.
+        Once the drain timeout elapses after the step went terminal, the
+        controller must give up rather than hang forever."""
+        dag = [{"name": "a", "depends_on": []}]
+        handlers = {"a": [_handler_entry(when="always")]}
+        events = [
+            [_make_event("a-js", "Completed", rv="2")],
+            [],
+            [],
+        ]
+
+        result, _, snapshots, mock_emit_event = _run_main(
+            dag,
+            events,
+            handlers=handlers,
+            drain_timeout=10,
+            time_values=[0, 1, 2, 3, 100, 100, 100, 100, 100, 100, 100, 100],
+            return_extra=True,
+        )
+
+        assert result == 0
+        assert snapshots[-1]["a-eh-notify"] == "SUBMITTED"
+        reasons = [call.args[4] for call in mock_emit_event.call_args_list]
+        assert "HandlerDrainTimeout" in reasons
+
+    def test_restart_idempotency_pre_seeded_submitted_plus_409_no_double_injection(self):
+        """Controller restarted after a handler was already submitted: state is
+        restored as SUBMITTED (not reset to PENDING), and a redundant dispatch
+        attempt would hit 409 rather than double-injecting env or crashing."""
+        dag = [{"name": "a", "depends_on": []}]
+        handlers = {"a": [_handler_entry(when="always")]}
+        events = [[_make_event("a-eh-notify-js", "Completed", rv="2")]]
+
+        result, mock_k8s, snapshots, _ = _run_main(
+            dag,
+            events,
+            handlers=handlers,
+            initial_phases={"a": "SUCCEEDED"},
+            initial_handler_states={"a-eh-notify": "SUBMITTED"},
+            existing_jobsets=["a-eh-notify-js"],
+            return_extra=True,
+        )
+
+        assert result == 0
+        # Restored as SUBMITTED means _submit_handlers_for_step treats it as
+        # already dispatched and never calls create_namespaced_custom_object
+        # for it again.
+        assert mock_k8s.create_namespaced_custom_object.call_count == 0
+        assert snapshots[-1]["a-eh-notify"] == "SUCCEEDED"
+
+    def test_old_assets_without_handlers_json_behave_as_before(self):
+        """handlers.json missing -> _load_handlers returns {} -> no handler
+        activity at all; a plain linear DAG completes exactly as pre-feature."""
+        dag = [
+            {"name": "a", "depends_on": []},
+            {"name": "b", "depends_on": ["a"]},
+        ]
+        events = [
+            [
+                _make_event("a-js", "Completed", rv="2"),
+                _make_event("b-js", "Completed", rv="3"),
+            ],
+        ]
+
+        result, mock_k8s, snapshots, _ = _run_main(dag, events, handlers={}, return_extra=True)
+
+        assert result == 0
+        assert all(s == {} for s in snapshots)  # no handler ever entered a non-empty state
+        submitted = [
+            call.kwargs["body"]["metadata"]["name"] for call in mock_k8s.create_namespaced_custom_object.call_args_list
+        ]
+        assert submitted == ["a-js", "b-js"]

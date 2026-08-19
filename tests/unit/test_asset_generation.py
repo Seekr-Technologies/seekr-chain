@@ -4,6 +4,7 @@ These tests call the pure functions in jobset.py that generate files written
 into the assets.tar.gz bundle.  No Kubernetes or S3 access is required.
 """
 
+import importlib
 import json
 from pathlib import Path
 
@@ -16,6 +17,12 @@ from seekr_chain.backends.k8s.jobset import (
 from seekr_chain.config import WorkflowConfig
 
 _RESOURCES_DIR = Path(_jobset_mod.__file__).parent / "resources"
+
+# seekr_chain.backends.k8s.__init__ overwrites the `launch_k8s_workflow` attribute
+# on that package with the function of the same name, so import_module() (which
+# reads sys.modules directly) is needed to get the module rather than the function.
+_lkw_module = importlib.import_module("seekr_chain.backends.k8s.launch_k8s_workflow")
+_package_assets = _lkw_module._package_assets
 
 
 def _single_role_config(
@@ -288,6 +295,97 @@ class TestScriptGeneration:
         data = json.loads(peermap_path.read_text())
         assert isinstance(data, list)
         assert len(data) == 2
+
+
+def _config_with_handlers() -> WorkflowConfig:
+    return WorkflowConfig.model_validate(
+        {
+            "name": "t",
+            "steps": [
+                {
+                    "name": "train",
+                    "image": "ubuntu",
+                    "script": "echo hi",
+                    "exit_handlers": [
+                        {"name": "notify", "image": "ubuntu", "script": "echo done", "when": "always"},
+                        {
+                            "name": "alert",
+                            "image": "ubuntu",
+                            "script": "echo fail",
+                            "when": "on_failure",
+                            "on_exit_codes": [1, 2],
+                        },
+                    ],
+                },
+                {"name": "b", "image": "ubuntu", "script": "echo b", "depends_on": ["train"]},
+            ],
+        }
+    )
+
+
+class TestPackageAssetsHandlers:
+    """_package_assets renders each exit handler alongside real steps and indexes
+    them in handlers.json, while keeping them out of dag.json."""
+
+    def _run(self, config: WorkflowConfig, tmp_path: Path, monkeypatch) -> Path:
+        monkeypatch.setattr(
+            _lkw_module,
+            "create_jobset_manifest",
+            lambda **kwargs: (f"js-{kwargs['workflow_config'].steps[kwargs['step_index']].name}", "yaml: {}"),
+        )
+        monkeypatch.setattr(
+            _lkw_module,
+            "create_handler_jobset_manifest",
+            lambda **kwargs: (f"js-{kwargs['handler_plan'].pseudo_step}", "yaml: {}"),
+        )
+        monkeypatch.setattr(_lkw_module.remote_fs, "upload", lambda *a, **k: None)
+
+        staging_dir = tmp_path / "staging"
+        (staging_dir / "assets").mkdir(parents=True)
+
+        _package_assets(
+            config=config,
+            args=None,
+            job_info={"remote_assets_path": "s3://bucket/assets.tar.gz"},
+            staging_dir=staging_dir,
+            workflow_name="wf-1",
+            workflow_secrets=[],
+            interactive=False,
+        )
+        return staging_dir / "assets"
+
+    def test_handler_jobset_written_under_pseudo_step_dir(self, monkeypatch, tmp_path):
+        assets = self._run(_config_with_handlers(), tmp_path, monkeypatch)
+        assert (assets / "step=train-eh-notify" / "jobset.yaml").exists()
+        assert (assets / "step=train-eh-alert" / "jobset.yaml").exists()
+
+    def test_handlers_json_matches_expected_shape(self, monkeypatch, tmp_path):
+        assets = self._run(_config_with_handlers(), tmp_path, monkeypatch)
+        handlers = json.loads((assets / "handlers.json").read_text())
+        assert handlers == [
+            {"parent": "train", "name": "notify", "step": "train-eh-notify", "when": "always", "on_exit_codes": None},
+            {
+                "parent": "train",
+                "name": "alert",
+                "step": "train-eh-alert",
+                "when": "on_failure",
+                "on_exit_codes": [1, 2],
+            },
+        ]
+
+    def test_dag_json_has_no_handler_entries(self, monkeypatch, tmp_path):
+        assets = self._run(_config_with_handlers(), tmp_path, monkeypatch)
+        dag = json.loads((assets / "dag.json").read_text())
+        names = {entry["name"] for entry in dag}
+        assert names == {"train", "b"}
+
+    def test_no_handlers_produces_empty_handlers_json_and_unchanged_steps(self, monkeypatch, tmp_path):
+        config = WorkflowConfig.model_validate(
+            {"name": "t", "steps": [{"name": "a", "image": "ubuntu", "script": "echo"}]}
+        )
+        assets = self._run(config, tmp_path, monkeypatch)
+        assert json.loads((assets / "handlers.json").read_text()) == []
+        assert (assets / "step=a" / "jobset.yaml").exists()
 
 
 class TestChainEntrypoint:

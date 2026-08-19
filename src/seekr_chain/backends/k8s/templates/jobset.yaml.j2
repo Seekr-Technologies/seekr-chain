@@ -5,6 +5,11 @@ metadata:
   labels:
     seekr-chain/job-id: {{ job_id }}
     seekr-chain/step-name: {{ step_name }}
+    {% if handler_of %}
+    seekr-chain/handler-of: {{ handler_of }}
+    seekr-chain/handler-name: {{ handler_name }}
+    seekr-chain/handler-when: {{ handler_when }}
+    {% endif %}
     {% if labels %}
     {% for k, v in labels.items() %}
     {{ k }}: {{ v }}
@@ -71,6 +76,11 @@ spec:
               seekr-chain/role: {{ role.name }}
               seekr-chain/job-id: {{ job_id }}
               seekr-chain/step: {{ step_name }}
+              {% if handler_of %}
+              seekr-chain/handler-of: {{ handler_of }}
+              seekr-chain/handler-name: {{ handler_name }}
+              seekr-chain/handler-when: {{ handler_when }}
+              {% endif %}
               {% for group in pack_groups %}
               seekr-chain/pg.{{ group }}: "true"
               {% endfor %}
@@ -167,6 +177,7 @@ spec:
             containers:
             - name: main
               image: {{ role.image }}
+              terminationMessagePolicy: FallbackToLogsOnError
               securityContext:
                 privileged: {{ role.privileged | to_yaml_bool }}
               # Nix-mode uses the image's /bin/sh (nix-runner provides it).
