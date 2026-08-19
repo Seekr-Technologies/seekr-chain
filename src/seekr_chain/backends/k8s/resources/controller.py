@@ -36,6 +36,7 @@ import json
 import os
 import sys
 import time
+from typing import Literal
 
 import kubernetes
 import kubernetes.watch
@@ -171,6 +172,7 @@ def _default_exit_info() -> dict:
         "pod": "",
         "role": "",
         "pod_exits": [],
+        "exit_codes": [],
     }
 
 
@@ -179,10 +181,14 @@ def _read_step_exit_info(k8s_v1, namespace: str, workflow_id: str, step_name: st
 
     Picks a representative pod (prefers a nonzero exit code, then OOMKilled,
     then the latest finish time) so a handler has a single exit
-    code/reason/message to react to, while ``pod_exits`` still carries the
-    per-pod detail for multi-pod steps. Best-effort: pods may already be
-    GC'd or RBAC may briefly fail during a controller restart, so any error
-    yields the all-empty default rather than propagating into the watch loop.
+    code/reason/message to react to (used for the SEEKR_CHAIN_PARENT_EXIT_CODE
+    env var), while ``pod_exits`` still carries the per-pod detail for
+    multi-pod steps and ``exit_codes`` carries the union of every pod's exit
+    code — this is what ``on_exit_codes`` gating intersects against, so
+    distinct handlers gated on different codes can each fire independently
+    off the same multi-pod step. Best-effort: pods may already be GC'd or
+    RBAC may briefly fail during a controller restart, so any error yields
+    the all-empty default rather than propagating into the watch loop.
     """
     try:
         resp = k8s_v1.list_namespaced_pod(
@@ -232,6 +238,7 @@ def _read_step_exit_info(k8s_v1, namespace: str, workflow_id: str, step_name: st
             "pod": representative["pod"],
             "role": representative["role"],
             "pod_exits": [{k: v for k, v in p.items() if k != "finished_at"} for p in pod_exits],
+            "exit_codes": sorted({p["exit_code"] for p in pod_exits if p["exit_code"] is not None}),
         }
     except Exception:
         return _default_exit_info()
@@ -475,6 +482,91 @@ def _submit_ready_steps(
         js_to_step[js_name] = name
 
 
+def _handler_disposition(entry: dict, parent_phase: str, exit_info: dict) -> Literal["FIRE", "SKIP"]:
+    """Pure gate check: should this handler entry fire, given its parent step's
+    terminal phase and the parent's exit info?
+
+    Encodes, in order: cancelled-parent skip, ``when`` vs ``parent_phase``, and
+    the ``on_exit_codes`` gate — a handler with ``on_exit_codes`` fires iff at
+    least one of its declared codes is in ``exit_info["exit_codes"]`` (the union
+    of every pod's observed exit code), so distinct handlers gated on different
+    codes can each fire independently off the same multi-pod step.
+    """
+    if parent_phase == "CANCELLED":
+        return "SKIP"
+    allowed_when = {"SUCCEEDED": ("ON_SUCCESS", "ALWAYS"), "FAILED": ("ON_FAILURE", "ALWAYS")}.get(parent_phase, ())
+    if entry["when"] not in allowed_when:
+        return "SKIP"
+    on_exit_codes = entry.get("on_exit_codes")
+    if on_exit_codes is not None and not (set(on_exit_codes) & set(exit_info.get("exit_codes") or [])):
+        return "SKIP"
+    return "FIRE"
+
+
+def _submit_handler_jobset(
+    entry: dict,
+    step_name: str,
+    parent_jobset: str,
+    parent_phase: str,
+    exit_info: dict,
+    assets_path: str,
+    namespace: str,
+    owner_ref: list[dict],
+    k8s_custom,
+    handler_states: dict[str, str],
+    js_to_handler: dict[str, str],
+) -> None:
+    """Submit one handler's JobSet manifest (env-injected with parent exit info)
+    and triage the create call's outcome. Updates handler_states/js_to_handler
+    in place; leaves handler_states untouched (still PENDING) on a retriable
+    error so the next dispatch pass retries it.
+    """
+    pseudo = entry["step"]
+    manifest = _load_manifest(assets_path, pseudo)
+    manifest.setdefault("metadata", {})["ownerReferences"] = owner_ref
+    env_entries = _handler_env(entry, step_name, parent_jobset, parent_phase, exit_info)
+    _inject_handler_env(manifest, env_entries)
+    js_name = _manifest_name(manifest)
+
+    try:
+        k8s_custom.create_namespaced_custom_object(
+            group="jobset.x-k8s.io",
+            version="v1alpha2",
+            plural="jobsets",
+            namespace=namespace,
+            body=manifest,
+        )
+        print(
+            f"[controller] submitted handler={entry['name']!r} step={entry['step']!r} jobset={js_name!r}",
+            flush=True,
+        )
+    except kubernetes.client.exceptions.ApiException as e:
+        if e.status == 409:
+            # JobSet already exists — controller restarted after a crash,
+            # or a prior iteration submitted it. Treat as already running.
+            print(
+                f"[controller] handler={entry['name']!r} jobset={js_name!r} already exists, resuming",
+                flush=True,
+            )
+        elif e.status == 429 or e.status >= 500:
+            print(
+                f"[controller] warning: retriable submit error for handler={entry['name']!r} jobset={js_name!r}: {e}, will retry",
+                flush=True,
+            )
+            return  # leave PENDING for the next dispatch attempt
+        else:
+            print(
+                f"[controller] error: permanent submit error for handler={entry['name']!r} jobset={js_name!r}: {e}, marking FAILED",
+                file=sys.stderr,
+                flush=True,
+            )
+            handler_states[entry["step"]] = "FAILED"
+            return
+
+    handler_states[entry["step"]] = "SUBMITTED"
+    js_to_handler[js_name] = pseudo
+
+
 def _submit_handlers_for_step(
     step_name: str,
     phases: dict[str, str],
@@ -491,9 +583,10 @@ def _submit_handlers_for_step(
 ) -> None:
     """Dispatch any still-PENDING exit handlers of a step that has gone terminal.
 
-    Gates on ``when`` vs the step's terminal phase, then on ``on_exit_codes`` if
-    the handler declares one (reading the parent's exit info at most once per
-    call). Updates handler_states and js_to_handler in place. Never touches
+    For each pending handler, decides FIRE/SKIP via :func:`_handler_disposition`
+    and either submits it (:func:`_submit_handler_jobset`) or marks it SKIPPED.
+    The parent's exit info is read at most once per call (only when a pending
+    handler actually needs it — a code gate check, or a fire). Never touches
     ``phases`` or calls ``_cascade_fail`` — a handler's outcome is invisible to
     the DAG by construction.
     """
@@ -506,20 +599,7 @@ def _submit_handlers_for_step(
     if not pending:
         return
 
-    if parent_phase == "CANCELLED":
-        for entry in pending:
-            handler_states[entry["step"]] = "SKIPPED"
-            print(
-                f"[controller] handler={entry['name']!r} step={entry['step']!r} SKIPPED (parent cancelled)",
-                flush=True,
-            )
-        return
-
-    if parent_phase == "SUCCEEDED":
-        allowed_when = ("on_success", "always")
-    elif parent_phase == "FAILED":
-        allowed_when = ("on_failure", "always")
-    else:
+    if parent_phase not in ("SUCCEEDED", "FAILED", "CANCELLED"):
         # Parent not yet terminal (shouldn't normally be reached — callers only
         # invoke this for terminal steps) — nothing to dispatch yet.
         return
@@ -528,6 +608,15 @@ def _submit_handlers_for_step(
     exit_info = None
 
     for entry in pending:
+        if parent_phase == "CANCELLED":
+            handler_states[entry["step"]] = "SKIPPED"
+            print(
+                f"[controller] handler={entry['name']!r} step={entry['step']!r} SKIPPED (parent cancelled)",
+                flush=True,
+            )
+            continue
+
+        allowed_when = {"SUCCEEDED": ("ON_SUCCESS", "ALWAYS"), "FAILED": ("ON_FAILURE", "ALWAYS")}[parent_phase]
         if entry["when"] not in allowed_when:
             handler_states[entry["step"]] = "SKIPPED"
             print(
@@ -537,12 +626,14 @@ def _submit_handlers_for_step(
             continue
 
         on_exit_codes = entry.get("on_exit_codes")
-        if exit_info is None and (on_exit_codes is not None):
+        if exit_info is None and on_exit_codes is not None:
             exit_info = _read_step_exit_info(k8s_v1, namespace, workflow_id, step_name)
-        if on_exit_codes is not None and exit_info.get("exit_code") not in on_exit_codes:
+
+        if _handler_disposition(entry, parent_phase, exit_info or _default_exit_info()) == "SKIP":
             handler_states[entry["step"]] = "SKIPPED"
             print(
-                f"[controller] handler={entry['name']!r} step={entry['step']!r} SKIPPED (exit_code={exit_info.get('exit_code')!r} not in {on_exit_codes})",
+                f"[controller] handler={entry['name']!r} step={entry['step']!r} SKIPPED "
+                f"(exit_codes={(exit_info or {}).get('exit_codes')} not intersecting on_exit_codes={on_exit_codes})",
                 flush=True,
             )
             continue
@@ -550,50 +641,19 @@ def _submit_handlers_for_step(
         if exit_info is None:
             exit_info = _read_step_exit_info(k8s_v1, namespace, workflow_id, step_name)
 
-        pseudo = entry["step"]
-        manifest = _load_manifest(assets_path, pseudo)
-        manifest.setdefault("metadata", {})["ownerReferences"] = owner_ref
-        env_entries = _handler_env(entry, step_name, parent_jobset, parent_phase, exit_info)
-        _inject_handler_env(manifest, env_entries)
-        js_name = _manifest_name(manifest)
-
-        try:
-            k8s_custom.create_namespaced_custom_object(
-                group="jobset.x-k8s.io",
-                version="v1alpha2",
-                plural="jobsets",
-                namespace=namespace,
-                body=manifest,
-            )
-            print(
-                f"[controller] submitted handler={entry['name']!r} step={entry['step']!r} jobset={js_name!r}",
-                flush=True,
-            )
-        except kubernetes.client.exceptions.ApiException as e:
-            if e.status == 409:
-                # JobSet already exists — controller restarted after a crash,
-                # or a prior iteration submitted it. Treat as already running.
-                print(
-                    f"[controller] handler={entry['name']!r} jobset={js_name!r} already exists, resuming",
-                    flush=True,
-                )
-            elif e.status == 429 or e.status >= 500:
-                print(
-                    f"[controller] warning: retriable submit error for handler={entry['name']!r} jobset={js_name!r}: {e}, will retry",
-                    flush=True,
-                )
-                continue  # leave PENDING for the next dispatch attempt
-            else:
-                print(
-                    f"[controller] error: permanent submit error for handler={entry['name']!r} jobset={js_name!r}: {e}, marking FAILED",
-                    file=sys.stderr,
-                    flush=True,
-                )
-                handler_states[entry["step"]] = "FAILED"
-                continue
-
-        handler_states[entry["step"]] = "SUBMITTED"
-        js_to_handler[js_name] = pseudo
+        _submit_handler_jobset(
+            entry,
+            step_name,
+            parent_jobset,
+            parent_phase,
+            exit_info,
+            assets_path,
+            namespace,
+            owner_ref,
+            k8s_custom,
+            handler_states,
+            js_to_handler,
+        )
 
 
 def _dispatch_handlers_for_terminal_steps(
@@ -654,6 +714,44 @@ def _restore_submitted_handler_jobsets(
             if handler_states.get(entry["step"]) == "SUBMITTED":
                 manifest = _load_manifest(assets_path, entry["step"])
                 js_to_handler[_manifest_name(manifest)] = entry["step"]
+
+
+def _handle_handler_jobset_event(
+    handler_step: str,
+    terminal: str | None,
+    suspended: bool,
+    handler_states: dict[str, str],
+    k8s_v1,
+    namespace: str,
+    workflow_id: str,
+    job_uid: str,
+) -> None:
+    """Apply a watch event already known to belong to a handler pseudo-step:
+    update handler_states, log, emit a Kubernetes Event, and persist. No-op if
+    the handler already reached a terminal state (duplicate event) or the
+    event isn't itself a terminal transition.
+    """
+    if handler_states.get(handler_step) in _TERMINAL_PHASES:
+        return
+    if terminal == "Completed":
+        handler_states[handler_step] = "SUCCEEDED"
+        print(f"[controller] handler={handler_step!r} SUCCEEDED", flush=True)
+        _emit_event(
+            k8s_v1, namespace, workflow_id, job_uid, "HandlerSucceeded", f"Handler {handler_step!r} completed successfully"
+        )
+    elif terminal == "Failed":
+        handler_states[handler_step] = "FAILED"
+        print(f"[controller] handler={handler_step!r} FAILED", flush=True)
+        _emit_event(
+            k8s_v1, namespace, workflow_id, job_uid, "HandlerFailed", f"Handler {handler_step!r} failed", event_type="Warning"
+        )
+    elif suspended:
+        handler_states[handler_step] = "CANCELLED"
+        print(f"[controller] handler={handler_step!r} CANCELLED", flush=True)
+        _emit_event(k8s_v1, namespace, workflow_id, job_uid, "HandlerCancelled", f"Handler {handler_step!r} was cancelled")
+    else:
+        return
+    _save_handler_states(k8s_v1, namespace, workflow_id, handler_states)
 
 
 def main() -> int:
@@ -842,45 +940,9 @@ def main() -> int:
                     # reaches js_to_step / _cascade_fail / phases below.
                     handler_step = js_to_handler.get(js_name)
                     if handler_step is not None:
-                        if handler_states.get(handler_step) in _TERMINAL_PHASES:
-                            continue
-                        if terminal == "Completed":
-                            handler_states[handler_step] = "SUCCEEDED"
-                            print(f"[controller] handler={handler_step!r} SUCCEEDED", flush=True)
-                            _emit_event(
-                                k8s_v1,
-                                namespace,
-                                workflow_id,
-                                job_uid,
-                                "HandlerSucceeded",
-                                f"Handler {handler_step!r} completed successfully",
-                            )
-                        elif terminal == "Failed":
-                            handler_states[handler_step] = "FAILED"
-                            print(f"[controller] handler={handler_step!r} FAILED", flush=True)
-                            _emit_event(
-                                k8s_v1,
-                                namespace,
-                                workflow_id,
-                                job_uid,
-                                "HandlerFailed",
-                                f"Handler {handler_step!r} failed",
-                                event_type="Warning",
-                            )
-                        elif suspended:
-                            handler_states[handler_step] = "CANCELLED"
-                            print(f"[controller] handler={handler_step!r} CANCELLED", flush=True)
-                            _emit_event(
-                                k8s_v1,
-                                namespace,
-                                workflow_id,
-                                job_uid,
-                                "HandlerCancelled",
-                                f"Handler {handler_step!r} was cancelled",
-                            )
-                        else:
-                            continue
-                        _save_handler_states(k8s_v1, namespace, workflow_id, handler_states)
+                        _handle_handler_jobset_event(
+                            handler_step, terminal, suspended, handler_states, k8s_v1, namespace, workflow_id, job_uid
+                        )
                         continue
 
                     step_name = js_to_step.get(js_name)
