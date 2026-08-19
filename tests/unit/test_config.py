@@ -148,34 +148,42 @@ class TestArtifactTtl:
         assert config.artifact_ttl == datetime.timedelta(days=30)
 
 
-def _minimal_handler(name, **overrides):
+def _minimal_run(name, **overrides):
     return {"name": name, "image": "ubuntu:24.04", "script": "echo handler", **overrides}
+
+
+def _minimal_handler(name, run_overrides=None, **overrides):
+    return {"run": _minimal_run(name, **(run_overrides or {})), **overrides}
 
 
 class TestExitHandlerConfig:
     def test_default_when_is_always(self):
         handler = ExitHandlerConfig(**_minimal_handler("h"))
-        assert handler.when == "always"
+        assert handler.when == "ALWAYS"
 
-    @pytest.mark.parametrize("when", ["on_success", "on_failure", "always"])
+    @pytest.mark.parametrize("when", ["ON_SUCCESS", "ON_FAILURE", "ALWAYS"])
     def test_explicit_when_accepted(self, when):
         handler = ExitHandlerConfig(**_minimal_handler("h", when=when))
         assert handler.when == when
 
-    def test_nix_mode_handler_rejected(self):
-        with pytest.raises(ValidationError, match="nix closures are not resolved for handlers"):
-            ExitHandlerConfig(name="h", nix={}, script="echo hi")
+    def test_lowercase_when_rejected(self):
+        with pytest.raises(ValidationError, match="Input should be"):
+            ExitHandlerConfig(**_minimal_handler("h", when="on_success"))
+
+    def test_nix_mode_handler_accepted(self):
+        handler = ExitHandlerConfig(run={"name": "h", "nix": {}, "script": "echo hi"})
+        assert handler.run.nix is not None
 
     def test_multi_node_handler_rejected(self):
-        with pytest.raises(ValidationError, match="`resources.num_nodes` must be 1"):
-            ExitHandlerConfig(**_minimal_handler("h", resources={"num_nodes": 2}))
+        with pytest.raises(ValidationError, match="Input should be 1"):
+            ExitHandlerConfig(**_minimal_handler("h", run_overrides={"resources": {"num_nodes": 2}}))
 
     def test_depends_on_handler_rejected(self):
         with pytest.raises(ValidationError, match="`depends_on` is not supported for handlers"):
-            ExitHandlerConfig(**_minimal_handler("h", depends_on=["other"]))
+            ExitHandlerConfig(**_minimal_handler("h", run_overrides={"depends_on": ["other"]}))
 
     def test_on_exit_codes_out_of_range_rejected(self):
-        with pytest.raises(ValidationError, match="`on_exit_codes` must all be in 0..255"):
+        with pytest.raises(ValidationError, match="less than or equal to 255"):
             ExitHandlerConfig(**_minimal_handler("h", on_exit_codes=[256]))
 
     def test_on_exit_codes_valid_accepted(self):
@@ -194,7 +202,7 @@ class TestExitHandlersOnStep:
                 },
             ],
         )
-        assert config.steps[0].exit_handlers[0].name == "notify"
+        assert config.steps[0].exit_handlers[0].run.name == "notify"
 
     def test_per_role_exit_handlers_on_multi_role_step_rejected(self):
         with pytest.raises(ValidationError, match="Extra inputs are not permitted"):
@@ -204,7 +212,7 @@ class TestExitHandlersOnStep:
                     {
                         "name": "multi",
                         "roles": [
-                            {**_minimal_handler("r1"), "exit_handlers": [_minimal_handler("notify")]},
+                            {**_minimal_run("r1"), "exit_handlers": [_minimal_handler("notify")]},
                         ],
                     },
                 ],
@@ -236,3 +244,36 @@ class TestExitHandlersOnStep:
 class TestHandlerStepName:
     def test_returns_step_eh_handler(self):
         assert handler_step_name("train", "notify") == "train-eh-notify"
+
+
+class TestExitHandlerYamlRoundTrip:
+    def test_nested_run_yaml_parses(self):
+        import yaml
+
+        raw = yaml.safe_load(
+            """
+            name: test
+            steps:
+              - name: train
+                image: ubuntu:24.04
+                script: echo hi
+                exit_handlers:
+                  - when: ON_FAILURE
+                    on_exit_codes: [137]
+                    run:
+                      name: notify
+                      image: alpine
+                      script: |
+                        ./notify.sh
+                      resources:
+                        cpus_per_node: "500m"
+            """
+        )
+        config = WorkflowConfig.model_validate(raw)
+        handler = config.steps[0].exit_handlers[0]
+        assert handler.when == "ON_FAILURE"
+        assert handler.on_exit_codes == [137]
+        assert handler.run.name == "notify"
+        assert handler.run.image == "alpine"
+        assert handler.run.resources.cpus_per_node == "500m"
+        assert handler.run.resources.num_nodes == 1

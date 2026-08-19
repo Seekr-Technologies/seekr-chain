@@ -581,8 +581,9 @@ class TestHandlerJobsetRendering:
     """Exit handlers render through the same template as a real step, as a
     synthetic single-role step named after the pseudo step."""
 
-    def _config_with_handler(self, **handler_kwargs):
-        handler = {"name": "notify", "image": "curl:latest", "script": "echo notify", **handler_kwargs}
+    def _config_with_handler(self, run_kwargs=None, **handler_kwargs):
+        run = {"name": "notify", "image": "curl:latest", "script": "echo notify", **(run_kwargs or {})}
+        handler = {"run": run, **handler_kwargs}
         return _minimal_config(
             steps=[
                 {
@@ -615,18 +616,18 @@ class TestHandlerJobsetRendering:
         return js_name, yaml.safe_load(rendered)
 
     def test_handler_labels(self, tmp_path):
-        config = self._config_with_handler(when="on_failure")
+        config = self._config_with_handler(when="ON_FAILURE")
         js_name, manifest = self._render_handler(config, tmp_path)
 
         js_labels = manifest["metadata"]["labels"]
         assert js_labels["seekr-chain/handler-of"] == "train"
         assert js_labels["seekr-chain/handler-name"] == "notify"
-        assert js_labels["seekr-chain/handler-when"] == "on_failure"
+        assert js_labels["seekr-chain/handler-when"] == "ON_FAILURE"
 
         pod_labels = manifest["spec"]["replicatedJobs"][0]["template"]["spec"]["template"]["metadata"]["labels"]
         assert pod_labels["seekr-chain/handler-of"] == "train"
         assert pod_labels["seekr-chain/handler-name"] == "notify"
-        assert pod_labels["seekr-chain/handler-when"] == "on_failure"
+        assert pod_labels["seekr-chain/handler-when"] == "ON_FAILURE"
 
     def test_handler_step_label_uses_pseudo_name(self, tmp_path):
         """seekr-chain/step must stay the pseudo name so controller._load_manifest()
@@ -676,18 +677,22 @@ class TestHandlerJobsetRendering:
 
         pod_spec = manifest["spec"]["replicatedJobs"][0]["template"]["spec"]["template"]["spec"]
         main_container = next(c for c in pod_spec["containers"] if c["name"] == "main")
+        # HandlerResourceConfig only pins num_nodes=1; everything else falls
+        # back to ResourceConfig's own defaults (no more handler-specific defaults).
         assert main_container["resources"]["requests"] == {
-            "cpu": "500m",
-            "memory": "512Mi",
-            "ephemeral-storage": "10G",
+            "cpu": 4,
+            "memory": "32G",
+            "ephemeral-storage": "100G",
         }
 
     def test_handler_overridden_resources(self, tmp_path):
         config = self._config_with_handler(
-            resources={
-                "cpus_per_node": "2",
-                "mem_per_node": "1Gi",
-                "ephemeral_storage_per_node": "5Gi",
+            run_kwargs={
+                "resources": {
+                    "cpus_per_node": "2",
+                    "mem_per_node": "1Gi",
+                    "ephemeral_storage_per_node": "5Gi",
+                }
             }
         )
         _, manifest = self._render_handler(config, tmp_path)
@@ -699,6 +704,26 @@ class TestHandlerJobsetRendering:
             "memory": "1Gi",
             "ephemeral-storage": "5Gi",
         }
+
+    def test_handler_nix_mode_renders_like_a_nix_role(self, tmp_path, monkeypatch):
+        """A nix-mode handler's run reuses the same nix render path as a role —
+        image is swapped for the nix-runner image and the chain-nix-init init
+        container is injected."""
+        # Same pattern as TestResolveNixRole in test_nix_role.py: stub the real
+        # nix eval/presence checks rather than the higher-level resolver, so we
+        # exercise the actual render path a nix-mode role would go through.
+        monkeypatch.setattr("seekr_chain.nix_utils.eval_closure_path", lambda *_a, **_k: "/nix/store/abc-closure")
+        monkeypatch.setattr("seekr_chain.nix_utils.closure_exists", lambda *_a, **_k: True)
+
+        config = self._config_with_handler(
+            run_kwargs={"image": None, "nix": {"expression": "./", "store": "s3://bucket"}}
+        )
+        _, manifest = self._render_handler(config, tmp_path)
+
+        pod_spec = manifest["spec"]["replicatedJobs"][0]["template"]["spec"]["template"]["spec"]
+        main_container = next(c for c in pod_spec["containers"] if c["name"] == "main")
+        assert main_container["image"] != "curl:latest"
+        assert any(c["name"] == "chain-nix-init" for c in pod_spec["initContainers"])
 
 
 class TestPlanHandlers:
@@ -715,8 +740,14 @@ class TestPlanHandlers:
                         "ephemeral_storage_per_node": "10Gi",
                     },
                     "exit_handlers": [
-                        {"name": "notify", "image": "curl:latest", "script": "echo a", "when": "on_failure"},
-                        {"name": "cleanup", "image": "curl:latest", "script": "echo b", "when": "always"},
+                        {
+                            "run": {"name": "notify", "image": "curl:latest", "script": "echo a"},
+                            "when": "ON_FAILURE",
+                        },
+                        {
+                            "run": {"name": "cleanup", "image": "curl:latest", "script": "echo b"},
+                            "when": "ALWAYS",
+                        },
                     ],
                 },
                 {
@@ -729,7 +760,10 @@ class TestPlanHandlers:
                         "ephemeral_storage_per_node": "10Gi",
                     },
                     "exit_handlers": [
-                        {"name": "report", "image": "curl:latest", "script": "echo c", "when": "on_success"},
+                        {
+                            "run": {"name": "report", "image": "curl:latest", "script": "echo c"},
+                            "when": "ON_SUCCESS",
+                        },
                     ],
                 },
             ]
@@ -744,7 +778,7 @@ class TestPlanHandlers:
         ]
         assert all(isinstance(p, HandlerPlan) for p in plans)
         assert isinstance(plans[0].handler, ExitHandlerConfig)
-        assert plans[0].handler.name == "notify"
+        assert plans[0].handler.run.name == "notify"
 
     def test_plan_handlers_empty_for_config_without_handlers(self):
         config = _minimal_config()
