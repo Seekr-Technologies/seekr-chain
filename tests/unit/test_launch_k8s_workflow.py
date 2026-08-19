@@ -143,6 +143,8 @@ class TestCodeStaging:
         monkeypatch.setattr(lkw_module, "_user_config", UserConfig())
         monkeypatch.setattr(lkw_module, "_package_assets", lambda **k: None)
         monkeypatch.setattr(lkw_module, "_create_secrets", lambda *a, **k: None)
+        monkeypatch.setattr(lkw_module.ttl, "write_ttl_marker", lambda *a, **k: None)
+        monkeypatch.setattr(lkw_module.ttl, "sweep_expired", lambda *a, **k: 0)
         monkeypatch.setattr(lkw_module, "_build_controller_jobset", lambda **k: {})
         # Direct __dict__ write, not monkeypatch.setattr: setattr's internal
         # getattr(target, name) to snapshot the old value would trigger the
