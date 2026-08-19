@@ -344,3 +344,154 @@ printf 'SEEKR_CHAIN_ARGS=%s\\n' "$SEEKR_CHAIN_ARGS"
         )
         launch_local_workflow(config)
         assert out.read_text().strip() == str(tmp_path)
+
+
+class TestExitHandlers:
+    def _config_with_handler(self, step_script, marker, when="ALWAYS", on_exit_codes=None):
+        handler = {
+            "when": when,
+            "run": {"name": "h", "image": "ubuntu:24.04", "script": f"touch {marker}"},
+        }
+        if on_exit_codes is not None:
+            handler["on_exit_codes"] = on_exit_codes
+        return WorkflowConfig.model_validate(
+            {
+                "name": "test",
+                "steps": [
+                    {
+                        "name": "s",
+                        "image": "ubuntu:24.04",
+                        "script": step_script,
+                        "exit_handlers": [handler],
+                    }
+                ],
+            }
+        )
+
+    def test_on_success_fires_on_success_not_on_failure(self, tmp_path):
+        marker = tmp_path / "ran.txt"
+        succeeded = self._config_with_handler("exit 0", marker, when="ON_SUCCESS")
+        launch_local_workflow(succeeded)
+        assert marker.exists()
+
+        marker.unlink()
+        failed = self._config_with_handler("exit 1", marker, when="ON_SUCCESS")
+        launch_local_workflow(failed)
+        assert not marker.exists()
+
+    def test_on_failure_fires_on_failure_not_on_success(self, tmp_path):
+        marker = tmp_path / "ran.txt"
+        failed = self._config_with_handler("exit 1", marker, when="ON_FAILURE")
+        launch_local_workflow(failed)
+        assert marker.exists()
+
+        marker.unlink()
+        succeeded = self._config_with_handler("exit 0", marker, when="ON_FAILURE")
+        launch_local_workflow(succeeded)
+        assert not marker.exists()
+
+    def test_always_fires_regardless_of_outcome(self, tmp_path):
+        marker = tmp_path / "ran.txt"
+        launch_local_workflow(self._config_with_handler("exit 1", marker, when="ALWAYS"))
+        assert marker.exists()
+
+        marker.unlink()
+        launch_local_workflow(self._config_with_handler("exit 0", marker, when="ALWAYS"))
+        assert marker.exists()
+
+    def test_on_exit_codes_gates_on_step_exit_code(self, tmp_path):
+        marker = tmp_path / "ran.txt"
+        matching = self._config_with_handler("exit 42", marker, when="ALWAYS", on_exit_codes=[42])
+        launch_local_workflow(matching)
+        assert marker.exists()
+
+        marker.unlink()
+        non_matching = self._config_with_handler("exit 1", marker, when="ALWAYS", on_exit_codes=[42])
+        launch_local_workflow(non_matching)
+        assert not marker.exists()
+
+    def test_failing_handler_leaves_workflow_succeeded(self, tmp_path):
+        """A handler's own failure must not affect workflow success/failure."""
+        config = WorkflowConfig.model_validate(
+            {
+                "name": "test",
+                "steps": [
+                    {
+                        "name": "s",
+                        "image": "ubuntu:24.04",
+                        "script": "exit 0",
+                        "exit_handlers": [
+                            {"when": "ALWAYS", "run": {"name": "h", "image": "ubuntu:24.04", "script": "exit 1"}}
+                        ],
+                    }
+                ],
+            }
+        )
+        wf = launch_local_workflow(config)
+        assert wf.get_status() == WorkflowStatus.SUCCEEDED
+
+    def test_dependency_skipped_step_runs_no_handlers(self, tmp_path):
+        marker = tmp_path / "ran.txt"
+        config = WorkflowConfig.model_validate(
+            {
+                "name": "test",
+                "steps": [
+                    {"name": "a", "image": "ubuntu:24.04", "script": "exit 1"},
+                    {
+                        "name": "b",
+                        "image": "ubuntu:24.04",
+                        "script": "exit 0",
+                        "depends_on": ["a"],
+                        "exit_handlers": [
+                            {
+                                "when": "ALWAYS",
+                                "run": {"name": "h", "image": "ubuntu:24.04", "script": f"touch {marker}"},
+                            }
+                        ],
+                    },
+                ],
+            }
+        )
+        wf = launch_local_workflow(config)
+        assert wf.get_status() == WorkflowStatus.FAILED
+        assert not marker.exists(), "handler on a dependency-skipped step must not run"
+
+    def test_handler_env_vars_injected(self, tmp_path):
+        out = tmp_path / "env.txt"
+        config = WorkflowConfig.model_validate(
+            {
+                "name": "test",
+                "steps": [
+                    {
+                        "name": "train",
+                        "image": "ubuntu:24.04",
+                        "script": "exit 3",
+                        "exit_handlers": [
+                            {
+                                "when": "ALWAYS",
+                                "run": {
+                                    "name": "notify",
+                                    "image": "ubuntu:24.04",
+                                    "script": f"""
+{{
+printf 'NAME=%s\\n' "$SEEKR_CHAIN_HANDLER_NAME"
+printf 'WHEN=%s\\n' "$SEEKR_CHAIN_HANDLER_WHEN"
+printf 'PARENT_STEP=%s\\n' "$SEEKR_CHAIN_PARENT_STEP"
+printf 'PARENT_STATUS=%s\\n' "$SEEKR_CHAIN_PARENT_STATUS"
+printf 'PARENT_EXIT_CODE=%s\\n' "$SEEKR_CHAIN_PARENT_EXIT_CODE"
+}} > {out}
+""",
+                                },
+                            }
+                        ],
+                    }
+                ],
+            }
+        )
+        launch_local_workflow(config)
+        env = dict(line.split("=", 1) for line in out.read_text().splitlines())
+        assert env["NAME"] == "notify"
+        assert env["WHEN"] == "ALWAYS"
+        assert env["PARENT_STEP"] == "train"
+        assert env["PARENT_STATUS"] == "FAILED"
+        assert env["PARENT_EXIT_CODE"] == "3"
