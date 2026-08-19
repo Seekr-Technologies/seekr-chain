@@ -1,5 +1,7 @@
 """Tests for config validation."""
 
+import datetime
+
 import pytest
 from pydantic import ValidationError
 
@@ -103,3 +105,13 @@ class TestSecretConfig:
     def test_no_secrets_is_none(self):
         config = self._minimal_config(None)
         assert config.secrets is None
+
+
+class TestArtifactTtl:
+    def test_default_is_90_days(self):
+        config = WorkflowConfig(name="test", steps=[_minimal_step("a")])
+        assert config.artifact_ttl == datetime.timedelta(days=90)
+
+    def test_explicit_value_is_parsed(self):
+        config = WorkflowConfig(name="test", steps=[_minimal_step("a")], artifact_ttl="30d")
+        assert config.artifact_ttl == datetime.timedelta(days=30)
