@@ -237,6 +237,58 @@ phase transition. The final `main()` block (which computes `failed`/`cancelled` 
 `phases` only and always returns 0) is untouched — add one informational log/event
 listing failed handlers, but do not feed it into `WorkflowFailed`.
 
+### Never-ran steps: the `SKIPPED` phase
+
+Building handlers surfaced a latent bug in the DAG's cascade semantics. When step A
+fails, `_cascade_fail` today marks A's still-`PENDING` downstream dependent B as
+**`FAILED`** (dep FAILED → FAILED; dep CANCELLED → CANCELLED). But B *never ran* — no
+pod, no exit code. Tagging it `FAILED` conflates "ran and failed" with "never got the
+chance," and, for handlers, means B's `ON_FAILURE`/`ALWAYS` handlers would fire against
+an empty parent-failure context. The user's rule — *handlers fire only for steps that
+actually executed and reached a real terminal state* — cannot be expressed while the
+phase vocabulary can't distinguish these cases.
+
+Fix: introduce a fourth terminal phase, `SKIPPED`, giving each "did not succeed" reason
+its own name:
+
+| Phase | Meaning | Origin |
+|---|---|---|
+| `SUCCEEDED` | ran, exited 0 | JobSet `terminalState` |
+| `FAILED` | **ran** and failed | JobSet `terminalState` |
+| `CANCELLED` | **user** cancelled (`chain cancel` → JobSet suspended, no `terminalState`) | controller suspend branch |
+| `SKIPPED` | **never ran** — pre-empted by a non-succeeding upstream | `_cascade_fail` |
+
+Changes:
+
+- **`_cascade_fail`**: any `PENDING` step with a dep in `{FAILED, CANCELLED, SKIPPED}`
+  becomes **`SKIPPED`** (the two branches collapse into one). After this, `CANCELLED`
+  originates *only* from the user-cancel suspend branch — it means strictly "the step the
+  user cancelled," and its never-ran dependents are `SKIPPED` like any other pre-empted
+  step.
+- **`_TERMINAL_PHASES`** gains `SKIPPED`, so settle logic treats it as terminal and
+  `_load_phases` restores it across controller restarts for free (it restores any terminal
+  phase).
+- **`_handler_disposition`** skips when the parent phase is `CANCELLED` **or** `SKIPPED` —
+  firing only for a real `SUCCEEDED`/`FAILED`. The never-ran handler-skip then falls out
+  for free; no empty-context handler ever runs.
+
+Final workflow status is unchanged in outcome: a `SKIPPED` step always has a
+`FAILED`-or-`CANCELLED` root cause upstream, so the `failed`/`cancelled` lists computed in
+`main()` stay non-empty and the workflow still resolves `FAILED`/`CANCELLED`. The
+`WorkflowFailed` event improves as a side effect — it now lists only steps that *actually
+failed*, not their skipped descendants.
+
+**Client blast radius.** The client reads the controller's phases ConfigMap
+(`workflow_state.py`: `read_phases_configmap`, `workflow_failed`, `workflow_cancelled`),
+so per-step rendering must map a `SKIPPED` phase string to `WorkflowStatus.SKIPPED`
+(the enum member already exists; `cli.py` already colours `Skipped` dim). The
+workflow-level `workflow_failed`/`workflow_cancelled` helpers key off the FAILED/CANCELLED
+step sets and so already stop counting a `SKIPPED` step as a failure — no change needed
+there beyond the per-step mapping.
+
+This is a change to **core DAG cascade behaviour that predates exit handlers**; existing
+controller tests that assert cascade → `FAILED` must be updated to expect `SKIPPED`.
+
 ### Env vars injected into a handler pod
 
 | Name | Source |
