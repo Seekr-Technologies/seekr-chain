@@ -69,12 +69,33 @@ class HandlerRunConfig(RoleSpecConfig):
             raise ValueError(...)
         return self
 
-class ExitHandlerConfig(BaseModel):
-    when: Literal["ON_SUCCESS", "ON_FAILURE", "ALWAYS"] = "ALWAYS"
-    on_exit_codes: list[Annotated[int, Field(ge=0, le=255)]] | None = None
+class _ExitHandlerBase(BaseModel):
     run: HandlerRunConfig
+
+class OnSuccessHandler(_ExitHandlerBase):
+    when: Literal["ON_SUCCESS"] = "ON_SUCCESS"
+
+class OnFailureHandler(_ExitHandlerBase):
+    when: Literal["ON_FAILURE"] = "ON_FAILURE"
+    on_exit_codes: list[Annotated[int, Field(ge=0, le=255)]] | None = None
+
+class AlwaysHandler(_ExitHandlerBase):
+    when: Literal["ALWAYS"] = "ALWAYS"
+
+ExitHandlerConfig = Annotated[
+    OnSuccessHandler | OnFailureHandler | AlwaysHandler,
+    Field(discriminator="when"),
+]
 ```
 
+The trigger is a **discriminated (tagged) union** on `when`, not a flat enum + optional
+field. This makes the "`on_exit_codes` only applies to `ON_FAILURE`" rule *structural*:
+`on_exit_codes` exists only on `OnFailureHandler`, so `when: ON_SUCCESS` (or `ALWAYS`)
+paired with `on_exit_codes` is a **parse error** (`extra="forbid"`), not a combo a
+validator has to reject after the fact. It is also the clean extension point for future
+trigger variants (e.g. a running-trigger) — add a member, no breaking change — without
+committing to an expression grammar now. The one ergonomic consequence: `when` is
+**required per handler entry** in YAML (a member default cannot disambiguate the union).
 `when` is uppercase everywhere (matches the step-phase strings the controller already
 uses — `SUCCEEDED`/`FAILED`/`CANCELLED` — so no case-folding at the gate). `HandlerRunConfig`
 subclasses `RoleSpecConfig`, so `_build_role_context`, `_get_step_resources`,
@@ -264,10 +285,12 @@ Unit tests (run with
 `PYTHONPATH=<venv>/site-packages:src /usr/bin/python3 -m pytest --noconftest tests/unit/...`
 — `--noconftest` skips the root conftest that imports boto3/kubernetes and spins up k3d):
 
-- `test_config.py`: `ExitHandlerConfig`/`HandlerRunConfig` when/defaults (uppercase),
-  nix-mode handler *acceptance*, `num_nodes`/`depends_on` rejection on `run`, name
-  collision, nested-`run:` YAML round-trip; `roles[].exit_handlers` rejected via
-  `extra="forbid"`.
+- `test_config.py`: the discriminated union — `when` routes to the right variant;
+  `on_exit_codes` accepted on the `ON_FAILURE` variant but a **parse error** on
+  `ON_SUCCESS`/`ALWAYS`; a handler entry missing `when` is rejected; out-of-range codes
+  rejected. Plus `HandlerRunConfig` defaults (uppercase), nix-mode handler *acceptance*,
+  `num_nodes`/`depends_on` rejection on `run`, name collision, nested-`run:` YAML
+  round-trip; `roles[].exit_handlers` rejected via `extra="forbid"`.
 - `test_manifest_rendering.py`: handler manifest shape (labels, `maxRestarts: 0`, no
   successPolicy, default + overridden resources, log-sidecar prefix under `step=<pseudo>`,
   `terminationMessagePolicy` on `main`, nix-mode handler rendering); a plain step manifest
