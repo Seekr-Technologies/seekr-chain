@@ -1286,7 +1286,7 @@ class TestWorkflowSettled:
 # ---------------------------------------------------------------------------
 
 
-def _handler_entry(parent="a", name="notify", when="always", on_exit_codes=None, step=None):
+def _handler_entry(parent="a", name="notify", when="ALWAYS", on_exit_codes=None, step=None):
     return {
         "parent": parent,
         "name": name,
@@ -1337,7 +1337,7 @@ def _call_submit_handlers(
 
 class TestHandlerDispatchGating:
     def test_on_success_fires_on_succeeded(self):
-        handlers = {"a": [_handler_entry(when="on_success")]}
+        handlers = {"a": [_handler_entry(when="ON_SUCCESS")]}
         handler_states: dict[str, str] = {}
         states, js_to_handler, mock_k8s = _call_submit_handlers("a", {"a": "SUCCEEDED"}, handlers, handler_states)
         assert states["a-eh-notify"] == "SUBMITTED"
@@ -1345,14 +1345,14 @@ class TestHandlerDispatchGating:
         mock_k8s.create_namespaced_custom_object.assert_called_once()
 
     def test_on_success_does_not_fire_on_failed(self):
-        handlers = {"a": [_handler_entry(when="on_success")]}
+        handlers = {"a": [_handler_entry(when="ON_SUCCESS")]}
         handler_states: dict[str, str] = {}
         states, _, mock_k8s = _call_submit_handlers("a", {"a": "FAILED"}, handlers, handler_states)
         assert states["a-eh-notify"] == "SKIPPED"
         mock_k8s.create_namespaced_custom_object.assert_not_called()
 
     def test_on_failure_fires_on_failed_not_succeeded(self):
-        handlers = {"a": [_handler_entry(when="on_failure")]}
+        handlers = {"a": [_handler_entry(when="ON_FAILURE")]}
 
         failed_states, _, failed_k8s = _call_submit_handlers("a", {"a": "FAILED"}, handlers, {})
         assert failed_states["a-eh-notify"] == "SUBMITTED"
@@ -1363,7 +1363,7 @@ class TestHandlerDispatchGating:
         succeeded_k8s.create_namespaced_custom_object.assert_not_called()
 
     def test_always_fires_on_both_success_and_failure(self):
-        handlers = {"a": [_handler_entry(when="always")]}
+        handlers = {"a": [_handler_entry(when="ALWAYS")]}
 
         succeeded_states, _, _ = _call_submit_handlers("a", {"a": "SUCCEEDED"}, handlers, {})
         assert succeeded_states["a-eh-notify"] == "SUBMITTED"
@@ -1374,9 +1374,9 @@ class TestHandlerDispatchGating:
     def test_cancelled_skips_all_handlers_regardless_of_when(self):
         handlers = {
             "a": [
-                _handler_entry(name="always-h", when="always"),
-                _handler_entry(name="success-h", when="on_success"),
-                _handler_entry(name="failure-h", when="on_failure"),
+                _handler_entry(name="always-h", when="ALWAYS"),
+                _handler_entry(name="success-h", when="ON_SUCCESS"),
+                _handler_entry(name="failure-h", when="ON_FAILURE"),
             ]
         }
         states, _, mock_k8s = _call_submit_handlers("a", {"a": "CANCELLED"}, handlers, {})
@@ -1386,15 +1386,46 @@ class TestHandlerDispatchGating:
         mock_k8s.create_namespaced_custom_object.assert_not_called()
 
     def test_on_exit_codes_fires_when_exit_code_matches(self):
-        handlers = {"a": [_handler_entry(when="always", on_exit_codes=[42])]}
+        handlers = {"a": [_handler_entry(when="ALWAYS", on_exit_codes=[42])]}
         pods = [_make_pod("a-0", exit_code=42, reason="Error")]
         states, _, mock_k8s = _call_submit_handlers("a", {"a": "FAILED"}, handlers, {}, pods=pods)
         assert states["a-eh-notify"] == "SUBMITTED"
         mock_k8s.create_namespaced_custom_object.assert_called_once()
 
     def test_on_exit_codes_skips_when_exit_code_does_not_match(self):
-        handlers = {"a": [_handler_entry(when="always", on_exit_codes=[42])]}
+        handlers = {"a": [_handler_entry(when="ALWAYS", on_exit_codes=[42])]}
         pods = [_make_pod("a-0", exit_code=1, reason="Error")]
+        states, _, mock_k8s = _call_submit_handlers("a", {"a": "FAILED"}, handlers, {}, pods=pods)
+        assert states["a-eh-notify"] == "SKIPPED"
+        mock_k8s.create_namespaced_custom_object.assert_not_called()
+
+    def test_union_code_gating_both_matching_handlers_fire(self):
+        """A multi-pod step with pods exiting {1, 137}: a handler gated on [137]
+        and one gated on [1] both fire — the gate is a set intersection over
+        every pod's exit code, not a single representative value."""
+        handlers = {
+            "a": [
+                _handler_entry(name="oom-h", when="ALWAYS", on_exit_codes=[137]),
+                _handler_entry(name="err-h", when="ALWAYS", on_exit_codes=[1]),
+            ]
+        }
+        pods = [
+            _make_pod("a-0", exit_code=1, reason="Error"),
+            _make_pod("a-1", exit_code=137, reason="OOMKilled"),
+        ]
+        states, _, mock_k8s = _call_submit_handlers("a", {"a": "FAILED"}, handlers, {}, pods=pods)
+        assert states["a-eh-oom-h"] == "SUBMITTED"
+        assert states["a-eh-err-h"] == "SUBMITTED"
+        assert mock_k8s.create_namespaced_custom_object.call_count == 2
+
+    def test_union_code_gating_non_matching_handler_skipped(self):
+        """Same multi-pod step ({1, 137}), but a handler gated on [42] — which
+        no pod exited with — is skipped."""
+        handlers = {"a": [_handler_entry(when="ALWAYS", on_exit_codes=[42])]}
+        pods = [
+            _make_pod("a-0", exit_code=1, reason="Error"),
+            _make_pod("a-1", exit_code=137, reason="OOMKilled"),
+        ]
         states, _, mock_k8s = _call_submit_handlers("a", {"a": "FAILED"}, handlers, {}, pods=pods)
         assert states["a-eh-notify"] == "SKIPPED"
         mock_k8s.create_namespaced_custom_object.assert_not_called()
@@ -1406,7 +1437,7 @@ class TestHandlerDispatchGating:
         mock_k8s.create_namespaced_custom_object.assert_not_called()
 
     def test_already_terminal_handler_state_is_not_resubmitted(self):
-        handlers = {"a": [_handler_entry(when="always")]}
+        handlers = {"a": [_handler_entry(when="ALWAYS")]}
         handler_states = {"a-eh-notify": "SUCCEEDED"}
         states, _, mock_k8s = _call_submit_handlers("a", {"a": "SUCCEEDED"}, handlers, handler_states)
         assert states["a-eh-notify"] == "SUCCEEDED"
@@ -1415,7 +1446,7 @@ class TestHandlerDispatchGating:
     def test_409_on_submit_marks_submitted_without_crashing(self):
         """Pre-seeded PENDING + a JobSet that already exists (prior partial submit):
         the 409 guard treats it as already running, same as _submit_ready_steps."""
-        handlers = {"a": [_handler_entry(when="always")]}
+        handlers = {"a": [_handler_entry(when="ALWAYS")]}
         states, js_to_handler, mock_k8s = _call_submit_handlers(
             "a", {"a": "SUCCEEDED"}, handlers, {}, existing_jobsets=["a-eh-notify-js"]
         )
@@ -1426,7 +1457,7 @@ class TestHandlerDispatchGating:
         """on_exit_codes is None -> the env-var mechanism is primary; a handler
         with no gate still fires even though _read_step_exit_info returns the
         all-empty default (e.g. pods already GC'd)."""
-        handlers = {"a": [_handler_entry(when="on_failure")]}
+        handlers = {"a": [_handler_entry(when="ON_FAILURE")]}
         states, _, mock_k8s = _call_submit_handlers("a", {"a": "FAILED"}, handlers, {}, pods=[])
         assert states["a-eh-notify"] == "SUBMITTED"
         body = mock_k8s.create_namespaced_custom_object.call_args.kwargs["body"]
@@ -1447,7 +1478,7 @@ class TestHandlerDispatchIntegration:
             {"name": "a", "depends_on": []},
             {"name": "b", "depends_on": ["a"]},
         ]
-        handlers = {"a": [_handler_entry(when="always")]}
+        handlers = {"a": [_handler_entry(when="ALWAYS")]}
         events = [
             [
                 _make_event("a-js", "Completed", rv="2"),
@@ -1472,7 +1503,7 @@ class TestHandlerDispatchIntegration:
 
     def test_env_injection_from_mocked_pod_status_reaches_handler_pod(self):
         dag = [{"name": "a", "depends_on": []}]
-        handlers = {"a": [_handler_entry(when="on_failure")]}
+        handlers = {"a": [_handler_entry(when="ON_FAILURE")]}
         events = [
             [_make_event("a-js", "Failed", rv="2")],
             [_make_event("a-eh-notify-js", "Completed", rv="3")],
@@ -1505,7 +1536,7 @@ class TestHandlerDispatchIntegration:
         JobSet's own terminal event arrives on the reconnect. main() must not
         return until that second event lands."""
         dag = [{"name": "a", "depends_on": []}]
-        handlers = {"a": [_handler_entry(when="always")]}
+        handlers = {"a": [_handler_entry(when="ALWAYS")]}
         events = [
             [_make_event("a-js", "Completed", rv="2")],
             [_make_event("a-eh-notify-js", "Completed", rv="3")],
@@ -1521,7 +1552,7 @@ class TestHandlerDispatchIntegration:
         Once the drain timeout elapses after the step went terminal, the
         controller must give up rather than hang forever."""
         dag = [{"name": "a", "depends_on": []}]
-        handlers = {"a": [_handler_entry(when="always")]}
+        handlers = {"a": [_handler_entry(when="ALWAYS")]}
         events = [
             [_make_event("a-js", "Completed", rv="2")],
             [],
@@ -1547,7 +1578,7 @@ class TestHandlerDispatchIntegration:
         restored as SUBMITTED (not reset to PENDING), and a redundant dispatch
         attempt would hit 409 rather than double-injecting env or crashing."""
         dag = [{"name": "a", "depends_on": []}]
-        handlers = {"a": [_handler_entry(when="always")]}
+        handlers = {"a": [_handler_entry(when="ALWAYS")]}
         events = [[_make_event("a-eh-notify-js", "Completed", rv="2")]]
 
         result, mock_k8s, snapshots, _ = _run_main(
