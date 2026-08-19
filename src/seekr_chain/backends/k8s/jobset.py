@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Optional
 
 from seekr_chain import constants, k8s_utils, nix_utils, remote_fs
+from seekr_chain.backends.k8s import render
 from seekr_chain.backends.k8s.exit_handlers import HandlerPlan
 from seekr_chain.config import (
     FailurePolicy,
@@ -1013,8 +1014,6 @@ def create_jobset_manifest(
 
     Returns (js_name, rendered_yaml_string).
     """
-    from seekr_chain.backends.k8s import render
-
     js_name, context = build_jobset_context(
         workflow_config=workflow_config,
         step_index=step_index,
@@ -1042,29 +1041,31 @@ def build_handler_jobset_context(
     """Build the Jinja2 template context for an exit handler's JobSet manifest.
 
     Mirrors :func:`build_jobset_context`: builds a synthetic single-role
-    ``SingleRoleStepConfig`` from ``handler_plan.handler`` (name = the pseudo
-    step name) so the existing role-context/affinity/label/resource helpers
-    apply unchanged. ``maxRestarts`` is fixed at 0 (a crashing handler must
-    not retry) and there is no success policy (single role). ``handler_index``
-    is only used for the 63-char-name fallback suffix, mirroring how the step
-    version uses ``step_index``.
+    ``SingleRoleStepConfig`` from ``handler_plan.handler.run`` (name = the
+    pseudo step name) so the existing role-context/affinity/label/resource
+    helpers apply unchanged — including the nix render path, since ``run``
+    carries ``image``/``nix`` through same as a regular role. ``maxRestarts``
+    is fixed at 0 (a crashing handler must not retry) and there is no success
+    policy (single role). ``handler_index`` is only used for the 63-char-name
+    fallback suffix, mirroring how the step version uses ``step_index``.
 
     Returns (js_name, context_dict).
     """
     handler = handler_plan.handler
+    run = handler.run
     step_name = handler_plan.pseudo_step
 
     step_config = SingleRoleStepConfig(
         name=step_name,
-        image=handler.image,
-        nix=None,
-        shell=handler.shell,
-        before_script=handler.before_script,
-        script=handler.script,
-        after_script=handler.after_script,
-        resources=handler.resources,
+        image=run.image,
+        nix=run.nix,
+        shell=run.shell,
+        before_script=run.before_script,
+        script=run.script,
+        after_script=run.after_script,
+        resources=run.resources,
         depends_on=None,
-        env=handler.env,
+        env=run.env,
         failure_policy=FailurePolicy(max_restarts=0),
     )
 
@@ -1097,7 +1098,7 @@ def build_handler_jobset_context(
         "pack_groups": pack_groups,
         "labels": _build_jobset_labels(workflow_config),
         "handler_of": handler_plan.parent_step,
-        "handler_name": handler.name,
+        "handler_name": run.name,
         "handler_when": handler.when,
         "roles": [
             _build_role_context(
@@ -1133,8 +1134,6 @@ def create_handler_jobset_manifest(
 
     Mirrors :func:`create_jobset_manifest`. Returns (js_name, rendered_yaml_string).
     """
-    from seekr_chain.backends.k8s import render
-
     js_name, context = build_handler_jobset_context(
         workflow_config=workflow_config,
         handler_plan=handler_plan,

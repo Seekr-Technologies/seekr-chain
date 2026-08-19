@@ -32,7 +32,7 @@ def plan_handlers(config: WorkflowConfig) -> list[HandlerPlan]:
                 HandlerPlan(
                     parent_step=step.name,
                     handler=handler,
-                    pseudo_step=handler_step_name(step.name, handler.name),
+                    pseudo_step=handler_step_name(step.name, handler.run.name),
                 )
             )
     return plans
