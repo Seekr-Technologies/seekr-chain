@@ -265,7 +265,7 @@ def _package_assets(
                 "name": handler_plan.handler.run.name,
                 "step": handler_plan.pseudo_step,
                 "when": handler_plan.handler.when,
-                "on_exit_codes": handler_plan.handler.on_exit_codes,
+                "on_exit_codes": getattr(handler_plan.handler, "on_exit_codes", None),
             }
         )
 

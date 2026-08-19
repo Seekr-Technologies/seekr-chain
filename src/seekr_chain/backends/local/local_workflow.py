@@ -103,7 +103,8 @@ def _handler_fires(handler: ExitHandlerConfig, main_rc: int) -> bool:
     when_matches = handler.when == "ALWAYS" or (handler.when == "ON_SUCCESS") == success
     if not when_matches:
         return False
-    return handler.on_exit_codes is None or main_rc in handler.on_exit_codes
+    on_exit_codes = getattr(handler, "on_exit_codes", None)
+    return on_exit_codes is None or main_rc in on_exit_codes
 
 
 def _run_handlers(step: SingleRoleStepConfig, main_rc: int, workdir: str, env: dict) -> None:

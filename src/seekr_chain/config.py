@@ -425,23 +425,38 @@ class HandlerRunConfig(RoleSpecConfig):
         return self
 
 
-class ExitHandlerConfig(BaseModel):
+class _ExitHandlerBase(BaseModel):
     """A single-pod job the controller runs after its parent step finishes.
 
     Renders through the same jobset path as a real step but is absent from
     ``dag.json``, so its outcome never cascades or flips the workflow's status.
 
-    Parameters
-    ----------
-    when : Which parent step outcomes trigger this handler
-    on_exit_codes : Optional extra gate; the handler only fires if the parent's exit
-        code is in this list (in addition to `when` matching). `None` means no extra gate.
-    run : The handler's runtime spec (image/nix, script, resources, ...)
+    Each subclass tags itself with a single `when` value, so `on_exit_codes`
+    (meaningful only when the parent failed) exists solely on `OnFailureHandler`;
+    pairing it with `ON_SUCCESS` or `ALWAYS` is a parse error, not a silently
+    ignored field.
     """
 
-    when: Literal["ON_SUCCESS", "ON_FAILURE", "ALWAYS"] = "ALWAYS"
-    on_exit_codes: list[Annotated[int, Field(ge=0, le=255)]] | None = None
     run: HandlerRunConfig
+
+
+class OnSuccessHandler(_ExitHandlerBase):
+    when: Literal["ON_SUCCESS"] = "ON_SUCCESS"
+
+
+class OnFailureHandler(_ExitHandlerBase):
+    when: Literal["ON_FAILURE"] = "ON_FAILURE"
+    on_exit_codes: list[Annotated[int, Field(ge=0, le=255)]] | None = None
+
+
+class AlwaysHandler(_ExitHandlerBase):
+    when: Literal["ALWAYS"] = "ALWAYS"
+
+
+ExitHandlerConfig = Annotated[
+    Union[OnSuccessHandler, OnFailureHandler, AlwaysHandler],
+    Field(discriminator="when"),
+]
 
 
 class SingleRoleStepConfig(RoleSpecConfig):
