@@ -307,12 +307,10 @@ def _config_with_handlers() -> WorkflowConfig:
                     "image": "ubuntu",
                     "script": "echo hi",
                     "exit_handlers": [
-                        {"name": "notify", "image": "ubuntu", "script": "echo done", "when": "always"},
+                        {"run": {"name": "notify", "image": "ubuntu", "script": "echo done"}, "when": "ALWAYS"},
                         {
-                            "name": "alert",
-                            "image": "ubuntu",
-                            "script": "echo fail",
-                            "when": "on_failure",
+                            "run": {"name": "alert", "image": "ubuntu", "script": "echo fail"},
+                            "when": "ON_FAILURE",
                             "on_exit_codes": [1, 2],
                         },
                     ],
@@ -363,12 +361,12 @@ class TestPackageAssetsHandlers:
         assets = self._run(_config_with_handlers(), tmp_path, monkeypatch)
         handlers = json.loads((assets / "handlers.json").read_text())
         assert handlers == [
-            {"parent": "train", "name": "notify", "step": "train-eh-notify", "when": "always", "on_exit_codes": None},
+            {"parent": "train", "name": "notify", "step": "train-eh-notify", "when": "ALWAYS", "on_exit_codes": None},
             {
                 "parent": "train",
                 "name": "alert",
                 "step": "train-eh-alert",
-                "when": "on_failure",
+                "when": "ON_FAILURE",
                 "on_exit_codes": [1, 2],
             },
         ]
