@@ -7,8 +7,8 @@
 ## Objective
 
 Let each step declare one or more **exit handlers** — extra single-pod jobs the
-controller runs after the step finishes, gated on `on_success` / `on_failure` /
-`always`. A handler must be able to *see why the parent step ended* (exit code, OOM,
+controller runs after the step finishes, gated on `ON_SUCCESS` / `ON_FAILURE` /
+`ALWAYS`. A handler must be able to *see why the parent step ended* (exit code, OOM,
 failure reason/message) and act on it (alert, upload, clean up). Handlers should be low
 resource by default but configurable, and a handler's own outcome must never change the
 step's or workflow's status.
@@ -48,28 +48,42 @@ phase.
 
 Decisions locked with the user: config is `exit_handlers: list[...]` per step, each
 tagged `when`; handlers show as nested rows under the parent step in `status`/`follow`;
-a handler failure is independent; k8s backend only (local backend gets a hard
-`NotImplementedError` guard).
+a handler failure is independent; both the k8s and local backends run handlers.
 
 ### Config — `src/seekr_chain/config.py`
 
-```python
-_DEFAULT_HANDLER_RESOURCES = ResourceConfig(
-    num_nodes=1, cpus_per_node="500m", mem_per_node="512Mi",
-    ephemeral_storage_per_node="10G", gpus_per_node=0, shm_size="64M",
-)
+Composition, not inheritance — a handler's runtime spec (`run:`) is a nested,
+independently-validated block rather than flattened fields directly on
+`ExitHandlerConfig`:
 
-class ExitHandlerConfig(RoleSpecConfig):
-    when: Literal["on_success", "on_failure", "always"] = "always"
-    on_exit_codes: list[int] | None = None          # optional extra gate (see below)
-    resources: ResourceConfig = _DEFAULT_HANDLER_RESOURCES
+```python
+class HandlerResourceConfig(ResourceConfig):
+    num_nodes: Literal[1] = 1   # handlers are single-pod; not settable
+
+class HandlerRunConfig(RoleSpecConfig):
+    resources: HandlerResourceConfig = HandlerResourceConfig()
+
+    @pydantic.model_validator(mode="after")
+    def _check_no_depends_on(self) -> Self:
+        if self.depends_on is not None:
+            raise ValueError(...)
+        return self
+
+class ExitHandlerConfig(BaseModel):
+    when: Literal["ON_SUCCESS", "ON_FAILURE", "ALWAYS"] = "ALWAYS"
+    on_exit_codes: list[Annotated[int, Field(ge=0, le=255)]] | None = None
+    run: HandlerRunConfig
 ```
 
-Subclassing `RoleSpecConfig` (not a standalone model) means `_build_role_context`,
-`_get_step_resources`, `_write_peermaps_and_scripts`, and the RFC1123-name /
-image-xor-nix validators all apply unchanged. A `model_validator(mode="after")` rejects
-`nix is not None` (nix closures aren't resolved for handlers), `resources.num_nodes != 1`,
-and `depends_on is not None`; codes in `on_exit_codes` must be `0..255`.
+`when` is uppercase everywhere (matches the step-phase strings the controller already
+uses — `SUCCEEDED`/`FAILED`/`CANCELLED` — so no case-folding at the gate). `HandlerRunConfig`
+subclasses `RoleSpecConfig`, so `_build_role_context`, `_get_step_resources`,
+`_write_peermaps_and_scripts`, the RFC1123-name / image-xor-nix validators, and **nix
+mode** all apply unchanged — nix-mode handlers are allowed, not rejected. Only
+`depends_on` is forbidden (handlers aren't DAG nodes) and `resources.num_nodes` is pinned
+to `1` via `HandlerResourceConfig`; every other resource field falls back to
+`ResourceConfig`'s own defaults (no more handler-specific default constant). Handler
+identity is `handler.run.name`.
 
 Add `exit_handlers: list[ExitHandlerConfig] = []` to **both** `SingleRoleStepConfig` and
 `MultiRoleStepConfig` — **not** to `RoleSpecConfig`. The controller's only trigger is a
@@ -80,18 +94,21 @@ natural hard validation error for multi-role steps.
 
 Add a pure `handler_step_name(step, handler) -> str` (e.g. `f"{step}-eh-{handler}"`) and
 a `WorkflowConfig` validator `check_exit_handlers()` (sibling of `check_depends_on`):
-handler names unique within a step, and no pseudo-name collision with any real step name
-or another handler's pseudo name (hard error, not auto-suffixed).
+handler names (`run.name`) unique within a step, and no pseudo-name collision with any
+real step name or another handler's pseudo name (hard error, not auto-suffixed).
 
 **Rich context is the point (env vars).** The primary way a handler reacts is by reading
 env vars the controller injects (see table below) and branching in-script.
-`on_exit_codes` on a handler is an *optional* extra predicate — the handler fires when
-the `when` clause matches **and** (`on_exit_codes` is `None` **or** the parent exit code
-is listed) — near-free because the controller already reads the code, but secondary to
-the env-var mechanism.
+`on_exit_codes` on a handler is an *optional* extra predicate gated on the **union** of
+every pod's exit code for the step (see Controller section) — the handler fires when the
+`when` clause matches **and** (`on_exit_codes` is `None` **or** it intersects the set of
+exit codes observed across the step's pods).
 
-Local guard: in `backends/local/local_workflow.py`, before the step loop, raise
-`NotImplementedError` if any step declares `exit_handlers`.
+Local backend: `local_workflow.py` runs handlers directly after the parent step's script,
+gated the same way (`when` + `on_exit_codes` against the step's single exit code); a
+handler's own failure is logged but never flips `workflow_succeeded`, and a
+dependency-skipped step runs no handlers. `image`/`nix` are ignored locally (same as for
+regular steps).
 
 ### Asset layout — new `src/seekr_chain/backends/k8s/exit_handlers.py`
 
@@ -157,17 +174,24 @@ Still stdlib + `kubernetes` + `pyyaml` only. New functions:
 - `_read_step_exit_info(k8s_v1, namespace, workflow_id, step_name) -> dict` — the one new
   k8s read: `list_namespaced_pod(label_selector=
   "seekr-chain/job-id=<id>,seekr-chain/step=<step>")`, then per pod read the `main`
-  container's `state.terminated.exit_code` / `.reason` / `.message`, picking a
+  container's `state.terminated.exit_code` / `.reason` / `.message`. Keeps a
   representative pod (prefer nonzero exit, prefer `OOMKilled`, tie-break latest
-  `finished_at`). Wrapped in `try/except Exception` → returns an all-empty dict on
-  failure (pods GC'd, RBAC hiccup); never raises into the watch loop.
+  `finished_at`) for the scalar env vars below, **and** a sorted `exit_codes` set — every
+  pod's non-`None` exit code — used for the `on_exit_codes` gate. Wrapped in
+  `try/except Exception` → returns an all-empty dict on failure (pods GC'd, RBAC hiccup);
+  never raises into the watch loop.
 - `_handler_env(...)` / `_inject_handler_env(manifest, env_entries)` — append plain
   `{"name","value"}` entries to the `main` container only.
-- `_submit_handlers_for_step(...)` — for each `PENDING` handler of a step: gate on `when`
-  vs the step's phase (`SUCCEEDED`→on_success/always, `FAILED`→on_failure/always,
-  `CANCELLED`→never→mark `SKIPPED`), then on `on_exit_codes` if set; read exit info once
-  per step; load + env-inject + submit; same 409 / 429-5xx / other error triage as
-  `_submit_ready_steps`. **Never touches `phases` or calls `_cascade_fail`.**
+- `_handler_disposition(entry, parent_phase, exit_info) -> Literal["FIRE","SKIP"]` — pure
+  gate check: `CANCELLED` parent or `when` mismatch → `SKIP`; otherwise `SKIP` unless
+  `on_exit_codes` is `None` or `set(on_exit_codes) & set(exit_info["exit_codes"])` is
+  non-empty (a **union/intersection** gate across every pod of a multi-pod step, not a
+  single representative code) → `FIRE`.
+- `_submit_handlers_for_step(...)` — for each `PENDING` handler of a step: compute
+  `_handler_disposition`, reading exit info once per step only when needed; on `FIRE`,
+  load + env-inject + submit via `_submit_handler_jobset(...)` — same 409 / 429-5xx /
+  other error triage as `_submit_ready_steps`. **Never touches `phases` or calls
+  `_cascade_fail`.**
 - `_load_handler_states` / `_save_handler_states` — same ConfigMap (`<workflow_id>-phases`)
   under a **separate data key `"handlers"`** so handler state never collides with the
   `"phases"` key. Restore `SUBMITTED` as-is (not reset to `PENDING`) to avoid double
@@ -230,11 +254,9 @@ Plus everything a normal step gets from `_get_env()` (workflow env, secrets,
 
 ## Out of scope
 
-- Local backend support (hard `NotImplementedError` guard only).
-- Nix-mode handlers (rejected at validation).
 - Per-role handlers on multi-role steps; workflow-level ("whole DAG") handlers.
 - Handler retries (`maxRestarts: 0` fixed; no `failure_policy` field on a handler).
-- `always` firing on `CANCELLED` — it does not; cancellation skips all handlers.
+- `ALWAYS` firing on `CANCELLED` — it does not; cancellation skips all handlers.
 
 ## Verification plan
 
@@ -242,32 +264,38 @@ Unit tests (run with
 `PYTHONPATH=<venv>/site-packages:src /usr/bin/python3 -m pytest --noconftest tests/unit/...`
 — `--noconftest` skips the root conftest that imports boto3/kubernetes and spins up k3d):
 
-- `test_config.py`: `ExitHandlerConfig` when/defaults, nix rejection, `num_nodes`
-  rejection, name-collision; `roles[].exit_handlers` rejected via `extra="forbid"`.
+- `test_config.py`: `ExitHandlerConfig`/`HandlerRunConfig` when/defaults (uppercase),
+  nix-mode handler *acceptance*, `num_nodes`/`depends_on` rejection on `run`, name
+  collision, nested-`run:` YAML round-trip; `roles[].exit_handlers` rejected via
+  `extra="forbid"`.
 - `test_manifest_rendering.py`: handler manifest shape (labels, `maxRestarts: 0`, no
   successPolicy, default + overridden resources, log-sidecar prefix under `step=<pseudo>`,
-  `terminationMessagePolicy` on `main`); a plain step manifest unaffected by the new
-  template blocks.
-- `test_asset_generation.py`: handler asset paths / `handlers.json` shape; `dag.json` has
-  no handler entries.
-- `test_controller.py` (new `TestHandlerDispatch`, reusing `_load_controller` /
-  `_make_event` / `_run_main`): on_success/on_failure/always + `on_exit_codes` gating; no
-  cascade from a failed handler in a diamond DAG; exit-code/OOM/message env injection from
-  mocked pod statuses; missing exit info degrades gracefully; controller doesn't return
-  until a handler settles; drain timeout; restart idempotency (409 + pre-seeded
-  `SUBMITTED`); `CANCELLED` skips `always`; old assets without `handlers.json` behave as
-  today.
+  `terminationMessagePolicy` on `main`, nix-mode handler rendering); a plain step manifest
+  unaffected by the new template blocks.
+- `test_asset_generation.py`: handler asset paths / `handlers.json` shape (uppercase
+  `when`, `run.name`); `dag.json` has no handler entries.
+- `test_controller.py` (`TestHandlerDispatchGating` / `TestHandlerDispatchIntegration`):
+  ON_SUCCESS/ON_FAILURE/ALWAYS + `on_exit_codes` gating, including the multi-pod
+  **union/intersection** case (pods exiting `{1, 137}`: separate `[137]` and `[1]`
+  handlers both fire, a `[42]` handler does not); no cascade from a failed handler in a
+  diamond DAG; exit-code/OOM/message env injection from mocked pod statuses; missing exit
+  info degrades gracefully; controller doesn't return until a handler settles; drain
+  timeout; restart idempotency (409 + pre-seeded `SUBMITTED`); `CANCELLED` skips
+  `ALWAYS`; old assets without `handlers.json` behave as today.
+- `test_local_execution.py` (`TestExitHandlers`): ON_SUCCESS/ON_FAILURE/ALWAYS gating,
+  `on_exit_codes` gating on the step's exit code, env-var injection, a failing handler
+  leaving the workflow `SUCCEEDED`, and a dependency-skipped step running no handlers.
 - `test_build_workflow_state.py` / `test_status_rendering.py`: handler nesting under a
   parent step and row rendering.
 
 Integration (`--real-cluster`, patterned on `tests/integration/lifecycle/test_logs.py`):
-a step that exits 42 with an `on_failure` handler asserting
-`SEEKR_CHAIN_PARENT_EXIT_CODE=42` in its logs and an `on_success` handler that must not
+a step that exits 42 with an `ON_FAILURE` handler asserting
+`SEEKR_CHAIN_PARENT_EXIT_CODE=42` in its logs and an `ON_SUCCESS` handler that must not
 run; workflow status reflects the step, not the handler; a downstream step still runs. A
-second case: a successful step + an `always` handler that itself fails → workflow still
+second case: a successful step + an `ALWAYS` handler that itself fails → workflow still
 `SUCCEEDED`.
 
-Manual: `chain submit` an example config with an `on_failure` handler; `chain status` /
+Manual: `chain submit` an example config with an `ON_FAILURE` handler; `chain status` /
 `chain follow` show it nested under the step; `chain logs` includes its output.
 
 ## References
