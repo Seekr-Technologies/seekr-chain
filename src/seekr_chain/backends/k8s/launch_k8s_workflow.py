@@ -1,17 +1,20 @@
 #!/usr/bin/env python3
 
+import concurrent.futures
 import datetime
 import json
 import logging
 import os
 import shutil
 import tempfile
+import time
 from pathlib import Path
 
 import dotenv
 import kubernetes
 
 from seekr_chain import WorkflowConfig, constants, remote_fs, utils
+from seekr_chain.backends.k8s import ttl
 from seekr_chain.backends.k8s.job_info import JobInfo, _resolve_datastore_root, get_job_info
 from seekr_chain.backends.k8s.jobset import _INIT_IMAGE, create_jobset_manifest
 from seekr_chain.backends.k8s.parse_logs import DATA_SCHEMA_VERSION
@@ -416,6 +419,15 @@ def launch_k8s_workflow(
         if len(config.steps) != 1:
             raise ValueError("Interactive jobs may only have a single step")
 
+    datastore_root = _resolve_datastore_root()
+
+    # Reclaim expired jobs' S3 artifacts. Kicked off at the very start of launch
+    # so it overlaps with everything below (code staging, nix eval, k8s setup --
+    # ~5-10s); we block on it at the end. In steady state the sweep finishes
+    # first, so that join is ~0s.
+    sweep_pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+    sweep_future = sweep_pool.submit(ttl.sweep_expired, datastore_root)
+
     with tempfile.TemporaryDirectory() as staging_dir:
         staging_dir = Path(staging_dir)
 
@@ -436,9 +448,9 @@ def launch_k8s_workflow(
 
         s3_creds = _get_s3_creds()
 
-        datastore_root = _resolve_datastore_root()
         job_info = _generate_job_info(datastore_root=datastore_root)
         workflow_id = job_info["id"]
+        ttl.write_ttl_marker(datastore_root, workflow_id, config.artifact_ttl)
 
         workflow_secrets = _create_workflow_secrets(config, workflow_id, s3_creds)
 
@@ -496,6 +508,18 @@ def launch_k8s_workflow(
             f"in namespace {config.namespace!r}: {e.reason} (status={e.status}).\n\n{hint}"
         ) from e
     logger.info(f"Launched controller JobSet: {workflow_id}")
+
+    # Block on the background TTL sweep started at launch; ideally already done.
+    start = time.monotonic()
+    try:
+        reclaimed = sweep_future.result()
+    except Exception as e:
+        logger.warning("TTL sweep failed: %s", e)
+        reclaimed = 0
+    finally:
+        sweep_pool.shutdown(wait=False)
+    if reclaimed or (dt := time.monotonic() - start) > 0.1:
+        logger.info("Reclaimed %d expired job(s); blocked %.1fs on TTL sweep", reclaimed, dt)
 
     workflow = K8sWorkflow(id=workflow_id, namespace=config.namespace)
 

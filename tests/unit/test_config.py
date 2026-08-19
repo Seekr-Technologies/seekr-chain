@@ -1,5 +1,7 @@
 """Tests for config validation."""
 
+import datetime
+
 import pytest
 from pydantic import ValidationError
 
@@ -134,3 +136,13 @@ class TestFailureRuleOnExitCodes:
     def test_operator_without_on_exit_codes_rejected(self):
         with pytest.raises(ValidationError, match="requires `on_exit_codes` to be set"):
             self._config_with_rule({"action": "FAIL_JOB_SET", "operator": "NOT_IN"})
+
+
+class TestArtifactTtl:
+    def test_default_is_90_days(self):
+        config = WorkflowConfig(name="test", steps=[_minimal_step("a")])
+        assert config.artifact_ttl == datetime.timedelta(days=90)
+
+    def test_explicit_value_is_parsed(self):
+        config = WorkflowConfig(name="test", steps=[_minimal_step("a")], artifact_ttl="30d")
+        assert config.artifact_ttl == datetime.timedelta(days=30)

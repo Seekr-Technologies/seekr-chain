@@ -64,6 +64,61 @@ def exists(path: str) -> bool:
     raise ValueError(f"Unsupported scheme: {scheme!r}")
 
 
+def delete(path: str) -> None:
+    """Delete the object or prefix at `path`. No-op if nothing exists there."""
+    scheme = _scheme(path)
+    if scheme == "s3":
+        return _s3_delete(path)
+    if scheme == "oci":
+        raise NotImplementedError("delete not supported for oci://")
+    raise ValueError(f"Unsupported scheme: {scheme!r}")
+
+
+def listdir(path: str) -> list[str]:
+    """Return the immediate children (names, not full URIs) of `path`."""
+    scheme = _scheme(path)
+    if scheme == "s3":
+        return _s3_listdir(path)
+    if scheme == "oci":
+        raise NotImplementedError("listdir not supported for oci://")
+    raise ValueError(f"Unsupported scheme: {scheme!r}")
+
+
+def touch(path: str) -> None:
+    """Create an empty object at `path`."""
+    scheme = _scheme(path)
+    if scheme == "s3":
+        return _s3_touch(path)
+    if scheme == "oci":
+        raise NotImplementedError("touch not supported for oci://")
+    raise ValueError(f"Unsupported scheme: {scheme!r}")
+
+
+def list_objects(prefix: str) -> list[str]:
+    """Return the full URIs of every object recursively under `prefix`."""
+    scheme = _scheme(prefix)
+    if scheme == "s3":
+        return _s3_list_objects(prefix)
+    if scheme == "oci":
+        raise NotImplementedError("list_objects not supported for oci://")
+    raise ValueError(f"Unsupported scheme: {scheme!r}")
+
+
+def delete_many(uris: list[str]) -> list[str]:
+    """Delete many objects, returning the URIs that failed to delete.
+
+    All `uris` are assumed to share a scheme; dispatch is based on the first.
+    """
+    if not uris:
+        return []
+    scheme = _scheme(uris[0])
+    if scheme == "s3":
+        return _s3_delete_many(uris)
+    if scheme == "oci":
+        raise NotImplementedError("delete_many not supported for oci://")
+    raise ValueError(f"Unsupported scheme: {scheme!r}")
+
+
 def join(*parts: str) -> str:
     """Join path parts with exactly one slash between components.
 
@@ -220,6 +275,74 @@ def _s3_download(src: str, dst: str | Path) -> None:
         _get_s3_client().download_file(bucket, key, str(dst))
     else:
         _s3_download_dir(src, dst)
+
+
+def _s3_delete(path: str) -> None:
+    if _s3_is_file(path):
+        bucket, key = _parse_s3_uri(path)
+        _get_s3_client().delete_object(Bucket=bucket, Key=key)
+        return
+
+    _s3_delete_many(_s3_list_objects(path))
+
+
+def _s3_touch(path: str) -> None:
+    bucket, key = _parse_s3_uri(path)
+    _get_s3_client().put_object(Bucket=bucket, Key=key, Body=b"")
+
+
+def _s3_list_objects(prefix: str) -> list[str]:
+    client = _get_s3_client()
+    bucket, key = _parse_s3_uri(prefix)
+    if key and not key.endswith("/"):
+        key += "/"
+
+    paginator = client.get_paginator("list_objects_v2")
+    uris = []
+    for page in paginator.paginate(Bucket=bucket, Prefix=key):
+        for obj in page.get("Contents", []):
+            uris.append(f"s3://{bucket}/{obj['Key']}")
+    return uris
+
+
+def _s3_delete_many(uris: list[str]) -> list[str]:
+    if not uris:
+        return []
+
+    client = _get_s3_client()
+    keys_by_bucket: dict[str, list[str]] = {}
+    for uri in uris:
+        bucket, key = _parse_s3_uri(uri)
+        keys_by_bucket.setdefault(bucket, []).append(key)
+
+    failed = []
+    for bucket, keys in keys_by_bucket.items():
+        for i in range(0, len(keys), 1000):
+            batch = [{"Key": k} for k in keys[i : i + 1000]]
+            resp = client.delete_objects(Bucket=bucket, Delete={"Objects": batch})
+            for error in resp.get("Errors", []):
+                failed.append(f"s3://{bucket}/{error['Key']}")
+    return failed
+
+
+def _s3_listdir(path: str) -> list[str]:
+    client = _get_s3_client()
+    bucket, prefix = _parse_s3_uri(path)
+    if prefix and not prefix.endswith("/"):
+        prefix += "/"
+
+    paginator = client.get_paginator("list_objects_v2")
+    children = []
+    for page in paginator.paginate(Bucket=bucket, Prefix=prefix, Delimiter="/"):
+        for common_prefix in page.get("CommonPrefixes", []):
+            name = common_prefix["Prefix"][len(prefix) :].rstrip("/")
+            if name:
+                children.append(name)
+        for obj in page.get("Contents", []):
+            name = obj["Key"][len(prefix) :]
+            if name:
+                children.append(name)
+    return children
 
 
 # --- OCI ------------------------------------------------------------------

@@ -509,6 +509,8 @@ class WorkflowConfig(BaseModel):
     namespace : Kubernetes namespace for the Argo workflow
     code : Local code directory to upload into job containers
     ttl : Time-to-live after completion before automatic cleanup
+    artifact_ttl : Time-to-live for S3 job artifacts (code package, logs, data) before
+        background cleanup deletes them
     steps : List of workflow steps
     secrets : Secrets injected as environment variables in each step
     env : Global environment variables for all steps
@@ -521,6 +523,7 @@ class WorkflowConfig(BaseModel):
     namespace: Optional[str] = "argo"
     code: Optional[CodeConfig] = None
     ttl: datetime.timedelta = datetime.timedelta(days=7)
+    artifact_ttl: datetime.timedelta = datetime.timedelta(days=90)
     steps: list[StepConfig]
     secrets: Optional[dict[str, SecretValue]] = None
     env: Optional[dict[str, str]] = None

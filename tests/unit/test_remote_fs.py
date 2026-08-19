@@ -219,6 +219,130 @@ class TestS3Download:
         assert sorted(k for _, k, _ in downloaded) == ["prefix/a.txt", "prefix/sub/b.txt"]
 
 
+class TestS3Delete:
+    def test_deletes_single_file(self, monkeypatch):
+        client = MagicMock()
+        client.head_object.return_value = {"ContentLength": 5, "ContentType": "text/plain"}
+        monkeypatch.setattr(remote_fs, "_get_s3_client", lambda: client)
+
+        remote_fs.delete("s3://bucket/key")
+
+        client.delete_object.assert_called_once_with(Bucket="bucket", Key="key")
+        client.delete_objects.assert_not_called()
+
+    def test_deletes_prefix(self, monkeypatch):
+        from botocore.exceptions import ClientError
+
+        client = MagicMock()
+        client.head_object.side_effect = ClientError({"Error": {"Code": "404"}}, "HeadObject")
+
+        paginator = MagicMock()
+        paginator.paginate.return_value = [{"Contents": [{"Key": "prefix/a.txt"}, {"Key": "prefix/sub/b.txt"}]}]
+        client.get_paginator.return_value = paginator
+        monkeypatch.setattr(remote_fs, "_get_s3_client", lambda: client)
+
+        remote_fs.delete("s3://bucket/prefix")
+
+        client.delete_objects.assert_called_once_with(
+            Bucket="bucket",
+            Delete={"Objects": [{"Key": "prefix/a.txt"}, {"Key": "prefix/sub/b.txt"}]},
+        )
+        paginator.paginate.assert_called_once_with(Bucket="bucket", Prefix="prefix/")
+
+    def test_unsupported_scheme_raises(self):
+        with pytest.raises(ValueError, match="Unsupported scheme"):
+            remote_fs.delete("gs://bucket/key")
+
+
+class TestS3ListDir:
+    def test_lists_immediate_children(self, monkeypatch):
+        client = MagicMock()
+        paginator = MagicMock()
+        paginator.paginate.return_value = [
+            {
+                "CommonPrefixes": [{"Prefix": "prefix/sub/"}],
+                "Contents": [{"Key": "prefix/a.txt"}, {"Key": "prefix/"}],
+            }
+        ]
+        client.get_paginator.return_value = paginator
+        monkeypatch.setattr(remote_fs, "_get_s3_client", lambda: client)
+
+        result = remote_fs.listdir("s3://bucket/prefix")
+
+        assert result == ["sub", "a.txt"]
+        paginator.paginate.assert_called_once_with(Bucket="bucket", Prefix="prefix/", Delimiter="/")
+
+    def test_unsupported_scheme_raises(self):
+        with pytest.raises(ValueError, match="Unsupported scheme"):
+            remote_fs.listdir("gs://bucket/key")
+
+
+class TestS3Touch:
+    def test_creates_empty_object(self, monkeypatch):
+        client = MagicMock()
+        monkeypatch.setattr(remote_fs, "_get_s3_client", lambda: client)
+
+        remote_fs.touch("s3://b/k")
+
+        client.put_object.assert_called_once_with(Bucket="b", Key="k", Body=b"")
+
+    def test_unsupported_scheme_raises(self):
+        with pytest.raises(ValueError, match="Unsupported scheme"):
+            remote_fs.touch("gs://bucket/key")
+
+
+class TestS3ListObjects:
+    def test_returns_full_uris(self, monkeypatch):
+        client = MagicMock()
+        paginator = MagicMock()
+        paginator.paginate.return_value = [{"Contents": [{"Key": "prefix/a.txt"}, {"Key": "prefix/sub/b.txt"}]}]
+        client.get_paginator.return_value = paginator
+        monkeypatch.setattr(remote_fs, "_get_s3_client", lambda: client)
+
+        result = remote_fs.list_objects("s3://bucket/prefix")
+
+        assert result == ["s3://bucket/prefix/a.txt", "s3://bucket/prefix/sub/b.txt"]
+        paginator.paginate.assert_called_once_with(Bucket="bucket", Prefix="prefix/")
+
+    def test_unsupported_scheme_raises(self):
+        with pytest.raises(ValueError, match="Unsupported scheme"):
+            remote_fs.list_objects("gs://bucket/key")
+
+
+class TestS3DeleteMany:
+    def test_deletes_keys_in_same_bucket(self, monkeypatch):
+        client = MagicMock()
+        client.delete_objects.return_value = {}
+        monkeypatch.setattr(remote_fs, "_get_s3_client", lambda: client)
+
+        failed = remote_fs.delete_many(["s3://b/k1", "s3://b/k2"])
+
+        client.delete_objects.assert_called_once_with(Bucket="b", Delete={"Objects": [{"Key": "k1"}, {"Key": "k2"}]})
+        assert failed == []
+
+    def test_returns_failed_uris(self, monkeypatch):
+        client = MagicMock()
+        client.delete_objects.return_value = {"Errors": [{"Key": "k2"}]}
+        monkeypatch.setattr(remote_fs, "_get_s3_client", lambda: client)
+
+        failed = remote_fs.delete_many(["s3://b/k1", "s3://b/k2"])
+
+        assert failed == ["s3://b/k2"]
+
+    def test_empty_input_is_noop(self, monkeypatch):
+        client = MagicMock()
+        monkeypatch.setattr(remote_fs, "_get_s3_client", lambda: client)
+
+        failed = remote_fs.delete_many([])
+
+        client.delete_objects.assert_not_called()
+        assert failed == []
+
+    def test_unsupported_scheme_raises(self):
+        with pytest.raises(ValueError, match="Unsupported scheme"):
+            remote_fs.delete_many(["gs://bucket/key"])
+
+
 class TestOciDownload:
     def test_downloads_file(self, monkeypatch, tmp_path):
         client = MagicMock()
