@@ -528,6 +528,7 @@ def _build_role_context(
     interactive: bool,
     step_name: str,
     assets_path: Path,
+    step_config,
     workflow_affinity: dict | None = None,
 ) -> dict:
     """Build the Jinja2 template context dict for a single replicated job (role)."""
@@ -606,6 +607,12 @@ def _build_role_context(
 
     return {
         "name": js_pod_name,
+        # JobSet's failurePolicy rule matcher (v0.8.0) needs a non-empty
+        # replicatedJob name to attach the replicatedjob-name label to child
+        # Jobs; an empty name silently disables all failurePolicy rules. Kept
+        # separate from `name` (the label / S3 log-path segment) so single-role
+        # log layout stays unperturbed.
+        "replicated_job_name": role_config.name or "main",
         "replicas": role_config.resources.num_nodes,
         "image": resolve_image(main_image),
         "privileged": role_config.resources.security.privileged,
@@ -635,6 +642,7 @@ def _build_role_context(
         # different roles in the same step can have different closure terms.
         "closure_hash": closure_hash,
         "affinity": role_affinity,
+        "pod_failure_policy": _build_pod_failure_policy(step_config, role_config.name),
         # Log sidecar
         "log_sidecar_image": resolve_image("fluent/fluent-bit:2.2-debug"),
         "log_sidecar_s3_bucket": s3_bucket,
@@ -809,6 +817,32 @@ def _normalize_literal(lit: str) -> str:
     return "".join([x.capitalize() for x in lit.split("_")])
 
 
+def _build_pod_failure_policy(step_config, role_name: str) -> dict | None:
+    fp_config = getattr(step_config, "failure_policy", None)
+    if fp_config is None:
+        return None
+
+    rules = []
+    for rule in fp_config.rules:
+        if rule.on_exit_codes is None:
+            continue
+        if rule.target_roles is not None and role_name not in rule.target_roles:
+            continue
+        rules.append(
+            {
+                "action": "FailJob",
+                "onExitCodes": {
+                    "containerName": "main",
+                    "operator": _normalize_literal(rule.operator),
+                    "values": sorted(set(rule.on_exit_codes)),
+                },
+            }
+        )
+    if not rules:
+        return None
+    return {"rules": rules}
+
+
 def _build_failure_policy(step_config) -> dict | None:
     fp_config = getattr(step_config, "failure_policy", None)
     if fp_config is None:
@@ -816,14 +850,26 @@ def _build_failure_policy(step_config) -> dict | None:
 
     policy = {"maxRestarts": fp_config.max_restarts}
 
-    rules = []
+    exit_code_rules = []
+    plain_rules = []
     for rule in fp_config.rules:
-        rules.append(
-            {
-                "action": _normalize_literal(rule.action),
-                "targetReplicatedJobs": rule.target_roles,
-            },
-        )
+        if rule.on_exit_codes is not None:
+            exit_code_rules.append(
+                {
+                    "action": "FailJobSet",
+                    "onJobFailureReasons": ["PodFailurePolicy"],
+                    "targetReplicatedJobs": rule.target_roles,
+                }
+            )
+        else:
+            plain_rules.append(
+                {
+                    "action": _normalize_literal(rule.action),
+                    "onJobFailureReasons": None,
+                    "targetReplicatedJobs": rule.target_roles,
+                },
+            )
+    rules = exit_code_rules + plain_rules
     if rules:
         policy["rules"] = rules
     return policy
@@ -903,7 +949,7 @@ def build_jobset_context(
 
     # Check if we will be over 63 character limit
     for role_config in role_configs:
-        if len(f"{js_name}-{role_config.name}-00-00-abcde") > 63:
+        if len(f"{js_name}-{role_config.name or 'main'}-00-00-abcde") > 63:
             js_name = f"{workflow_name.split('-')[-1]}-s{step_index:02d}-js"
             logger.warning(f"Generated jobset name is too long! Shortening to {js_name}")
             break
@@ -936,6 +982,7 @@ def build_jobset_context(
                 interactive=interactive,
                 step_name=step_name,
                 assets_path=assets_path,
+                step_config=step_config,
                 workflow_affinity=affinity,
             )
             for role_config in role_configs

@@ -237,12 +237,32 @@ class FailurePolicy(BaseModel):
         ----------
         action : Action to take on failure
         target_roles : Roles this rule applies to (multi-role steps only)
+        on_exit_codes : Container exit codes this rule matches. Optional; `None` means
+            the rule matches all failures unconditionally (today's behavior). When set,
+            `action` must be `FAIL_JOB_SET`.
+        operator : Whether `on_exit_codes` is an inclusion or exclusion list
         """
 
         action: Literal["FAIL_JOB_SET", "RESTART_JOB_SET", "RESTART_JOB_SET_AND_IGNORE_MAX_RESTARTS"] = (
             "RESTART_JOB_SET"
         )
         target_roles: list[str] | None = None
+        on_exit_codes: list[int] | None = None
+        operator: Literal["IN", "NOT_IN"] = "IN"
+
+        @pydantic.model_validator(mode="after")
+        def check_on_exit_codes(self) -> Self:
+            if self.on_exit_codes is not None:
+                if self.action != "FAIL_JOB_SET":
+                    raise ValueError("`failure_policy.rules.on_exit_codes` requires `action == FAIL_JOB_SET`")
+                if not self.on_exit_codes:
+                    raise ValueError("`failure_policy.rules.on_exit_codes` must be non-empty")
+                if any(not (1 <= code <= 255) for code in self.on_exit_codes):
+                    raise ValueError("`failure_policy.rules.on_exit_codes` must all be in 1..255")
+                self.on_exit_codes = sorted(set(self.on_exit_codes))
+            elif self.operator != "IN":
+                raise ValueError("`failure_policy.rules.operator` requires `on_exit_codes` to be set")
+            return self
 
     max_restarts: int | None = Field(0, ge=0)
     rules: list[FailureRule] = []

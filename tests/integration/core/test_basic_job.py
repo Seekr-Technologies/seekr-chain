@@ -367,8 +367,8 @@ class TestBasic:
         assert expected.issubset(set(data.keys()))
         assert data["SEEKR_CHAIN_WORKFLOW_ID"] == job.name
         assert data["SEEKR_CHAIN_JOBSET_ID"] == job.name + "-step-js"
-        assert data["SEEKR_CHAIN_POD_ID"] == job.name + "-step-js--0"
-        assert re.match(job.name + r"-step-js--0-0-.+", data["SEEKR_CHAIN_POD_INSTANCE_ID"])
+        assert data["SEEKR_CHAIN_POD_ID"] == job.name + "-step-js-main-0"
+        assert re.match(job.name + r"-step-js-main-0-0-.+", data["SEEKR_CHAIN_POD_INSTANCE_ID"])
 
     def test_env(self):
         config = seekr_chain.WorkflowConfig.model_validate(
