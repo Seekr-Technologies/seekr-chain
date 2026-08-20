@@ -9,7 +9,10 @@ from pathlib import Path
 from typing import Optional
 
 from seekr_chain import constants, k8s_utils, nix_utils, remote_fs
+from seekr_chain.backends.k8s import render
+from seekr_chain.backends.k8s.exit_handlers import HandlerPlan
 from seekr_chain.config import (
+    FailurePolicy,
     SingleRoleStepConfig,
     StepConfig,
     WorkflowConfig,
@@ -971,6 +974,12 @@ def build_jobset_context(
         "affinity": affinity,
         "pack_groups": pack_groups,
         "labels": _build_jobset_labels(workflow_config),
+        # None on a regular step so the template can guard on `handler_of`
+        # without an `is defined` check; set for real by
+        # build_handler_jobset_context.
+        "handler_of": None,
+        "handler_name": None,
+        "handler_when": None,
         "roles": [
             _build_role_context(
                 role_config=role_config,
@@ -1005,8 +1014,6 @@ def create_jobset_manifest(
 
     Returns (js_name, rendered_yaml_string).
     """
-    from seekr_chain.backends.k8s import render
-
     js_name, context = build_jobset_context(
         workflow_config=workflow_config,
         step_index=step_index,
@@ -1014,6 +1021,126 @@ def create_jobset_manifest(
         workflow_name=workflow_name,
         workflow_secrets=workflow_secrets,
         interactive=interactive,
+        assets_path=assets_path,
+    )
+
+    rendered = render.render("jobset.yaml.j2", context)
+
+    return js_name, rendered
+
+
+def build_handler_jobset_context(
+    workflow_config,
+    handler_plan: HandlerPlan,
+    handler_index,
+    job_info,
+    workflow_name,
+    workflow_secrets,
+    assets_path: Path,
+) -> tuple[str, dict]:
+    """Build the Jinja2 template context for an exit handler's JobSet manifest.
+
+    Mirrors :func:`build_jobset_context`: builds a synthetic single-role
+    ``SingleRoleStepConfig`` from ``handler_plan.handler.run`` (name = the
+    pseudo step name) so the existing role-context/affinity/label/resource
+    helpers apply unchanged — including the nix render path, since ``run``
+    carries ``image``/``nix`` through same as a regular role. ``maxRestarts``
+    is fixed at 0 (a crashing handler must not retry) and there is no success
+    policy (single role). ``handler_index`` is only used for the 63-char-name
+    fallback suffix, mirroring how the step version uses ``step_index``.
+
+    Returns (js_name, context_dict).
+    """
+    handler = handler_plan.handler
+    run = handler.run
+    step_name = handler_plan.pseudo_step
+
+    step_config = SingleRoleStepConfig(
+        name=step_name,
+        image=run.image,
+        nix=run.nix,
+        shell=run.shell,
+        before_script=run.before_script,
+        script=run.script,
+        after_script=run.after_script,
+        resources=run.resources,
+        depends_on=None,
+        env=run.env,
+        failure_policy=FailurePolicy(max_restarts=0),
+    )
+
+    js_name = f"{workflow_name}-{step_name}-js"
+
+    role_configs = [step_config.model_copy()]
+    role_configs[0].name = ""
+
+    for role_config in role_configs:
+        if len(f"{js_name}-{role_config.name or 'main'}-00-00-abcde") > 63:
+            js_name = f"{workflow_name.split('-')[-1]}-h{handler_index:02d}-js"
+            logger.warning(f"Generated handler jobset name is too long! Shortening to {js_name}")
+            break
+
+    _write_peermaps_and_scripts(
+        role_configs=role_configs, js_name=js_name, step_config=step_config, assets_path=assets_path
+    )
+
+    affinity, pack_groups = _build_affinity(workflow_config)
+
+    context = {
+        "js_name": js_name,
+        "job_id": job_info["id"],
+        "step_name": step_name,
+        "workflow_name": workflow_name,
+        "remote_assets_path": job_info["remote_assets_path"],
+        "success_policy": _build_success_policy(step_config),
+        "failure_policy": _build_failure_policy(step_config),
+        "affinity": affinity,
+        "pack_groups": pack_groups,
+        "labels": _build_jobset_labels(workflow_config),
+        "handler_of": handler_plan.parent_step,
+        "handler_name": run.name,
+        "handler_when": handler.when,
+        "roles": [
+            _build_role_context(
+                role_config=role_config,
+                workflow_config=workflow_config,
+                workflow_secrets=workflow_secrets,
+                workflow_name=workflow_name,
+                js_name=js_name,
+                job_info=job_info,
+                interactive=False,
+                step_name=step_name,
+                assets_path=assets_path,
+                step_config=step_config,
+                workflow_affinity=affinity,
+            )
+            for role_config in role_configs
+        ],
+    }
+
+    return js_name, context
+
+
+def create_handler_jobset_manifest(
+    workflow_config,
+    handler_plan: HandlerPlan,
+    handler_index,
+    job_info,
+    workflow_name,
+    workflow_secrets,
+    assets_path: Path,
+) -> tuple[str, str]:
+    """Build and render an exit handler's JobSet manifest.
+
+    Mirrors :func:`create_jobset_manifest`. Returns (js_name, rendered_yaml_string).
+    """
+    js_name, context = build_handler_jobset_context(
+        workflow_config=workflow_config,
+        handler_plan=handler_plan,
+        handler_index=handler_index,
+        job_info=job_info,
+        workflow_name=workflow_name,
+        workflow_secrets=workflow_secrets,
         assets_path=assets_path,
     )
 

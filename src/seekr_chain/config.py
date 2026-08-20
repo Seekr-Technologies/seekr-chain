@@ -29,6 +29,11 @@ def _validate_rfc1123_name(name: str) -> str:
     return name
 
 
+def handler_step_name(step: str, handler: str) -> str:
+    """Deterministic pseudo-step name for an exit handler's rendered manifest/assets."""
+    return f"{step}-eh-{handler}"
+
+
 class NodeAffinityRule(BaseModel):
     """Schedule based on node properties (hostname or labels).
 
@@ -395,6 +400,65 @@ class RoleSpecConfig(BaseModel):
         return self
 
 
+class HandlerResourceConfig(ResourceConfig):
+    """Compute resource requests for an exit handler. Handlers are single-pod, so
+    `num_nodes` is fixed at 1 (not settable)."""
+
+    num_nodes: Literal[1] = 1
+
+
+class HandlerRunConfig(RoleSpecConfig):
+    """The runtime spec for an exit handler: same shape as a role, minus dependency
+    ordering (handlers are not part of the DAG) and with resources pinned to one pod.
+
+    Parameters
+    ----------
+    resources : Compute resource requests. `num_nodes` is fixed at 1.
+    """
+
+    resources: HandlerResourceConfig = HandlerResourceConfig()
+
+    @pydantic.model_validator(mode="after")
+    def _check_no_depends_on(self) -> Self:
+        if self.depends_on is not None:
+            raise ValueError(f"exit handler '{self.name}': `depends_on` is not supported for handlers")
+        return self
+
+
+class _ExitHandlerBase(BaseModel):
+    """A single-pod job the controller runs after its parent step finishes.
+
+    Renders through the same jobset path as a real step but is absent from
+    ``dag.json``, so its outcome never cascades or flips the workflow's status.
+
+    Each subclass tags itself with a single `when` value, so `on_exit_codes`
+    (meaningful only when the parent failed) exists solely on `OnFailureHandler`;
+    pairing it with `ON_SUCCESS` or `ALWAYS` is a parse error, not a silently
+    ignored field.
+    """
+
+    run: HandlerRunConfig
+
+
+class OnSuccessHandler(_ExitHandlerBase):
+    when: Literal["ON_SUCCESS"] = "ON_SUCCESS"
+
+
+class OnFailureHandler(_ExitHandlerBase):
+    when: Literal["ON_FAILURE"] = "ON_FAILURE"
+    on_exit_codes: list[Annotated[int, Field(ge=0, le=255)]] | None = None
+
+
+class AlwaysHandler(_ExitHandlerBase):
+    when: Literal["ALWAYS"] = "ALWAYS"
+
+
+ExitHandlerConfig = Annotated[
+    Union[OnSuccessHandler, OnFailureHandler, AlwaysHandler],
+    Field(discriminator="when"),
+]
+
+
 class SingleRoleStepConfig(RoleSpecConfig):
     """A step with a single role (the most common step type). Inherits all fields from RoleSpecConfig.
 
@@ -402,10 +466,12 @@ class SingleRoleStepConfig(RoleSpecConfig):
     ----------
     depends_on : Steps that must complete before this one starts
     failure_policy : Failure handling policy
+    exit_handlers : Handlers to run after this step finishes
     """
 
     depends_on: Optional[list[str]] = None
     failure_policy: FailurePolicy | None = None
+    exit_handlers: list[ExitHandlerConfig] = []
 
     @pydantic.model_validator(mode="after")
     def check_failure_policy(self) -> Self:
@@ -426,6 +492,7 @@ class MultiRoleStepConfig(BaseModel):
     success_policy : When to consider this step successful
     failure_policy : Failure handling policy
     roles : List of roles to run in parallel
+    exit_handlers : Handlers to run after this step finishes
     """
 
     class SuccessPolicy(BaseModel):
@@ -445,6 +512,7 @@ class MultiRoleStepConfig(BaseModel):
     success_policy: Optional[SuccessPolicy] = None
     failure_policy: FailurePolicy | None = None
     roles: list[RoleSpecConfig]
+    exit_handlers: list[ExitHandlerConfig] = []
 
     @field_validator("name")
     @classmethod
@@ -584,4 +652,29 @@ class WorkflowConfig(BaseModel):
                 invalid = set(step.depends_on) - step_names
                 if invalid:
                     raise ValueError(f"Step '{step.name}' has depends_on references to non-existent steps: {invalid}")
+        return self
+
+    @pydantic.model_validator(mode="after")
+    def check_exit_handlers(self) -> Self:
+        step_names = {step.name for step in self.steps}
+        pseudo_names: dict[str, str] = {}  # pseudo_name -> owning step, for collision reporting
+        for step in self.steps:
+            handler_names = [handler.run.name for handler in step.exit_handlers]
+            duplicates = {name for name in handler_names if handler_names.count(name) > 1}
+            if duplicates:
+                raise ValueError(f"Step '{step.name}' has duplicate exit handler names: {duplicates}")
+            for handler in step.exit_handlers:
+                pseudo = handler_step_name(step.name, handler.run.name)
+                if pseudo in step_names:
+                    raise ValueError(
+                        f"Exit handler '{handler.run.name}' on step '{step.name}' has pseudo-name "
+                        f"'{pseudo}' which collides with an existing step name"
+                    )
+                if pseudo in pseudo_names:
+                    raise ValueError(
+                        f"Exit handler '{handler.run.name}' on step '{step.name}' has pseudo-name "
+                        f"'{pseudo}' which collides with the pseudo-name of another handler "
+                        f"(on step '{pseudo_names[pseudo]}')"
+                    )
+                pseudo_names[pseudo] = step.name
         return self

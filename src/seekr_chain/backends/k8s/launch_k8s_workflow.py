@@ -15,8 +15,9 @@ import kubernetes
 
 from seekr_chain import WorkflowConfig, constants, remote_fs, utils
 from seekr_chain.backends.k8s import ttl
+from seekr_chain.backends.k8s.exit_handlers import plan_handlers
 from seekr_chain.backends.k8s.job_info import JobInfo, _resolve_datastore_root, get_job_info
-from seekr_chain.backends.k8s.jobset import _INIT_IMAGE, create_jobset_manifest
+from seekr_chain.backends.k8s.jobset import _INIT_IMAGE, create_handler_jobset_manifest, create_jobset_manifest
 from seekr_chain.backends.k8s.parse_logs import DATA_SCHEMA_VERSION
 from seekr_chain.backends.k8s.rbac import detect_service_account
 from seekr_chain.config import EnvSource, SecretRefSource
@@ -234,6 +235,43 @@ def _package_assets(
     dag_path = assets_path / "dag.json"
     with open(dag_path, "w") as f:
         json.dump(dag_entries, f)
+
+    # Write exit-handler assets. Handlers render through the same jobset path as a
+    # real step and land at assets/step=<pseudo>/jobset.yaml (parse_logs.py and
+    # controller._load_manifest() key on step=*), but are deliberately absent from
+    # dag.json so they can never become DAG nodes or cascade a phase.
+    handler_plans = plan_handlers(config)
+    handler_entries = []
+    for handler_index, handler_plan in enumerate(handler_plans):
+        js_name, js_yaml = create_handler_jobset_manifest(
+            workflow_config=config,
+            handler_plan=handler_plan,
+            handler_index=handler_index,
+            job_info=job_info,
+            workflow_name=workflow_name,
+            workflow_secrets=workflow_secrets,
+            assets_path=assets_path,
+        )
+
+        handler_asset_dir = assets_path / f"step={handler_plan.pseudo_step}"
+        handler_asset_dir.mkdir(exist_ok=True, parents=True)
+        handler_manifest_path = handler_asset_dir / "jobset.yaml"
+        with open(handler_manifest_path, "w") as f:
+            f.write(js_yaml)
+
+        handler_entries.append(
+            {
+                "parent": handler_plan.parent_step,
+                "name": handler_plan.handler.run.name,
+                "step": handler_plan.pseudo_step,
+                "when": handler_plan.handler.when,
+                "on_exit_codes": getattr(handler_plan.handler, "on_exit_codes", None),
+            }
+        )
+
+    handlers_path = assets_path / "handlers.json"
+    with open(handlers_path, "w") as f:
+        json.dump(handler_entries, f)
 
     with tempfile.NamedTemporaryFile() as tarpath:
         tarpath = Path(tarpath.name)

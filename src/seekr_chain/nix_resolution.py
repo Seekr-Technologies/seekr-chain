@@ -353,11 +353,21 @@ def _validate_expression_under_code_path(expression: str, code_path: str, role_n
 
 def _collect_nix_roles_by_step(config: WorkflowConfig) -> list[tuple]:
     """Return [(step, [nix-mode roles on that step]), ...] for every step
-    that has at least one nix-mode role."""
+    that has at least one nix-mode role.
+
+    A nix-mode exit handler's ``run`` is included too, keyed under its
+    *parent* step (handlers aren't DAG nodes and can't carry `depends_on`
+    themselves). Wiring the parent's `depends_on` to the same build step used
+    by the handler is conservative — it delays the parent, not just the
+    handler — but it's sufficient: a handler only dispatches after its parent
+    step goes terminal, so parent-depends-on-build already guarantees the
+    closure is built before the handler could ever run.
+    """
     nix_roles_by_step: list[tuple] = []
     for step in config.steps:
         roles = _roles_of(step)
         nix_roles = [r for r in roles if r.nix is not None]
+        nix_roles += [h.run for h in step.exit_handlers if h.run.nix is not None]
         if nix_roles:
             nix_roles_by_step.append((step, nix_roles))
     return nix_roles_by_step

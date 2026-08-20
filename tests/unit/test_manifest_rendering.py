@@ -3,9 +3,14 @@
 import yaml
 
 from seekr_chain.backends.k8s import render
+from seekr_chain.backends.k8s.exit_handlers import HandlerPlan, plan_handlers
 from seekr_chain.backends.k8s.job_info import get_job_info
-from seekr_chain.backends.k8s.jobset import _DEFAULT_INIT_IMAGE, build_jobset_context
-from seekr_chain.config import WorkflowConfig
+from seekr_chain.backends.k8s.jobset import (
+    _DEFAULT_INIT_IMAGE,
+    build_handler_jobset_context,
+    build_jobset_context,
+)
+from seekr_chain.config import OnFailureHandler, WorkflowConfig, handler_step_name
 
 DATASTORE_ROOT = "s3://test-bucket/seekr-chain/"
 
@@ -524,6 +529,260 @@ class TestJobsetTemplateRendering:
         privileged = main_container["securityContext"]["privileged"]
         # Must be a native Python bool (parsed from YAML true/false), not a string
         assert isinstance(privileged, bool)
+
+    def test_main_container_has_termination_message_policy(self, tmp_path):
+        """FallbackToLogsOnError populates `terminated.message` with the log tail on
+        failure, which is what lets exit handlers see a real failure message."""
+        config = _minimal_config()
+        job_info = _fake_job_info()
+
+        _, context = build_jobset_context(
+            workflow_config=config,
+            step_index=0,
+            job_info=job_info,
+            workflow_name="ab1234",
+            workflow_secrets=[],
+            interactive=False,
+            assets_path=tmp_path / "assets",
+        )
+
+        rendered = render.render("jobset.yaml.j2", context)
+        manifest = yaml.safe_load(rendered)
+
+        pod_spec = manifest["spec"]["replicatedJobs"][0]["template"]["spec"]["template"]["spec"]
+        main_container = next(c for c in pod_spec["containers"] if c["name"] == "main")
+        assert main_container["terminationMessagePolicy"] == "FallbackToLogsOnError"
+
+    def test_no_handler_labels_on_a_regular_step(self, tmp_path):
+        config = _minimal_config()
+        job_info = _fake_job_info()
+
+        _, context = build_jobset_context(
+            workflow_config=config,
+            step_index=0,
+            job_info=job_info,
+            workflow_name="ab1234",
+            workflow_secrets=[],
+            interactive=False,
+            assets_path=tmp_path / "assets",
+        )
+
+        rendered = render.render("jobset.yaml.j2", context)
+        manifest = yaml.safe_load(rendered)
+
+        js_labels = manifest["metadata"]["labels"]
+        pod_labels = manifest["spec"]["replicatedJobs"][0]["template"]["spec"]["template"]["metadata"]["labels"]
+        for key in ("seekr-chain/handler-of", "seekr-chain/handler-name", "seekr-chain/handler-when"):
+            assert key not in js_labels
+            assert key not in pod_labels
+
+
+class TestHandlerJobsetRendering:
+    """Exit handlers render through the same template as a real step, as a
+    synthetic single-role step named after the pseudo step."""
+
+    def _config_with_handler(self, run_kwargs=None, **handler_kwargs):
+        run = {"name": "notify", "image": "curl:latest", "script": "echo notify", **(run_kwargs or {})}
+        handler = {"run": run, "when": "ALWAYS", **handler_kwargs}
+        return _minimal_config(
+            steps=[
+                {
+                    "name": "train",
+                    "image": "pytorch:2.0",
+                    "script": "echo hello",
+                    "resources": {
+                        "cpus_per_node": "4",
+                        "mem_per_node": "8Gi",
+                        "ephemeral_storage_per_node": "10Gi",
+                    },
+                    "exit_handlers": [handler],
+                }
+            ]
+        )
+
+    def _render_handler(self, config, tmp_path, handler_index=0):
+        job_info = _fake_job_info()
+        plan = plan_handlers(config)[handler_index]
+        js_name, context = build_handler_jobset_context(
+            workflow_config=config,
+            handler_plan=plan,
+            handler_index=handler_index,
+            job_info=job_info,
+            workflow_name="ab1234",
+            workflow_secrets=[],
+            assets_path=tmp_path / "assets",
+        )
+        rendered = render.render("jobset.yaml.j2", context)
+        return js_name, yaml.safe_load(rendered)
+
+    def test_handler_labels(self, tmp_path):
+        config = self._config_with_handler(when="ON_FAILURE")
+        js_name, manifest = self._render_handler(config, tmp_path)
+
+        js_labels = manifest["metadata"]["labels"]
+        assert js_labels["seekr-chain/handler-of"] == "train"
+        assert js_labels["seekr-chain/handler-name"] == "notify"
+        assert js_labels["seekr-chain/handler-when"] == "ON_FAILURE"
+
+        pod_labels = manifest["spec"]["replicatedJobs"][0]["template"]["spec"]["template"]["metadata"]["labels"]
+        assert pod_labels["seekr-chain/handler-of"] == "train"
+        assert pod_labels["seekr-chain/handler-name"] == "notify"
+        assert pod_labels["seekr-chain/handler-when"] == "ON_FAILURE"
+
+    def test_handler_step_label_uses_pseudo_name(self, tmp_path):
+        """seekr-chain/step must stay the pseudo name so controller._load_manifest()
+        and log prefix parsing work unchanged."""
+        config = self._config_with_handler()
+        _, manifest = self._render_handler(config, tmp_path)
+
+        pod_labels = manifest["spec"]["replicatedJobs"][0]["template"]["spec"]["template"]["metadata"]["labels"]
+        assert pod_labels["seekr-chain/step"] == handler_step_name("train", "notify")
+        assert manifest["metadata"]["labels"]["seekr-chain/step-name"] == handler_step_name("train", "notify")
+
+    def test_handler_max_restarts_zero_and_no_success_policy(self, tmp_path):
+        config = self._config_with_handler()
+        _, manifest = self._render_handler(config, tmp_path)
+
+        assert manifest["spec"]["failurePolicy"] == {"maxRestarts": 0}
+        assert "successPolicy" not in manifest["spec"]
+
+    def test_handler_is_single_role(self, tmp_path):
+        config = self._config_with_handler()
+        _, manifest = self._render_handler(config, tmp_path)
+
+        assert len(manifest["spec"]["replicatedJobs"]) == 1
+
+    def test_handler_log_sidecar_uses_pseudo_step_prefix(self, tmp_path):
+        """Handler log assets must use step=<pseudo> (not a `handler=` segment) so
+        parse_logs.py's step=*/role=*/... glob picks them up unchanged."""
+        config = self._config_with_handler()
+        _, manifest = self._render_handler(config, tmp_path)
+
+        pod_spec = manifest["spec"]["replicatedJobs"][0]["template"]["spec"]["template"]["spec"]
+        sidecar = next(c for c in pod_spec["containers"] if c["name"] == "log-sidecar")
+        prefix = next(e["value"] for e in sidecar["env"] if e["name"] == "S3_STEP_DATA_PREFIX")
+        assert f"step={handler_step_name('train', 'notify')}/role=" in prefix
+
+    def test_handler_main_container_termination_message_policy(self, tmp_path):
+        config = self._config_with_handler()
+        _, manifest = self._render_handler(config, tmp_path)
+
+        pod_spec = manifest["spec"]["replicatedJobs"][0]["template"]["spec"]["template"]["spec"]
+        main_container = next(c for c in pod_spec["containers"] if c["name"] == "main")
+        assert main_container["terminationMessagePolicy"] == "FallbackToLogsOnError"
+
+    def test_handler_default_resources(self, tmp_path):
+        config = self._config_with_handler()
+        _, manifest = self._render_handler(config, tmp_path)
+
+        pod_spec = manifest["spec"]["replicatedJobs"][0]["template"]["spec"]["template"]["spec"]
+        main_container = next(c for c in pod_spec["containers"] if c["name"] == "main")
+        # HandlerResourceConfig only pins num_nodes=1; everything else falls
+        # back to ResourceConfig's own defaults (no more handler-specific defaults).
+        assert main_container["resources"]["requests"] == {
+            "cpu": 4,
+            "memory": "32G",
+            "ephemeral-storage": "100G",
+        }
+
+    def test_handler_overridden_resources(self, tmp_path):
+        config = self._config_with_handler(
+            run_kwargs={
+                "resources": {
+                    "cpus_per_node": "2",
+                    "mem_per_node": "1Gi",
+                    "ephemeral_storage_per_node": "5Gi",
+                }
+            }
+        )
+        _, manifest = self._render_handler(config, tmp_path)
+
+        pod_spec = manifest["spec"]["replicatedJobs"][0]["template"]["spec"]["template"]["spec"]
+        main_container = next(c for c in pod_spec["containers"] if c["name"] == "main")
+        assert main_container["resources"]["requests"] == {
+            "cpu": 2,
+            "memory": "1Gi",
+            "ephemeral-storage": "5Gi",
+        }
+
+    def test_handler_nix_mode_renders_like_a_nix_role(self, tmp_path, monkeypatch):
+        """A nix-mode handler's run reuses the same nix render path as a role —
+        image is swapped for the nix-runner image and the chain-nix-init init
+        container is injected."""
+        # Same pattern as TestResolveNixRole in test_nix_role.py: stub the real
+        # nix eval/presence checks rather than the higher-level resolver, so we
+        # exercise the actual render path a nix-mode role would go through.
+        monkeypatch.setattr("seekr_chain.nix_utils.eval_closure_path", lambda *_a, **_k: "/nix/store/abc-closure")
+        monkeypatch.setattr("seekr_chain.nix_utils.closure_exists", lambda *_a, **_k: True)
+
+        config = self._config_with_handler(
+            run_kwargs={"image": None, "nix": {"expression": "./", "store": "s3://bucket"}}
+        )
+        _, manifest = self._render_handler(config, tmp_path)
+
+        pod_spec = manifest["spec"]["replicatedJobs"][0]["template"]["spec"]["template"]["spec"]
+        main_container = next(c for c in pod_spec["containers"] if c["name"] == "main")
+        assert main_container["image"] != "curl:latest"
+        assert any(c["name"] == "chain-nix-init" for c in pod_spec["initContainers"])
+
+
+class TestPlanHandlers:
+    def test_plan_handlers_returns_parent_and_pseudo_step(self):
+        config = _minimal_config(
+            steps=[
+                {
+                    "name": "train",
+                    "image": "pytorch:2.0",
+                    "script": "echo hello",
+                    "resources": {
+                        "cpus_per_node": "4",
+                        "mem_per_node": "8Gi",
+                        "ephemeral_storage_per_node": "10Gi",
+                    },
+                    "exit_handlers": [
+                        {
+                            "run": {"name": "notify", "image": "curl:latest", "script": "echo a"},
+                            "when": "ON_FAILURE",
+                        },
+                        {
+                            "run": {"name": "cleanup", "image": "curl:latest", "script": "echo b"},
+                            "when": "ALWAYS",
+                        },
+                    ],
+                },
+                {
+                    "name": "eval",
+                    "image": "pytorch:2.0",
+                    "script": "echo eval",
+                    "resources": {
+                        "cpus_per_node": "4",
+                        "mem_per_node": "8Gi",
+                        "ephemeral_storage_per_node": "10Gi",
+                    },
+                    "exit_handlers": [
+                        {
+                            "run": {"name": "report", "image": "curl:latest", "script": "echo c"},
+                            "when": "ON_SUCCESS",
+                        },
+                    ],
+                },
+            ]
+        )
+
+        plans = plan_handlers(config)
+
+        assert [(p.parent_step, p.pseudo_step) for p in plans] == [
+            ("train", "train-eh-notify"),
+            ("train", "train-eh-cleanup"),
+            ("eval", "eval-eh-report"),
+        ]
+        assert all(isinstance(p, HandlerPlan) for p in plans)
+        assert isinstance(plans[0].handler, OnFailureHandler)
+        assert plans[0].handler.run.name == "notify"
+
+    def test_plan_handlers_empty_for_config_without_handlers(self):
+        config = _minimal_config()
+        assert plan_handlers(config) == []
 
 
 class TestJobsetEnvAndConfig:

@@ -17,7 +17,7 @@ import socket
 import subprocess
 import tempfile
 
-from seekr_chain.config import MultiRoleStepConfig, SingleRoleStepConfig, WorkflowConfig
+from seekr_chain.config import ExitHandlerConfig, MultiRoleStepConfig, SingleRoleStepConfig, WorkflowConfig
 from seekr_chain.dag import topological_sort
 from seekr_chain.status import WorkflowStatus
 from seekr_chain.workflow import Workflow
@@ -76,8 +76,8 @@ def _run_script(shell: str, script_content: str, cwd: str, env: dict, step_name:
         os.unlink(script_path)
 
 
-def _run_step(step: SingleRoleStepConfig, workdir: str, env: dict) -> bool:
-    """Execute a single step. Returns True if the main script succeeded."""
+def _run_step(step: SingleRoleStepConfig, workdir: str, env: dict) -> int:
+    """Execute a single step. Returns the main script's exit code."""
     logger.info(f"--- Step: {step.name} ---")
 
     before_rc = 0
@@ -93,7 +93,40 @@ def _run_step(step: SingleRoleStepConfig, workdir: str, env: dict) -> bool:
     if step.after_script:
         _run_script(step.shell, step.after_script, workdir, env, step.name, "after_script")
 
-    return main_rc == 0
+    return main_rc
+
+
+def _handler_fires(handler: ExitHandlerConfig, main_rc: int) -> bool:
+    """Whether a handler's `when` + `on_exit_codes` gates are satisfied by the
+    parent step's exit code."""
+    success = main_rc == 0
+    when_matches = handler.when == "ALWAYS" or (handler.when == "ON_SUCCESS") == success
+    if not when_matches:
+        return False
+    on_exit_codes = getattr(handler, "on_exit_codes", None)
+    return on_exit_codes is None or main_rc in on_exit_codes
+
+
+def _run_handlers(step: SingleRoleStepConfig, main_rc: int, workdir: str, env: dict) -> None:
+    """Run any of a step's exit handlers gated in by its outcome. A handler's own
+    failure is logged but never affects the workflow's success/failure."""
+    parent_status = "SUCCEEDED" if main_rc == 0 else "FAILED"
+    for handler in step.exit_handlers:
+        if not _handler_fires(handler, main_rc):
+            continue
+        run = handler.run
+        handler_env = {
+            **env,
+            "SEEKR_CHAIN_HANDLER_NAME": run.name,
+            "SEEKR_CHAIN_HANDLER_WHEN": handler.when,
+            "SEEKR_CHAIN_PARENT_STEP": step.name,
+            "SEEKR_CHAIN_PARENT_STATUS": parent_status,
+            "SEEKR_CHAIN_PARENT_EXIT_CODE": str(main_rc),
+        }
+        logger.info(f"--- Handler: {run.name} (parent step: {step.name}) ---")
+        handler_rc = _run_script(run.shell, run.script, workdir, handler_env, run.name, "script")
+        if handler_rc != 0:
+            logger.error(f"Handler '{run.name}' (parent step: {step.name}) failed with exit code {handler_rc}")
 
 
 def launch_local_workflow(
@@ -195,10 +228,13 @@ def launch_local_workflow(
                 **(step.env or {}),
             }
 
-            if not _run_step(step, workdir, step_env):
+            main_rc = _run_step(step, workdir, step_env)
+            if main_rc != 0:
                 logger.error(f"Step '{step.name}' failed")
                 failed_steps.add(step.name)
                 workflow_succeeded = False
+
+            _run_handlers(step, main_rc, workdir, step_env)
     finally:
         os.unlink(args_path)
 
