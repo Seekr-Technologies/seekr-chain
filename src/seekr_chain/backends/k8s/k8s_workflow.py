@@ -120,6 +120,10 @@ class K8sWorkflow(Workflow):
         if controller_jobset is not None:
             annotations = controller_jobset.get("metadata", {}).get("annotations", {}) or {}
             datastore_root = annotations.get("seekr-chain/datastore-root") or None
+        # Kept alongside self._job_info so get_detailed_state() can pass it to
+        # get_workflow_state()'s S3 fallback once the controller JobSet (and
+        # its datastore-root annotation) is gone.
+        self._datastore_root = datastore_root
         self._job_info: JobInfo = get_job_info(self._id, datastore_root=datastore_root)
 
     @property
@@ -178,7 +182,9 @@ class K8sWorkflow(Workflow):
             raise
 
     def get_detailed_state(self) -> WorkflowState:
-        return get_workflow_state(self._k8s_custom, self._k8s_v1, self._namespace, self._id)
+        return get_workflow_state(
+            self._k8s_custom, self._k8s_v1, self._namespace, self._id, datastore_root=self._datastore_root
+        )
 
     def format_state(self, workflow_state: WorkflowState) -> str:
         """Plain-text tabular rendering for CLI use."""
