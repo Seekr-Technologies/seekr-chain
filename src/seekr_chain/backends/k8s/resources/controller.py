@@ -54,8 +54,11 @@ _HEARTBEAT_PATH = "/tmp/controller-heartbeat"
 
 # Phases that stop a step from being retried or re-evaluated further. CANCELLED
 # covers a JobSet suspended via `chain cancel` (spec.suspend=true) rather than
-# one that reached a terminal status — see the watch loop in main().
-_TERMINAL_PHASES = ("SUCCEEDED", "FAILED", "CANCELLED")
+# one that reached a terminal status — see the watch loop in main(). SKIPPED
+# covers a step pre-empted by a non-succeeding dependency: it never ran, so it
+# is distinct from FAILED (ran and failed) and CANCELLED (user cancelled it
+# directly) — see _cascade_fail().
+_TERMINAL_PHASES = ("SUCCEEDED", "FAILED", "CANCELLED", "SKIPPED")
 
 
 def _touch_heartbeat() -> None:
@@ -187,9 +190,12 @@ def _emit_event(
 
 
 def _cascade_fail(dag: list[dict], phases: dict[str, str]) -> None:
-    """Mark PENDING steps whose dependencies (transitively) include a failed or
-    cancelled step. A cancelled dependency propagates CANCELLED rather than
-    FAILED — the dependent never ran, it was stopped."""
+    """Mark PENDING steps whose dependencies (transitively) include a step that
+    did not succeed as SKIPPED — the dependent never ran, it was pre-empted.
+    This is distinct from FAILED (the step itself ran and failed) and CANCELLED
+    (the user cancelled that step directly). SKIPPED is itself a cascade
+    trigger, so a chain of pre-empted steps fully propagates within the
+    fixpoint loop below."""
     changed = True
     while changed:
         changed = False
@@ -198,13 +204,9 @@ def _cascade_fail(dag: list[dict], phases: dict[str, str]) -> None:
             deps = step.get("depends_on") or []
             if phases[name] != "PENDING":
                 continue
-            if any(phases[d] == "CANCELLED" for d in deps):
-                phases[name] = "CANCELLED"
-                print(f"[controller] step={name!r} cascade-cancelled", flush=True)
-                changed = True
-            elif any(phases[d] == "FAILED" for d in deps):
-                phases[name] = "FAILED"
-                print(f"[controller] step={name!r} cascade-failed", flush=True)
+            if any(phases[d] in ("FAILED", "CANCELLED", "SKIPPED") for d in deps):
+                phases[name] = "SKIPPED"
+                print(f"[controller] step={name!r} SKIPPED (upstream did not succeed)", flush=True)
                 changed = True
 
 
