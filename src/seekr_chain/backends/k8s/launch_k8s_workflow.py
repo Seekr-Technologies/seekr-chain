@@ -332,6 +332,27 @@ def _build_controller_jobset(
             "volumeMounts": [{"name": "workspace", "mountPath": "/seekr-chain"}],
             "env": init_env,
         },
+        {
+            # Native sidecar (k8s >= 1.29): restartPolicy "Always" on an init
+            # container keeps it running alongside the main container, but the
+            # kubelet still SIGTERMs it when the JobSet's other containers exit,
+            # so the pod completes normally instead of hanging. This ships
+            # status.json to S3 out-of-band so the controller image itself
+            # never needs boto3/an AWS SDK.
+            "name": "status-sync",
+            "image": _INIT_IMAGE,
+            "restartPolicy": "Always",
+            "command": ["sh", "-c"],
+            "args": [
+                f"REMOTE={job_info['remote_status_path']}\n"
+                "sync() { [ -f /seekr-chain/status.json ] && s5cmd cp /seekr-chain/status.json \"$REMOTE\"; }\n"
+                # Final upload on controller exit / pod teardown (covers a crash too).
+                "trap 'sync; exit 0' TERM INT\n"
+                "while true; do sync; sleep 10; done\n"
+            ],
+            "volumeMounts": [{"name": "workspace", "mountPath": "/seekr-chain"}],
+            "env": init_env,
+        },
     ]
 
     return {
