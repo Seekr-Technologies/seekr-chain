@@ -24,6 +24,12 @@ class TestGetJobInfoError:
                 get_job_info("some-id")
 
 
+class TestGetJobInfoRemoteStatusPath:
+    def test_remote_status_path_is_sibling_of_assets(self):
+        job_info = get_job_info("some-id", datastore_root="s3://bucket/seekr-chain/")
+        assert job_info["remote_status_path"] == f"{job_info['s3_path']}/status.json"
+
+
 class TestGetJobInfoNonS3Root:
     def test_oci_root_raises(self, monkeypatch):
         with pytest.raises(ValueError, match="s3://"):
