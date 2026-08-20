@@ -325,6 +325,7 @@ class TestSingleRoleComm:
                         "attempt=0": [
                             f"MASTER_ADDR={job.name}-step-js-main-0-0.{job.name}-step-js",
                             "server: waiting for one request",
+                            (r".*", "*"),
                             "server: done",
                             "",
                         ]
