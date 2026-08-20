@@ -1206,7 +1206,7 @@ class TestAffinityRendering:
         # rules never match a failed Job (see jobset.py:_build_role_context).
         assert replicated_job["name"] == "main"
         pod_labels = replicated_job["template"]["spec"]["template"]["metadata"]["labels"]
-        assert not pod_labels["seekr-chain/role"]
+        assert pod_labels["seekr-chain/role"] == "main"
 
         pod_spec = replicated_job["template"]["spec"]
         assert pod_spec["podFailurePolicy"] == {
