@@ -24,6 +24,7 @@ class JobInfo(TypedDict):
     remote_sentinel: str
     remote_step_data_path: str
     remote_version_path: str
+    remote_status_path: str
 
 
 def get_job_info(id: str, datastore_root: str | None = None) -> JobInfo:
@@ -65,6 +66,7 @@ def get_job_info(id: str, datastore_root: str | None = None) -> JobInfo:
             "s3_path": s3_path,
             "remote_assets_path": remote_fs.join(s3_path, "assets.tar.gz"),
             "remote_logs_path": remote_fs.join(s3_path, "logs"),
+            "remote_status_path": remote_fs.join(s3_path, "status.json"),
             "remote_sentinel": remote_fs.join(s3_path, ".sentinel"),
             "remote_step_data_path": remote_fs.join(s3_path, "data"),
             "remote_version_path": remote_fs.join(s3_path, "data", "version"),
