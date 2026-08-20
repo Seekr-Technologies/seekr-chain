@@ -1,5 +1,6 @@
 """main() — the controller pod entrypoint: DAG submission and watch loop."""
 
+import datetime
 import json
 import os
 import sys
@@ -11,6 +12,27 @@ import kubernetes.watch
 from .events import _emit_event, _touch_heartbeat
 from .phases import _TERMINAL_PHASES, _cascade_fail, _load_phases, _save_phases
 from .scheduling import _submit_ready_steps
+from .status import _write_status
+
+
+def _now_iso() -> str:
+    return datetime.datetime.now(datetime.timezone.utc).isoformat()
+
+
+def _stamp_starts(dag: list[dict], phases: dict[str, str], timings: dict[str, dict]) -> None:
+    """Record dt_start for any step that just left PENDING (i.e. was submitted)."""
+    for step in dag:
+        name = step["name"]
+        if phases[name] != "PENDING" and "dt_start" not in timings.setdefault(name, {}):
+            timings[name]["dt_start"] = _now_iso()
+
+
+def _stamp_ends(phases: dict[str, str], timings: dict[str, dict]) -> None:
+    """Record dt_end for any step that has reached a terminal phase."""
+    for name, phase in phases.items():
+        if phase in _TERMINAL_PHASES and "dt_end" not in timings.setdefault(name, {}):
+            timings[name]["dt_end"] = _now_iso()
+
 
 # How long to wait before reconnecting the watch stream after an error.
 _WATCH_RECONNECT_DELAY = 2
@@ -67,13 +89,23 @@ def main() -> int:
     # Restore persisted phase state so a restarted controller pod resumes correctly.
     phases = _load_phases(k8s_v1, namespace, workflow_id, dag)
 
+    # In-memory only (dark launch, v1) — lost on a controller restart, which is
+    # acceptable: status.json is an outcome doc, not the source of truth (the
+    # phases ConfigMap is). Not persisted alongside phases to keep the
+    # ConfigMap small and avoid a schema migration later.
+    timings: dict[str, dict] = {}
+    _write_status(workflow_id, dag, phases, timings)
+
     js_names: dict[str, str] = {}
     # reverse map: jobset name -> step name (for event dispatch); updated incrementally
     js_to_step: dict[str, str] = {}
 
     # Submit all initially-ready steps before opening the watch.
     _submit_ready_steps(dag, phases, js_names, js_to_step, assets_path, namespace, owner_ref, k8s_custom)
+    _stamp_starts(dag, phases, timings)
+    _stamp_ends(phases, timings)
     _save_phases(k8s_v1, namespace, workflow_id, phases, owner_ref)
+    _write_status(workflow_id, dag, phases, timings)
 
     if all(p in _TERMINAL_PHASES for p in phases.values()):
         # All steps were no-dep and already submitted; nothing to watch.
@@ -99,7 +131,10 @@ def main() -> int:
             # dependents of any step marked FAILED by a permanent submit error.
             _submit_ready_steps(dag, phases, js_names, js_to_step, assets_path, namespace, owner_ref, k8s_custom)
             _cascade_fail(dag, phases)
+            _stamp_starts(dag, phases, timings)
+            _stamp_ends(phases, timings)
             _save_phases(k8s_v1, namespace, workflow_id, phases, owner_ref)
+            _write_status(workflow_id, dag, phases, timings)
 
             if all(p in _TERMINAL_PHASES for p in phases.values()):
                 break
@@ -179,13 +214,17 @@ def main() -> int:
                         continue
 
                     _cascade_fail(dag, phases)
+                    _stamp_ends(phases, timings)
                     _save_phases(k8s_v1, namespace, workflow_id, phases, owner_ref)
+                    _write_status(workflow_id, dag, phases, timings)
 
                     # Submit any steps now unblocked by this completion.
                     _submit_ready_steps(
                         dag, phases, js_names, js_to_step, assets_path, namespace, owner_ref, k8s_custom
                     )
+                    _stamp_starts(dag, phases, timings)
                     _save_phases(k8s_v1, namespace, workflow_id, phases, owner_ref)
+                    _write_status(workflow_id, dag, phases, timings)
 
                     if all(p in _TERMINAL_PHASES for p in phases.values()):
                         w.stop()
@@ -218,6 +257,7 @@ def main() -> int:
             event_type="Warning",
         )
         print(f"[controller] workflow FAILED — failed steps: {failed}", file=sys.stderr, flush=True)
+        _write_status(workflow_id, dag, phases, timings)
         return 0
 
     cancelled = [n for n, p in phases.items() if p == "CANCELLED"]
@@ -231,6 +271,7 @@ def main() -> int:
             f"Workflow cancelled — cancelled steps: {cancelled}",
         )
         print(f"[controller] workflow CANCELLED — cancelled steps: {cancelled}", flush=True)
+        _write_status(workflow_id, dag, phases, timings)
         return 0
 
     _emit_event(
@@ -242,4 +283,5 @@ def main() -> int:
         "All steps completed successfully",
     )
     print("[controller] workflow SUCCEEDED — all steps completed", flush=True)
+    _write_status(workflow_id, dag, phases, timings)
     return 0

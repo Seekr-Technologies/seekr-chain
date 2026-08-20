@@ -10,6 +10,8 @@ import sys
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 # ---------------------------------------------------------------------------
 # Bootstrap: make controller importable as a top-level package, exactly as it
 # is when the controller pod runs `python -m controller`.
@@ -18,13 +20,15 @@ from unittest.mock import MagicMock, patch
 _RESOURCES = Path(__file__).parent.parent.parent / "src/seekr_chain/backends/k8s/resources"
 sys.path.insert(0, str(_RESOURCES))
 
-from controller import manifests, phases, scheduling, watch  # noqa: E402
+from controller import manifests, phases, scheduling, status, watch  # noqa: E402
 
 _cascade_fail = phases._cascade_fail
 _submit_ready_steps = scheduling._submit_ready_steps
 _load_manifest = manifests._load_manifest
 _load_phases = phases._load_phases
 _save_phases = phases._save_phases
+_derive_status = status._derive_status
+_build_status = status._build_status
 
 
 # ---------------------------------------------------------------------------
@@ -360,6 +364,48 @@ class TestSavePhases:
 
         # Should not raise
         _save_phases(mock_v1, "ns", "wf-abc", {"a": "SUCCEEDED"}, [])
+
+
+class TestDeriveStatus:
+    @pytest.mark.parametrize(
+        "phases, expected",
+        [
+            ({"a": "CANCELLED", "b": "FAILED"}, "TERMINATED"),
+            ({"a": "CANCELLED", "b": "SUCCEEDED"}, "TERMINATED"),
+            ({"a": "FAILED", "b": "SUCCEEDED"}, "FAILED"),
+            ({"a": "SUCCEEDED", "b": "SKIPPED"}, "SUCCEEDED"),
+            ({"a": "SUCCEEDED", "b": "RUNNING"}, "RUNNING"),
+            ({"a": "PENDING", "b": "PENDING"}, "RUNNING"),
+        ],
+    )
+    def test_precedence(self, phases, expected):
+        assert _derive_status(phases) == expected
+
+
+class TestBuildStatus:
+    def test_schema_shape_with_skipped_step_and_timings(self):
+        dag = [
+            {"name": "a", "depends_on": []},
+            {"name": "b", "depends_on": ["a"]},
+            {"name": "c", "depends_on": ["a"]},
+        ]
+        phases = {"a": "FAILED", "b": "SKIPPED", "c": "SKIPPED"}
+        timings = {"a": {"dt_start": "2026-01-01T00:00:00+00:00", "dt_end": "2026-01-01T00:00:05+00:00"}}
+
+        result = _build_status("wf-abc", dag, phases, timings)
+
+        captured_at = result.pop("captured_at")
+        assert isinstance(captured_at, str) and captured_at
+        assert result == {
+            "schema_version": 1,
+            "id": "wf-abc",
+            "status": "FAILED",
+            "steps": [
+                {"name": "a", "phase": "FAILED", "dt_start": "2026-01-01T00:00:00+00:00", "dt_end": "2026-01-01T00:00:05+00:00"},
+                {"name": "b", "phase": "SKIPPED", "dt_start": None, "dt_end": None},
+                {"name": "c", "phase": "SKIPPED", "dt_start": None, "dt_end": None},
+            ],
+        }
 
 
 # ---------------------------------------------------------------------------
