@@ -12,7 +12,8 @@ with open(os.environ["PEERMAP"], "r") as f:
     peermap = json.load(f)
 
 node_rank = int(os.environ["NODE_RANK"])
-target = peermap["main"][0]
+# Single-role peermap.json is a flat list of node addresses; index 0 is rank 0.
+target = peermap[0]
 
 if node_rank == 0:
 
