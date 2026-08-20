@@ -173,18 +173,11 @@ class LogStore:
 
     def to_dict(self) -> dict[str, Any]:
         """
-        Return logs as a nested dict with explicit, labeled keys.
-
-        If there is exactly one role and it is the empty string '',
-        the role level is omitted.
+        Return logs as a nested dict with explicit, labeled keys:
+        step -> role -> index -> attempt.
         """
         root: dict[str, Any] = {}
 
-        # ---- Pass 1: detect role behavior ----
-        roles = {k.role for k in self._logs}
-        omit_role = roles == {""}
-
-        # ---- Pass 2: build structure ----
         for key, lines in self._logs.items():
             step_k = f"step={key.step}"
             role_k = f"role={key.role}"
@@ -192,15 +185,9 @@ class LogStore:
             attempt_k = f"attempt={key.attempt}"
 
             step_d = root.setdefault(step_k, {})
-
-            if omit_role:
-                # step -> index -> attempt
-                index_d = step_d.setdefault(index_k, {})
-                index_d[attempt_k] = list(lines)
-            else:
-                role_d = step_d.setdefault(role_k, {})
-                index_d = role_d.setdefault(index_k, {})
-                index_d[attempt_k] = list(lines)
+            role_d = step_d.setdefault(role_k, {})
+            index_d = role_d.setdefault(index_k, {})
+            index_d[attempt_k] = list(lines)
 
         return root
 

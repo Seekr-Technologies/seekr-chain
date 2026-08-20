@@ -44,10 +44,7 @@ logger = logging.getLogger(__name__)
 
 def _spawn_follow_pod_thread(k8s_v1, name, namespace, step_name, role_name, job_index, container_name=None):
     def _follow():
-        prefix = f"{step_name}"
-        if role_name:
-            prefix += f"-{role_name}"
-        prefix += f"-{job_index} | "
+        prefix = f"{step_name}-{role_name}-{job_index} | "
         try:
             stream = k8s_v1.read_namespaced_pod_log(
                 name=name,
