@@ -23,6 +23,7 @@ class TestPodStatus:
             "SUCCEEDED",
             "FAILED",
             "TERMINATED",
+            "SKIPPED",
         }
 
     def test_dead_values_removed(self):

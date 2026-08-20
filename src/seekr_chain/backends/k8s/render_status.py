@@ -71,6 +71,7 @@ _STATUS_STYLES: dict[str, str] = {
     "PULL:ERROR": "bold red",
     "PULL:CLOSURE": "yellow",
     "PULLING": "yellow",
+    "SKIPPED": "dim",
 }
 
 

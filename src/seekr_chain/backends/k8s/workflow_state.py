@@ -23,16 +23,22 @@ Public API:
   * ``read_controller_jobset(...)``, ``list_jobsets(...)``, ``list_pods(...)`` —
     the individual fetch calls ``get_workflow_state()`` composes; exposed
     so ``watched_state.py`` can seed its watch-based cache with the same calls.
+  * ``read_status_doc(...)``, ``build_workflow_state_from_status_doc(...)`` —
+    the S3 fallback ``get_workflow_state()`` uses once the controller JobSet
+    (and the ``-phases`` ConfigMap it owns) has been garbage-collected.
 """
 
 import datetime
 import json
 import logging
+import tempfile
 from dataclasses import dataclass
 from typing import Optional
 
 import kubernetes as k8s
 
+from seekr_chain import remote_fs
+from seekr_chain.backends.k8s.job_info import get_job_info
 from seekr_chain.status import ContainerStatus, PodStatus, WorkflowStatus
 
 logger = logging.getLogger(__name__)
@@ -429,6 +435,30 @@ def _jobset_step_pod(step_name: str, jobset: dict, role_states: list[RoleState])
     )
 
 
+def _bare_step_state(
+    name: str, status: PodStatus, dt_start: Optional[datetime.datetime] = None, dt_end: Optional[datetime.datetime] = None
+) -> StepState:
+    """Build a StepState with no role/pod detail — just a phase and timing.
+
+    Shared by the live SKIPPED-row synthesis in ``build_workflow_state()``
+    (no JobSet ever existed for the step) and the archived-status-doc mapper
+    in ``build_workflow_state_from_status_doc()`` (per-pod detail didn't
+    survive archival).
+    """
+    pod = PodState(
+        dt_start=dt_start,
+        dt_end=dt_end,
+        status=status,
+        init_containers=[],
+        containers=[],
+        name=name,
+        job_index=0,
+        job_global_index=0,
+        restart_attempt=0,
+    )
+    return StepState(dt_start=dt_start, dt_end=dt_end, name=name, roles=[], pod=pod)
+
+
 def _collect_step_state(name, roles, jobset: dict) -> StepState:
     role_states = [_collect_role_state(role_name, role_pods) for role_name, role_pods in roles.items()]
     step_pod = _jobset_step_pod(name, jobset, role_states)
@@ -630,6 +660,16 @@ def workflow_failed(phases_configmap) -> bool:
     return "FAILED" in json.loads(raw).values()
 
 
+def _skipped_step_names(phases_configmap) -> set[str]:
+    """Names of steps whose persisted phase is SKIPPED. See ``workflow_cancelled()``."""
+    if phases_configmap is None:
+        return set()
+    raw = (phases_configmap.data or {}).get("phases")
+    if not raw:
+        return set()
+    return {name for name, phase in json.loads(raw).items() if phase == "SKIPPED"}
+
+
 def build_workflow_state(
     workflow_id: str, controller_jobset: Optional[dict], jobsets: list[dict], pods: list, phases_configmap=None
 ) -> WorkflowState:
@@ -645,6 +685,12 @@ def build_workflow_state(
     steps = [
         _collect_step_state(step_name, roles_by_step.get(step_name, {}), js) for step_name, js in jobset_by_step.items()
     ]
+    # A step the controller marked SKIPPED never gets a JobSet, so it's
+    # missing from `steps` above — append a bare row for it so skipped steps
+    # are still visible once the workflow has completed.
+    if phases_configmap is not None:
+        for name in _skipped_step_names(phases_configmap) - jobset_by_step.keys():
+            steps.append(_bare_step_state(name, PodStatus.SKIPPED))
     return WorkflowState(
         id=workflow_id,
         name=meta.name,
@@ -657,15 +703,93 @@ def build_workflow_state(
     )
 
 
-def get_workflow_state(k8s_custom, k8s_v1, namespace: str, workflow_id: str) -> WorkflowState:
+def read_status_doc(workflow_id: str, datastore_root: Optional[str] = None) -> Optional[dict]:
+    """Read the controller's archived outcome-only status.json from S3.
+
+    Fallback source of truth once the controller JobSet — and the
+    ``-phases`` ConfigMap it owns — has been garbage-collected. Degrades to
+    ``None`` on any failure (unresolvable datastore root, missing object,
+    bad JSON): the caller falls back to today's not-found/UNKNOWN behavior,
+    it must never raise.
+    """
+    try:
+        info = get_job_info(workflow_id, datastore_root=datastore_root)
+        remote_path = info["remote_status_path"]
+        if not remote_fs.exists(remote_path):
+            return None
+        with tempfile.TemporaryDirectory() as tmpdir:
+            local_path = f"{tmpdir}/status.json"
+            remote_fs.download(remote_path, local_path)
+            with open(local_path) as f:
+                return json.load(f)
+    except Exception:
+        logger.warning("Could not read archived status.json for %r", workflow_id, exc_info=True)
+        return None
+
+
+# Maps the controller's per-step "phase" strings (see
+# ``resources/controller/status.py:_build_status()``) to ``PodStatus`` —
+# CANCELLED has no PodStatus equivalent, so it collapses to TERMINATED.
+_PHASE_TO_POD_STATUS = {
+    "PENDING": PodStatus.PENDING,
+    "RUNNING": PodStatus.RUNNING,
+    "SUCCEEDED": PodStatus.SUCCEEDED,
+    "FAILED": PodStatus.FAILED,
+    "CANCELLED": PodStatus.TERMINATED,
+    "SKIPPED": PodStatus.SKIPPED,
+}
+
+
+def build_workflow_state_from_status_doc(workflow_id: str, doc: dict) -> WorkflowState:
+    """Build a ``WorkflowState`` from an archived status.json document.
+
+    The archive is outcome-only (see ``resources/controller/status.py``), so
+    per-pod detail never survives — every step is a bare row (empty
+    ``roles``), and workflow-level timing is a best-effort min/max over the
+    steps' own timings rather than a JobSet condition timestamp.
+    """
+    steps = [
+        _bare_step_state(
+            step["name"],
+            _PHASE_TO_POD_STATUS.get(step["phase"], PodStatus.UNKNOWN),
+            _parse_timestamp(step.get("dt_start")),
+            _parse_timestamp(step.get("dt_end")),
+        )
+        for step in doc.get("steps", [])
+    ]
+    starts = [s.dt_start for s in steps if s.dt_start]
+    ends = [s.dt_end for s in steps if s.dt_end]
+    return WorkflowState(
+        id=workflow_id,
+        name=None,
+        status=WorkflowStatus(doc["status"]),
+        dt_start=min(starts) if starts else None,
+        dt_end=max(ends) if ends else None,
+        total_steps=len(steps),
+        captured_at=datetime.datetime.now(tz=datetime.timezone.utc),
+        steps=steps,
+    )
+
+
+def get_workflow_state(
+    k8s_custom, k8s_v1, namespace: str, workflow_id: str, datastore_root: Optional[str] = None
+) -> WorkflowState:
     """Build a complete ``WorkflowState`` snapshot for the given workflow.
 
     Reads the controller JobSet (for workflow-level metadata and status),
     the worker JobSets (one per step), and the worker pods. The resulting
     ``WorkflowState`` carries everything the rendering layer needs — no
     extra context required from the caller.
+
+    If the controller JobSet is gone (GC'd), the ``-phases`` ConfigMap it
+    owns is gone too, so this falls back to the archived status.json in S3
+    (see ``read_status_doc()``) rather than reporting UNKNOWN.
     """
     controller_jobset = read_controller_jobset(k8s_custom, namespace, workflow_id)
+    if controller_jobset is None:
+        doc = read_status_doc(workflow_id, datastore_root)
+        if doc is not None:
+            return build_workflow_state_from_status_doc(workflow_id, doc)
     phases_configmap = None
     if controller_jobset and controller_jobset.get("status", {}).get("terminalState") == "Completed":
         phases_configmap = read_phases_configmap(k8s_v1, namespace, workflow_id)

@@ -7,11 +7,16 @@ test_collect_states.py's fixture style. The controller JobSet is dict-shaped,
 matching the real CustomObjectsApi response shape.
 """
 
+import json
 from dataclasses import asdict
 from types import SimpleNamespace
 
 from seekr_chain.backends.k8s.workflow_state import build_workflow_state
 from seekr_chain.status import PodStatus, WorkflowStatus
+
+
+def _phases_configmap(phases: dict):
+    return SimpleNamespace(data={"phases": json.dumps(phases)})
 
 
 def _controller_jobset(active=0, labels=None, annotations=None):
@@ -120,3 +125,49 @@ def test_build_workflow_state_step_with_no_pods_still_appears():
     assert state.steps[0].name == "step-a"
     assert state.steps[0].roles == []
     assert state.steps[0].pod.status == PodStatus.PENDING
+
+
+def test_build_workflow_state_appends_bare_row_for_skipped_step_with_no_jobset():
+    controller_jobset = _controller_jobset(active=0)
+    jobsets = [_jobset("wf-1-step-a", "step-a")]
+    phases_configmap = _phases_configmap({"step-a": "SUCCEEDED", "step-b": "SKIPPED"})
+    state = build_workflow_state(
+        "wf-1", controller_jobset=controller_jobset, jobsets=jobsets, pods=[], phases_configmap=phases_configmap
+    )
+
+    steps_by_name = {s.name: s for s in state.steps}
+    assert set(steps_by_name) == {"step-a", "step-b"}
+    skipped = steps_by_name["step-b"]
+    assert skipped.roles == []
+    assert skipped.pod.status == PodStatus.SKIPPED
+    assert skipped.dt_start is None
+    assert skipped.dt_end is None
+
+
+def test_build_workflow_state_does_not_duplicate_a_skipped_step_that_has_a_jobset():
+    # A step can be labeled SKIPPED in the phases map yet still have a
+    # (suspended, never-run) JobSet from before it was decided to skip it —
+    # the JobSet-backed row wins, no synthetic duplicate is appended.
+    controller_jobset = _controller_jobset(active=0)
+    jobsets = [_jobset("wf-1-step-a", "step-a", suspend=True)]
+    phases_configmap = _phases_configmap({"step-a": "SKIPPED"})
+    state = build_workflow_state(
+        "wf-1", controller_jobset=controller_jobset, jobsets=jobsets, pods=[], phases_configmap=phases_configmap
+    )
+    assert len(state.steps) == 1
+
+
+def test_build_workflow_state_with_phases_configmap_but_no_skipped_steps_is_unchanged():
+    """Regression guard: a phases_configmap with nothing SKIPPED must not alter
+    the steps built from JobSets/pods — proves the SKIPPED-append is additive only."""
+    controller_jobset = _controller_jobset(active=1)
+    jobsets = [_jobset("wf-1-step-a", "step-a"), _jobset("wf-1-step-b", "step-b")]
+    pods = [_pod("wf-1-step-a-0", "step-a", role="worker")]
+    phases_configmap = _phases_configmap({"step-a": "SUCCEEDED", "step-b": "RUNNING"})
+
+    with_map = build_workflow_state(
+        "wf-1", controller_jobset=controller_jobset, jobsets=jobsets, pods=pods, phases_configmap=phases_configmap
+    )
+    without_map = build_workflow_state("wf-1", controller_jobset=controller_jobset, jobsets=jobsets, pods=pods)
+
+    assert _state_dict(with_map) == _state_dict(without_map)

@@ -170,6 +170,7 @@ class TestGetStatusStyle:
             ("PULL:ERROR", "bold red"),
             ("PULL:CLOSURE", "yellow"),
             ("PULLING", "yellow"),
+            ("SKIPPED", "dim"),
         ],
     )
     def test_known_statuses(self, status, expected):
@@ -399,6 +400,26 @@ class TestCollectRows:
         assert len(rows) == 2
         assert rows[1].is_annotation is True
         assert rows[1].name == "ImagePullBackOff"
+
+    def test_skipped_step_with_no_roles_renders_as_bare_row_at_the_end(self):
+        """A SKIPPED step (empty roles, dt_start=None) sorts after started
+        steps and renders as a single bare row — same shape as a PENDING
+        step with no pods yet."""
+        started = _make_step(
+            "a", [_make_pod_state(status=PodStatus.SUCCEEDED)], status=PodStatus.SUCCEEDED,
+            dt_start=datetime.datetime(2026, 1, 1, tzinfo=UTC),
+        )
+        skipped_pod = _make_pod_state(name="b", status=PodStatus.SKIPPED)
+        skipped = StepState(dt_start=None, dt_end=None, name="b", roles=[], pod=skipped_pod)
+        ws = _make_ws(steps=[started, skipped])
+        rows = _collect_rows(ws)
+
+        assert len(rows) == 2
+        assert rows[0].name == " a"
+        assert rows[1].name == " b"
+        assert rows[1].status == "SKIPPED"
+        assert rows[1].prefix.endswith("└ ")  # last step gets the closing glyph
+        assert rows[0].prefix.endswith("├ ")  # not last
 
 
 # ---------------------------------------------------------------------------
