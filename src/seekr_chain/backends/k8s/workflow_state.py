@@ -436,7 +436,10 @@ def _jobset_step_pod(step_name: str, jobset: dict, role_states: list[RoleState])
 
 
 def _bare_step_state(
-    name: str, status: PodStatus, dt_start: Optional[datetime.datetime] = None, dt_end: Optional[datetime.datetime] = None
+    name: str,
+    status: PodStatus,
+    dt_start: Optional[datetime.datetime] = None,
+    dt_end: Optional[datetime.datetime] = None,
 ) -> StepState:
     """Build a StepState with no role/pod detail — just a phase and timing.
 
@@ -660,6 +663,16 @@ def workflow_failed(phases_configmap) -> bool:
     return "FAILED" in json.loads(raw).values()
 
 
+def _skipped_step_names(phases_configmap) -> set[str]:
+    """Names of steps whose persisted phase is SKIPPED. See ``workflow_cancelled()``."""
+    if phases_configmap is None:
+        return set()
+    raw = (phases_configmap.data or {}).get("phases")
+    if not raw:
+        return set()
+    return {name for name, phase in json.loads(raw).items() if phase == "SKIPPED"}
+
+
 def build_workflow_state(
     workflow_id: str, controller_jobset: Optional[dict], jobsets: list[dict], pods: list, phases_configmap=None
 ) -> WorkflowState:
@@ -675,6 +688,12 @@ def build_workflow_state(
     steps = [
         _collect_step_state(step_name, roles_by_step.get(step_name, {}), js) for step_name, js in jobset_by_step.items()
     ]
+    # A step the controller marked SKIPPED never gets a JobSet, so it's
+    # missing from `steps` above — append a bare row for it so skipped steps
+    # are still visible once the workflow has completed.
+    if phases_configmap is not None:
+        for name in _skipped_step_names(phases_configmap) - jobset_by_step.keys():
+            steps.append(_bare_step_state(name, PodStatus.SKIPPED))
     return WorkflowState(
         id=workflow_id,
         name=meta.name,
