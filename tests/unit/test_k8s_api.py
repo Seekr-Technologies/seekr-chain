@@ -19,11 +19,11 @@ from seekr_chain.k8s_api import kube
 
 _SRC_ROOT = Path(k8s_api.__file__).parent
 
-# The only files allowed to build Kubernetes clients themselves. controllerlib/watch.py
+# The only files allowed to build Kubernetes clients themselves. controller/watch.py
 # ships standalone into the controller pod, where seekr_chain is not installed.
 _CONSTRUCTION_ALLOWED = {
     Path("k8s_api.py"),
-    Path("backends/k8s/resources/controllerlib/watch.py"),
+    Path("backends/k8s/resources/controller/watch.py"),
 }
 
 _RAW_CONSTRUCTION = re.compile(

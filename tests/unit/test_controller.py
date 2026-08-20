@@ -1,8 +1,8 @@
-"""Unit tests for the controller DAG executor (resources/controllerlib package).
+"""Unit tests for the controller DAG executor (resources/controller package).
 
-controllerlib runs inside the controller pod and has no seekr_chain dependency,
-so we put the resources dir on sys.path and import the package modules
-directly, avoiding any packaging side effects (e.g. seekr_chain/__init__
+The controller package runs inside the controller pod and has no seekr_chain
+dependency, so we put the resources dir on sys.path and import the package
+modules directly, avoiding any packaging side effects (e.g. seekr_chain/__init__
 pulling in boto3/kubernetes at import time).
 """
 
@@ -11,14 +11,14 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 # ---------------------------------------------------------------------------
-# Bootstrap: make controllerlib importable as a top-level package, exactly as
-# it is when the controller pod runs `python controller.py`.
+# Bootstrap: make controller importable as a top-level package, exactly as it
+# is when the controller pod runs `python -m controller`.
 # ---------------------------------------------------------------------------
 
 _RESOURCES = Path(__file__).parent.parent.parent / "src/seekr_chain/backends/k8s/resources"
 sys.path.insert(0, str(_RESOURCES))
 
-from controllerlib import manifests, phases, scheduling, watch  # noqa: E402
+from controller import manifests, phases, scheduling, watch  # noqa: E402
 
 _cascade_fail = phases._cascade_fail
 _submit_ready_steps = scheduling._submit_ready_steps

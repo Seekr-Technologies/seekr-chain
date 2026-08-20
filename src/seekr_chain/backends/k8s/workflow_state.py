@@ -595,7 +595,7 @@ def list_pods(k8s_v1, namespace: str, workflow_id: str) -> tuple[list, str]:
 
 def read_phases_configmap(k8s_v1, namespace: str, workflow_id: str):
     """Fetch the phases ConfigMap the controller persists step state to
-    (see ``resources/controller.py:_save_phases()``), or ``None`` if absent."""
+    (see ``resources/controller/phases.py:_save_phases()``), or ``None`` if absent."""
     try:
         return k8s_v1.read_namespaced_config_map(name=f"{workflow_id}-phases", namespace=namespace)
     except k8s.client.exceptions.ApiException as e:

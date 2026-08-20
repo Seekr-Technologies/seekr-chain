@@ -283,7 +283,7 @@ def _build_controller_jobset(
     """
     # Per-workflow config.controller_image overrides user config and default.
     controller_image = config.controller_image or _CONTROLLER_IMAGE
-    controller_command = ["python", f"{constants.JOB_RESOURCES_PATH}/controller.py"]
+    controller_command = ["python", "-m", "controller"]
 
     # Env vars for the controller's init container (S3 download via s5cmd)
     init_env = [
@@ -310,6 +310,7 @@ def _build_controller_jobset(
         {"name": "SEEKR_CHAIN_NAMESPACE", "value": config.namespace},
         {"name": "SEEKR_CHAIN_JOB_ASSET_PATH", "value": constants.JOB_ASSET_PATH},
         {"name": "SEEKR_CHAIN_CONTROLLER_JOB_NAME", "value": workflow_id},
+        {"name": "PYTHONPATH", "value": constants.JOB_RESOURCES_PATH},
     ] + workflow_secrets
 
     # Add SEEKRCHAIN_DATASTORE_ROOT so the controller can call get_job_info if needed
