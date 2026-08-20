@@ -49,30 +49,32 @@ class TestMultinode:
 
         expected = {
             "step=main": {
-                "index=0": {
-                    "attempt=0": [
-                        "NNODES=2",
-                        "NODE_RANK=0",
-                        f"MASTER_ADDR={job.id}-main-js--0-0.{job.id}-main-js",
-                        "MASTER_PORT=29500",
-                        (".*", "*"),
-                        r"\[0/16\] Before all-reduce: 1.0",
-                        r"\[0/16\] After all-reduce: 136.0",
-                        "",
-                    ]
-                },
-                "index=1": {
-                    "attempt=0": [
-                        "NNODES=2",
-                        "NODE_RANK=1",
-                        f"MASTER_ADDR={job.id}-main-js--0-0.{job.id}-main-js",
-                        "MASTER_PORT=29500",
-                        (".*", "*"),
-                        r"\[8/16\] Before all-reduce: 9.0",
-                        r"\[8/16\] After all-reduce: 136.0",
-                        "",
-                    ]
-                },
+                "role=main": {
+                    "index=0": {
+                        "attempt=0": [
+                            "NNODES=2",
+                            "NODE_RANK=0",
+                            f"MASTER_ADDR={job.id}-main-js-main-0-0.{job.id}-main-js",
+                            "MASTER_PORT=29500",
+                            (".*", "*"),
+                            r"\[0/16\] Before all-reduce: 1.0",
+                            r"\[0/16\] After all-reduce: 136.0",
+                            "",
+                        ]
+                    },
+                    "index=1": {
+                        "attempt=0": [
+                            "NNODES=2",
+                            "NODE_RANK=1",
+                            f"MASTER_ADDR={job.id}-main-js-main-0-0.{job.id}-main-js",
+                            "MASTER_PORT=29500",
+                            (".*", "*"),
+                            r"\[8/16\] Before all-reduce: 9.0",
+                            r"\[8/16\] After all-reduce: 136.0",
+                            "",
+                        ]
+                    },
+                }
             },
         }
 
@@ -117,30 +119,32 @@ class TestMultinode:
 
         expected = {
             "step=some-super-super-super-super-long-step-name": {
-                "index=0": {
-                    "attempt=0": [
-                        "NNODES=2",
-                        "NODE_RANK=0",
-                        f"MASTER_ADDR={job.id}-s00-js--0-0\.{job.id}-s00-js",
-                        "MASTER_PORT=29500",
-                        (".*", "*"),
-                        r"\[0/16\] Before all-reduce: 1.0",
-                        r"\[0/16\] After all-reduce: 136.0",
-                        "",
-                    ]
-                },
-                "index=1": {
-                    "attempt=0": [
-                        "NNODES=2",
-                        "NODE_RANK=1",
-                        f"MASTER_ADDR={job.id}-s00-js--0-0\.{job.id}-s00-js",
-                        "MASTER_PORT=29500",
-                        (".*", "*"),
-                        r"\[8/16\] Before all-reduce: 9.0",
-                        r"\[8/16\] After all-reduce: 136.0",
-                        "",
-                    ]
-                },
+                "role=main": {
+                    "index=0": {
+                        "attempt=0": [
+                            "NNODES=2",
+                            "NODE_RANK=0",
+                            f"MASTER_ADDR={job.id}-s00-js-main-0-0\.{job.id}-s00-js",
+                            "MASTER_PORT=29500",
+                            (".*", "*"),
+                            r"\[0/16\] Before all-reduce: 1.0",
+                            r"\[0/16\] After all-reduce: 136.0",
+                            "",
+                        ]
+                    },
+                    "index=1": {
+                        "attempt=0": [
+                            "NNODES=2",
+                            "NODE_RANK=1",
+                            f"MASTER_ADDR={job.id}-s00-js-main-0-0\.{job.id}-s00-js",
+                            "MASTER_PORT=29500",
+                            (".*", "*"),
+                            r"\[8/16\] Before all-reduce: 9.0",
+                            r"\[8/16\] After all-reduce: 136.0",
+                            "",
+                        ]
+                    },
+                }
             }
         }
 
@@ -186,24 +190,26 @@ class TestMultinode:
 
         expected = {
             "step=main": {
-                "index=0": {
-                    "attempt=0": [
-                        "/seekr-chain/hostfile",
-                        f"{job.name}-main-js--0-0.{job.name}-main-js slots=8",
-                        f"{job.name}-main-js--1-0.{job.name}-main-js slots=8",
-                        f"{job.name}-main-js--0-0.{job.name}-main-js",
-                        "",
-                    ]
-                },
-                "index=1": {
-                    "attempt=0": [
-                        "/seekr-chain/hostfile",
-                        f"{job.name}-main-js--0-0.{job.name}-main-js slots=8",
-                        f"{job.name}-main-js--1-0.{job.name}-main-js slots=8",
-                        f"{job.name}-main-js--0-0.{job.name}-main-js",
-                        "",
-                    ]
-                },
+                "role=main": {
+                    "index=0": {
+                        "attempt=0": [
+                            "/seekr-chain/hostfile",
+                            f"{job.name}-main-js-main-0-0.{job.name}-main-js slots=8",
+                            f"{job.name}-main-js-main-1-0.{job.name}-main-js slots=8",
+                            f"{job.name}-main-js-main-0-0.{job.name}-main-js",
+                            "",
+                        ]
+                    },
+                    "index=1": {
+                        "attempt=0": [
+                            "/seekr-chain/hostfile",
+                            f"{job.name}-main-js-main-0-0.{job.name}-main-js slots=8",
+                            f"{job.name}-main-js-main-1-0.{job.name}-main-js slots=8",
+                            f"{job.name}-main-js-main-0-0.{job.name}-main-js",
+                            "",
+                        ]
+                    },
+                }
             }
         }
 
@@ -256,22 +262,83 @@ class TestMultinode:
 
         expected = {
             "step=main": {
-                "index=0": {
-                    "attempt=0": [
-                        (".*", "*"),
-                        r"\[0/16\] Before all-reduce: 0",
-                        r"\[0/16\] After all-reduce: 120",
-                        (".*", "*"),
-                    ]
-                },
-                "index=1": {
-                    "attempt=0": [
-                        (".*", "*"),
-                        r"\[8/16\] Before all-reduce: 8",
-                        r"\[8/16\] After all-reduce: 120",
-                        (".*", "*"),
-                    ]
-                },
+                "role=main": {
+                    "index=0": {
+                        "attempt=0": [
+                            (".*", "*"),
+                            r"\[0/16\] Before all-reduce: 0",
+                            r"\[0/16\] After all-reduce: 120",
+                            (".*", "*"),
+                        ]
+                    },
+                    "index=1": {
+                        "attempt=0": [
+                            (".*", "*"),
+                            r"\[8/16\] Before all-reduce: 8",
+                            r"\[8/16\] After all-reduce: 120",
+                            (".*", "*"),
+                        ]
+                    },
+                }
+            }
+        }
+
+        assert_nested_match(logs, expected)
+
+
+class TestSingleRoleComm:
+    def test_rank1_connects_to_rank0_over_headless_service_dns(self, test_code_dir):
+        """Regression for the single-role DNS bug: JobSet derives pod DNS from
+        replicatedJobs[].name, so if that name ever drifts from the role name used
+        to build MASTER_ADDR/PEERMAP, rank 1 can't resolve rank 0. Rank 1 acts on
+        PEERMAP alone (no hardcoded hostnames) to prove the two stay in sync.
+        """
+        config = seekr_chain.WorkflowConfig.model_validate(
+            {
+                "name": "test-single-role-comm",
+                "namespace": "argo-workflows",
+                "ttl": "1:00:00",
+                "code": {"path": str(test_code_dir / "single_role_comm")},
+                "steps": [
+                    {
+                        "name": "step",
+                        "image": "python:3.12-alpine",
+                        "script": "echo MASTER_ADDR=$MASTER_ADDR && python node.py",
+                        "resources": {"num_nodes": 2},
+                    }
+                ],
+            }
+        )
+
+        job = seekr_chain.launch_k8s_workflow(config)
+        job.follow()
+
+        status = seekr_chain.wait(job, poll_interval=1)
+        assert status.is_successful()
+
+        logs = job.get_logs().to_dict()
+
+        expected = {
+            "step=step": {
+                "role=main": {
+                    "index=0": {
+                        "attempt=0": [
+                            f"MASTER_ADDR={job.name}-step-js-main-0-0.{job.name}-step-js",
+                            "server: waiting for one request",
+                            "server: done",
+                            "",
+                        ]
+                    },
+                    "index=1": {
+                        "attempt=0": [
+                            f"MASTER_ADDR={job.name}-step-js-main-0-0.{job.name}-step-js",
+                            f"target URL: http://{job.name}-step-js-main-0-0.{job.name}-step-js:8000",
+                            (r"attempt \d+/\d+ failed: .*", "*"),
+                            "OK: hello from rank0",
+                            "",
+                        ]
+                    },
+                }
             }
         }
 

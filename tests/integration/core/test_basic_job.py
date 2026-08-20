@@ -83,11 +83,13 @@ class TestScript:
             job_shell.get_logs().to_dict(),
             {
                 "step=step": {
-                    "index=0": {
-                        "attempt=0": [
-                            "ERROR: shell not found or not executable: /awef",
-                            "",
-                        ]
+                    "role=main": {
+                        "index=0": {
+                            "attempt=0": [
+                                "ERROR: shell not found or not executable: /awef",
+                                "",
+                            ]
+                        }
                     }
                 }
             },
@@ -99,12 +101,14 @@ class TestScript:
             job_fail.get_logs().to_dict(),
             {
                 "step=step": {
-                    "index=0": {
-                        "attempt=0": [
-                            "hello world",
-                            "after",
-                            "",
-                        ]
+                    "role=main": {
+                        "index=0": {
+                            "attempt=0": [
+                                "hello world",
+                                "after",
+                                "",
+                            ]
+                        }
                     }
                 }
             },
@@ -139,12 +143,14 @@ class TestScript:
 
         expected = {
             "step=step": {
-                "index=0": {
-                    "attempt=0": [
-                        "hello",
-                        "",
-                    ]
-                },
+                "role=main": {
+                    "index=0": {
+                        "attempt=0": [
+                            "hello",
+                            "",
+                        ]
+                    },
+                }
             },
         }
 
@@ -184,12 +190,14 @@ class TestScript:
 
         expected = {
             "step=step": {
-                "index=0": {
-                    "attempt=0": [
-                        "hello",
-                        "",
-                    ]
-                },
+                "role=main": {
+                    "index=0": {
+                        "attempt=0": [
+                            "hello",
+                            "",
+                        ]
+                    },
+                }
             },
         }
 
@@ -218,7 +226,7 @@ class TestBasic:
                             pwd
                             python job.py
                             echo $SEEKR_CHAIN_ARGS && cat $SEEKR_CHAIN_ARGS && echo
-                            ls /seekr-chain/assets/step=step/ | LC_ALL=C sort
+                            ls /seekr-chain/assets/step=step/role=main/ | LC_ALL=C sort
                         """,
                         "after_script": "echo after",
                     }
@@ -234,23 +242,24 @@ class TestBasic:
 
         expected = {
             "step=step": {
-                "index=0": {
-                    "attempt=0": [
-                        "before",
-                        "/seekr-chain/workspace",
-                        "Hello world",
-                        "/seekr-chain/assets/workflow_args.json",
-                        '{"key": "value", "num": 42}',
-                        # Asset files deployed to the container by the init container
-                        "after_script.sh",
-                        "before_script.sh",
-                        "hostfile",
-                        "jobset.yaml",
-                        "peermap.json",
-                        "script.sh",
-                        "after",
-                        "",
-                    ]
+                "role=main": {
+                    "index=0": {
+                        "attempt=0": [
+                            "before",
+                            "/seekr-chain/workspace",
+                            "Hello world",
+                            "/seekr-chain/assets/workflow_args.json",
+                            '{"key": "value", "num": 42}',
+                            # Asset files deployed to the container by the init container
+                            "after_script.sh",
+                            "before_script.sh",
+                            "hostfile",
+                            "peermap.json",
+                            "script.sh",
+                            "after",
+                            "",
+                        ]
+                    }
                 }
             }
         }
@@ -306,14 +315,16 @@ class TestBasic:
 
         expected = {
             "step=step": {
-                "index=0": {
-                    "attempt=0": [
-                        "INLINE_SECRET=inline-value",
-                        "ENV_SECRET=from-env",
-                        "CLUSTER_SECRET=from-cluster",
-                        "",
-                    ]
-                },
+                "role=main": {
+                    "index=0": {
+                        "attempt=0": [
+                            "INLINE_SECRET=inline-value",
+                            "ENV_SECRET=from-env",
+                            "CLUSTER_SECRET=from-cluster",
+                            "",
+                        ]
+                    },
+                }
             }
         }
 
@@ -403,14 +414,16 @@ class TestBasic:
 
         expected = {
             "step=step": {
-                "index=0": {
-                    "attempt=0": [
-                        "0",
-                        "42",
-                        "43",
-                        "",
-                    ]
-                },
+                "role=main": {
+                    "index=0": {
+                        "attempt=0": [
+                            "0",
+                            "42",
+                            "43",
+                            "",
+                        ]
+                    },
+                }
             }
         }
 
@@ -505,13 +518,15 @@ class TestBasic:
 
         expected = {
             "step=some-super-super-super-super-long-step-name": {
-                "index=0": {
-                    "attempt=0": [
-                        "/seekr-chain/workspace",
-                        "hello world",
-                        "",
-                    ]
-                },
+                "role=main": {
+                    "index=0": {
+                        "attempt=0": [
+                            "/seekr-chain/workspace",
+                            "hello world",
+                            "",
+                        ]
+                    },
+                }
             }
         }
 
@@ -641,40 +656,48 @@ class TestDAGJob:
 
         expected = {
             "step=a": {
-                "index=0": {
-                    "attempt=0": [
-                        "/seekr-chain/workspace",
-                        "hello world",
-                        "",
-                    ]
-                },
+                "role=main": {
+                    "index=0": {
+                        "attempt=0": [
+                            "/seekr-chain/workspace",
+                            "hello world",
+                            "",
+                        ]
+                    },
+                }
             },
             "step=b0": {
-                "index=0": {
-                    "attempt=0": [
-                        "/seekr-chain/workspace",
-                        "hello world",
-                        "",
-                    ]
-                },
+                "role=main": {
+                    "index=0": {
+                        "attempt=0": [
+                            "/seekr-chain/workspace",
+                            "hello world",
+                            "",
+                        ]
+                    },
+                }
             },
             "step=b1": {
-                "index=0": {
-                    "attempt=0": [
-                        "/seekr-chain/workspace",
-                        "hello world",
-                        "",
-                    ]
-                },
+                "role=main": {
+                    "index=0": {
+                        "attempt=0": [
+                            "/seekr-chain/workspace",
+                            "hello world",
+                            "",
+                        ]
+                    },
+                }
             },
             "step=c": {
-                "index=0": {
-                    "attempt=0": [
-                        "/seekr-chain/workspace",
-                        "hello world",
-                        "",
-                    ]
-                },
+                "role=main": {
+                    "index=0": {
+                        "attempt=0": [
+                            "/seekr-chain/workspace",
+                            "hello world",
+                            "",
+                        ]
+                    },
+                }
             },
         }
 
@@ -748,13 +771,15 @@ class TestVolumes:
 
         expected = {
             "step=step": {
-                "index=0": {
-                    "attempt=0": [
-                        "Filesystem                                                 Size  Used Avail Use% Mounted on",
-                        ".* /llm-cache",
-                        "",
-                    ]
-                },
+                "role=main": {
+                    "index=0": {
+                        "attempt=0": [
+                            "Filesystem                                                 Size  Used Avail Use% Mounted on",
+                            ".* /llm-cache",
+                            "",
+                        ]
+                    },
+                }
             }
         }
 

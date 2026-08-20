@@ -37,9 +37,9 @@ class TestExitCodeGatedRetries:
         logs = job.get_logs().to_dict()
 
         # Non-retriable exit code -> exactly one attempt, no restart burned.
-        expected = {"step=step": {"index=0": {"attempt=0": ["starting", ""]}}}
+        expected = {"step=step": {"role=main": {"index=0": {"attempt=0": ["starting", ""]}}}}
         assert_nested_match(logs, expected)
-        assert list(logs["step=step"]["index=0"].keys()) == ["attempt=0"]
+        assert list(logs["step=step"]["role=main"]["index=0"].keys()) == ["attempt=0"]
 
     def test_nonmatching_exit_code_still_restarts(self, s3_client):
         config = seekr_chain.WorkflowConfig.model_validate(
@@ -75,11 +75,13 @@ class TestExitCodeGatedRetries:
         # (two total attempts) before max_restarts is exhausted.
         expected = {
             "step=step": {
-                "index=0": {
-                    "attempt=0": ["starting", ""],
-                    "attempt=1": ["starting", ""],
+                "role=main": {
+                    "index=0": {
+                        "attempt=0": ["starting", ""],
+                        "attempt=1": ["starting", ""],
+                    }
                 }
             }
         }
         assert_nested_match(logs, expected)
-        assert sorted(logs["step=step"]["index=0"].keys()) == ["attempt=0", "attempt=1"]
+        assert sorted(logs["step=step"]["role=main"]["index=0"].keys()) == ["attempt=0", "attempt=1"]

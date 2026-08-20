@@ -124,7 +124,7 @@ class TestNixMode:
         assert_nested_match(
             logs1["step=step"],
             {
-                "index=0": {"attempt=0": ["Hello, world!", ""]},
+                "role=main": {"index=0": {"attempt=0": ["Hello, world!", ""]}},
             },
         )
 
@@ -142,6 +142,6 @@ class TestNixMode:
         assert_nested_match(
             logs2["step=step"],
             {
-                "index=0": {"attempt=0": ["Hello, world!", ""]},
+                "role=main": {"index=0": {"attempt=0": ["Hello, world!", ""]}},
             },
         )
