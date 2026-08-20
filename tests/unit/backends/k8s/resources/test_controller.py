@@ -100,7 +100,7 @@ class TestCascadeFail:
         ]
         phases = {"a": "FAILED", "b": "PENDING"}
         _cascade_fail(dag, phases)
-        assert phases["b"] == "FAILED"
+        assert phases["b"] == "SKIPPED"
 
     def test_transitive_cascade(self):
         dag = [
@@ -110,11 +110,11 @@ class TestCascadeFail:
         ]
         phases = {"a": "FAILED", "b": "PENDING", "c": "PENDING"}
         _cascade_fail(dag, phases)
-        assert phases["b"] == "FAILED"
-        assert phases["c"] == "FAILED"
+        assert phases["b"] == "SKIPPED"
+        assert phases["c"] == "SKIPPED"
 
     def test_diamond_only_one_branch_fails(self):
-        """a→b, a→c, b+c→d; only b fails — d should cascade-fail."""
+        """a→b, a→c, b+c→d; only b fails — d should cascade-skip."""
         dag = [
             {"name": "a", "depends_on": []},
             {"name": "b", "depends_on": ["a"]},
@@ -123,7 +123,7 @@ class TestCascadeFail:
         ]
         phases = {"a": "SUCCEEDED", "b": "FAILED", "c": "SUCCEEDED", "d": "PENDING"}
         _cascade_fail(dag, phases)
-        assert phases["d"] == "FAILED"
+        assert phases["d"] == "SKIPPED"
 
     def test_running_step_not_cascade_failed(self):
         dag = [
@@ -135,7 +135,9 @@ class TestCascadeFail:
         # RUNNING steps are not touched — they were already submitted
         assert phases["b"] == "RUNNING"
 
-    def test_cancelled_dep_cascades_cancelled_not_failed(self):
+    def test_cancelled_dep_cascades_skipped_not_cancelled(self):
+        """A CANCELLED step's dependents never ran either, but they weren't the
+        step the user cancelled — they cascade to SKIPPED, not CANCELLED."""
         dag = [
             {"name": "a", "depends_on": []},
             {"name": "b", "depends_on": ["a"]},
@@ -143,8 +145,20 @@ class TestCascadeFail:
         ]
         phases = {"a": "CANCELLED", "b": "PENDING", "c": "PENDING"}
         _cascade_fail(dag, phases)
-        assert phases["b"] == "CANCELLED"
-        assert phases["c"] == "CANCELLED"
+        assert phases["a"] == "CANCELLED"
+        assert phases["b"] == "SKIPPED"
+        assert phases["c"] == "SKIPPED"
+
+    def test_failed_chain_fully_propagates_skipped(self):
+        """A(FAILED) → B → C: both B and C end SKIPPED; A stays FAILED."""
+        dag = [
+            {"name": "a", "depends_on": []},
+            {"name": "b", "depends_on": ["a"]},
+            {"name": "c", "depends_on": ["b"]},
+        ]
+        phases = {"a": "FAILED", "b": "PENDING", "c": "PENDING"}
+        _cascade_fail(dag, phases)
+        assert phases == {"a": "FAILED", "b": "SKIPPED", "c": "SKIPPED"}
 
 
 # ---------------------------------------------------------------------------
@@ -195,6 +209,19 @@ class TestSubmitReadySteps:
         phases = {"a": "SUCCEEDED", "b": "PENDING"}
         js_names, js_to_step, mock_k8s = self._call(dag, phases)
         assert phases["b"] == "RUNNING"
+
+    def test_pending_step_with_skipped_dep_not_submitted(self):
+        """A step is only submitted once all its deps SUCCEEDED — a SKIPPED
+        dep (never ran) must never satisfy that, so the dependent stays
+        PENDING for _cascade_fail to pick up rather than being submitted."""
+        dag = [
+            {"name": "a", "depends_on": []},
+            {"name": "b", "depends_on": ["a"]},
+        ]
+        phases = {"a": "SKIPPED", "b": "PENDING"}
+        js_names, js_to_step, mock_k8s = self._call(dag, phases)
+        assert phases["b"] == "PENDING"
+        mock_k8s.create_namespaced_custom_object.assert_not_called()
 
     def test_409_conflict_treated_as_already_running(self):
         """On controller restart, a JobSet may already exist — 409 should not raise."""
@@ -284,6 +311,12 @@ class TestLoadPhases:
         assert phases["b"] == "FAILED"
         # RUNNING is reset to PENDING on restore
         assert phases["c"] == "PENDING"
+
+    def test_restores_skipped(self):
+        dag = [{"name": "a"}, {"name": "b"}]
+        saved = {"a": "FAILED", "b": "SKIPPED"}
+        phases = _load_phases(self._make_v1(cm_data=saved), "ns", "wf-abc", dag)
+        assert phases == {"a": "FAILED", "b": "SKIPPED"}
 
     def test_ignores_unknown_step_names(self):
         """ConfigMap may contain stale step names that no longer exist in the DAG."""
@@ -553,6 +586,76 @@ class TestMainCancellation:
             ],
         ]
         assert _run_main(dag, events) == 0
+
+
+class TestMainSkippedStatus:
+    def test_workflow_failed_event_excludes_skipped_steps(self):
+        """a → b, a → c, b+c → d; only b fails. The WorkflowFailed event's
+        failed-steps list must contain only b — d is SKIPPED (never ran), not
+        FAILED, so it must not be reported as a failed step."""
+        dag = [
+            {"name": "a", "depends_on": []},
+            {"name": "b", "depends_on": ["a"]},
+            {"name": "c", "depends_on": ["a"]},
+            {"name": "d", "depends_on": ["b", "c"]},
+        ]
+        events = [
+            [
+                _make_event("a-js", "Completed", rv="2"),
+                _make_event("b-js", "Failed", rv="3"),
+                _make_event("c-js", "Completed", rv="4"),
+            ],
+        ]
+
+        env = {
+            "SEEKR_CHAIN_JOB_ASSET_PATH": "/assets",
+            "SEEKR_CHAIN_NAMESPACE": "ns",
+            "SEEKR_CHAIN_CONTROLLER_JOB_NAME": "wf-abc",
+        }
+
+        call_count = [0]
+
+        def _stream_side_effect(*args, **kwargs):
+            idx = call_count[0]
+            call_count[0] += 1
+            if idx < len(events):
+                yield from events[idx]
+
+        mock_watch_cls = MagicMock()
+        mock_watch_instance = MagicMock()
+        mock_watch_instance.stream.side_effect = _stream_side_effect
+        mock_watch_instance.stop = MagicMock()
+        mock_watch_cls.return_value = mock_watch_instance
+
+        mock_k8s = MagicMock()
+        mock_k8s.get_namespaced_custom_object.return_value = {"metadata": {"uid": "uid-123"}}
+        mock_k8s.create_namespaced_custom_object.return_value = {}
+
+        def _load_manifest_mock(_assets, name):
+            return {"metadata": {"name": f"{name}-js", "resourceVersion": "1"}, "spec": {}}
+
+        with (
+            patch.dict("os.environ", env),
+            patch.object(controller.kubernetes.config, "load_incluster_config"),
+            patch.object(controller.kubernetes.client, "CustomObjectsApi", MagicMock(return_value=mock_k8s)),
+            patch.object(controller.kubernetes.client, "CoreV1Api", MagicMock()),
+            patch.object(controller.kubernetes, "watch", MagicMock(Watch=mock_watch_cls)),
+            patch.object(controller, "_load_manifest", side_effect=_load_manifest_mock),
+            patch.object(
+                controller, "_load_phases", side_effect=lambda _v1, _ns, _wid, d: {s["name"]: "PENDING" for s in d}
+            ),
+            patch.object(controller, "_save_phases"),
+            patch.object(controller, "_emit_event") as mock_emit,
+            patch.object(controller, "_touch_heartbeat"),
+            patch.object(controller.json, "load", return_value=dag),
+            patch("builtins.open", MagicMock(__enter__=lambda s, *a: s, __exit__=lambda s, *a: None)),
+        ):
+            result = controller.main()
+
+        assert result == 0
+        failed_calls = [c for c in mock_emit.call_args_list if c.args[4] == "WorkflowFailed"]
+        assert len(failed_calls) == 1
+        assert failed_calls[0].args[5] == "Workflow failed — failed steps: ['b']"
 
 
 class TestMainWatchReconnect:
