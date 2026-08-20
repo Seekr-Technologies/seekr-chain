@@ -58,7 +58,12 @@ _DOC = {
     "id": "wf-1",
     "status": "FAILED",
     "steps": [
-        {"name": "a", "phase": "FAILED", "dt_start": "2026-01-01T00:00:00+00:00", "dt_end": "2026-01-01T00:01:00+00:00"},
+        {
+            "name": "a",
+            "phase": "FAILED",
+            "dt_start": "2026-01-01T00:00:00+00:00",
+            "dt_end": "2026-01-01T00:01:00+00:00",
+        },
         {"name": "b", "phase": "SKIPPED", "dt_start": None, "dt_end": None},
         {"name": "c", "phase": "SKIPPED", "dt_start": None, "dt_end": None},
     ],
