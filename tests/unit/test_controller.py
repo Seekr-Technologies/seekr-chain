@@ -381,6 +381,9 @@ def _run_main(
 
     event_sequences: list of event batches, one per watch stream open() call.
     Each batch is exhausted before the next watch reconnect (if any).
+
+    Returns (exit_code, mock_emit) — mock_emit is the patched _emit_event, so
+    callers can assert on emitted events without hand-rolling the harness.
     """
     env = {
         "SEEKR_CHAIN_JOB_ASSET_PATH": "/assets",
@@ -438,7 +441,7 @@ def _run_main(
         patch.object(controller, "_load_manifest", side_effect=_load_manifest_mock),
         patch.object(controller, "_load_phases", side_effect=_load_phases_mock),
         patch.object(controller, "_save_phases"),
-        patch.object(controller, "_emit_event"),
+        patch.object(controller, "_emit_event") as mock_emit,
         patch.object(controller, "_touch_heartbeat"),
         patch(
             "builtins.open",
@@ -454,7 +457,7 @@ def _run_main(
     ):
         result = controller.main()
 
-    return result
+    return result, mock_emit
 
 
 class TestMainLinearDag:
@@ -463,14 +466,16 @@ class TestMainLinearDag:
         events = [
             [_make_event("a-js", "Completed", rv="2")],
         ]
-        assert _run_main(dag, events) == 0
+        result, _ = _run_main(dag, events)
+        assert result == 0
 
     def test_single_step_failure(self):
         dag = [{"name": "a", "depends_on": []}]
         events = [
             [_make_event("a-js", "Failed", rv="2")],
         ]
-        assert _run_main(dag, events) == 0
+        result, _ = _run_main(dag, events)
+        assert result == 0
 
     def test_linear_two_steps(self):
         dag = [
@@ -484,7 +489,8 @@ class TestMainLinearDag:
                 _make_event("b-js", "Completed", rv="3"),
             ],
         ]
-        assert _run_main(dag, events) == 0
+        result, _ = _run_main(dag, events)
+        assert result == 0
 
     def test_linear_step_b_fails_returns_0(self):
         dag = [
@@ -497,7 +503,8 @@ class TestMainLinearDag:
                 _make_event("b-js", "Failed", rv="3"),
             ],
         ]
-        assert _run_main(dag, events) == 0
+        result, _ = _run_main(dag, events)
+        assert result == 0
 
     def test_step_a_failure_cascade_fails_b(self):
         dag = [
@@ -508,7 +515,8 @@ class TestMainLinearDag:
         events = [
             [_make_event("a-js", "Failed", rv="2")],
         ]
-        assert _run_main(dag, events) == 0
+        result, _ = _run_main(dag, events)
+        assert result == 0
 
 
 class TestMainDiamondDag:
@@ -528,7 +536,8 @@ class TestMainDiamondDag:
                 _make_event("d-js", "Completed", rv="5"),
             ],
         ]
-        assert _run_main(dag, events) == 0
+        result, _ = _run_main(dag, events)
+        assert result == 0
 
     def test_diamond_b_fails_d_cascade_fails(self):
         dag = [
@@ -544,7 +553,8 @@ class TestMainDiamondDag:
                 _make_event("c-js", "Completed", rv="4"),
             ],
         ]
-        assert _run_main(dag, events) == 0
+        result, _ = _run_main(dag, events)
+        assert result == 0
 
 
 class TestMainCancellation:
@@ -554,7 +564,8 @@ class TestMainCancellation:
         events = [
             [_make_event("a-js", terminal=None, rv="2", suspend=True)],
         ]
-        assert _run_main(dag, events) == 0
+        result, _ = _run_main(dag, events)
+        assert result == 0
 
     def test_cascade_cancels_unsubmitted_dependent(self):
         """a is cancelled before b's dependency is satisfied — b must never be
@@ -566,7 +577,8 @@ class TestMainCancellation:
         events = [
             [_make_event("a-js", terminal=None, rv="2", suspend=True)],
         ]
-        assert _run_main(dag, events) == 0
+        result, _ = _run_main(dag, events)
+        assert result == 0
 
     def test_diamond_partial_cancel_cascades_join_step(self):
         """a → b, a → c, b+c → d. b is cancelled, c succeeds — d must
@@ -585,7 +597,8 @@ class TestMainCancellation:
                 _make_event("c-js", "Completed", rv="4"),
             ],
         ]
-        assert _run_main(dag, events) == 0
+        result, _ = _run_main(dag, events)
+        assert result == 0
 
 
 class TestMainSkippedStatus:
@@ -607,50 +620,7 @@ class TestMainSkippedStatus:
             ],
         ]
 
-        env = {
-            "SEEKR_CHAIN_JOB_ASSET_PATH": "/assets",
-            "SEEKR_CHAIN_NAMESPACE": "ns",
-            "SEEKR_CHAIN_CONTROLLER_JOB_NAME": "wf-abc",
-        }
-
-        call_count = [0]
-
-        def _stream_side_effect(*args, **kwargs):
-            idx = call_count[0]
-            call_count[0] += 1
-            if idx < len(events):
-                yield from events[idx]
-
-        mock_watch_cls = MagicMock()
-        mock_watch_instance = MagicMock()
-        mock_watch_instance.stream.side_effect = _stream_side_effect
-        mock_watch_instance.stop = MagicMock()
-        mock_watch_cls.return_value = mock_watch_instance
-
-        mock_k8s = MagicMock()
-        mock_k8s.get_namespaced_custom_object.return_value = {"metadata": {"uid": "uid-123"}}
-        mock_k8s.create_namespaced_custom_object.return_value = {}
-
-        def _load_manifest_mock(_assets, name):
-            return {"metadata": {"name": f"{name}-js", "resourceVersion": "1"}, "spec": {}}
-
-        with (
-            patch.dict("os.environ", env),
-            patch.object(controller.kubernetes.config, "load_incluster_config"),
-            patch.object(controller.kubernetes.client, "CustomObjectsApi", MagicMock(return_value=mock_k8s)),
-            patch.object(controller.kubernetes.client, "CoreV1Api", MagicMock()),
-            patch.object(controller.kubernetes, "watch", MagicMock(Watch=mock_watch_cls)),
-            patch.object(controller, "_load_manifest", side_effect=_load_manifest_mock),
-            patch.object(
-                controller, "_load_phases", side_effect=lambda _v1, _ns, _wid, d: {s["name"]: "PENDING" for s in d}
-            ),
-            patch.object(controller, "_save_phases"),
-            patch.object(controller, "_emit_event") as mock_emit,
-            patch.object(controller, "_touch_heartbeat"),
-            patch.object(controller.json, "load", return_value=dag),
-            patch("builtins.open", MagicMock(__enter__=lambda s, *a: s, __exit__=lambda s, *a: None)),
-        ):
-            result = controller.main()
+        result, mock_emit = _run_main(dag, events)
 
         assert result == 0
         failed_calls = [c for c in mock_emit.call_args_list if c.args[4] == "WorkflowFailed"]
@@ -773,7 +743,7 @@ class TestMainControllerRetry:
         events = [
             [_make_event("a-js", "Completed", rv="2")],
         ]
-        result = _run_main(dag, events, existing_jobsets=["a-js"])
+        result, _ = _run_main(dag, events, existing_jobsets=["a-js"])
         assert result == 0
 
     def test_multi_step_partial_resume(self):
@@ -790,7 +760,7 @@ class TestMainControllerRetry:
                 _make_event("b-js", "Completed", rv="3"),
             ],
         ]
-        result = _run_main(dag, events, existing_jobsets=["a-js"])
+        result, _ = _run_main(dag, events, existing_jobsets=["a-js"])
         assert result == 0
 
     def test_configmap_resume_does_not_resubmit_completed_step(self):
