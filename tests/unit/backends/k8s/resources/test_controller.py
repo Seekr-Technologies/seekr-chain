@@ -12,7 +12,7 @@ from unittest.mock import MagicMock, patch
 # Bootstrap: import controller.py as a standalone module without installing it
 # ---------------------------------------------------------------------------
 
-_CONTROLLER_PATH = Path(__file__).parent.parent.parent / "src/seekr_chain/backends/k8s/resources/controller.py"
+_CONTROLLER_PATH = Path(__file__).resolve().parents[5] / "src/seekr_chain/backends/k8s/resources/controller.py"
 
 
 def _load_controller():
