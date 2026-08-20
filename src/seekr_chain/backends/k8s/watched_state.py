@@ -19,7 +19,7 @@ fetch to seed the cache and capture each resource's resourceVersion, then
 a daemon thread per resource kind that watches from that resourceVersion
 onward, applying ADDED/MODIFIED/DELETED events to the cache. Reconnects
 on transient errors and re-lists from scratch on 410 Gone (resourceVersion
-too old) — mirrors ``resources/controller.py``.
+too old) — mirrors ``resources/controller/watch.py``.
 """
 
 import functools
