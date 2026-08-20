@@ -1,34 +1,30 @@
-"""Unit tests for the controller DAG executor (resources/controller.py).
+"""Unit tests for the controller DAG executor (resources/controller package).
 
-controller.py runs inside the controller pod and has no seekr_chain dependency,
-so we import it directly via importlib to avoid any packaging side effects.
+The controller package runs inside the controller pod and has no seekr_chain
+dependency, so we put the resources dir on sys.path and import the package
+modules directly, avoiding any packaging side effects (e.g. seekr_chain/__init__
+pulling in boto3/kubernetes at import time).
 """
 
-import importlib.util
+import sys
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 # ---------------------------------------------------------------------------
-# Bootstrap: import controller.py as a standalone module without installing it
+# Bootstrap: make controller importable as a top-level package, exactly as it
+# is when the controller pod runs `python -m controller`.
 # ---------------------------------------------------------------------------
 
-_CONTROLLER_PATH = Path(__file__).resolve().parents[5] / "src/seekr_chain/backends/k8s/resources/controller.py"
+_RESOURCES = Path(__file__).resolve().parents[5] / "src/seekr_chain/backends/k8s/resources"
+sys.path.insert(0, str(_RESOURCES))
 
+from controller import manifests, phases, scheduling, watch  # noqa: E402
 
-def _load_controller():
-    spec = importlib.util.spec_from_file_location("controller", _CONTROLLER_PATH)
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-    return mod
-
-
-controller = _load_controller()
-
-_cascade_fail = controller._cascade_fail
-_submit_ready_steps = controller._submit_ready_steps
-_load_manifest = controller._load_manifest
-_load_phases = controller._load_phases
-_save_phases = controller._save_phases
+cascade_fail = phases.cascade_fail
+submit_ready_steps = scheduling.submit_ready_steps
+load_manifest = manifests.load_manifest
+load_phases = phases.load_phases
+save_phases = phases.save_phases
 
 
 # ---------------------------------------------------------------------------
@@ -79,7 +75,7 @@ def _make_k8s_custom(events: list[dict], existing_jobsets: list[str] | None = No
 
 
 # ---------------------------------------------------------------------------
-# _cascade_fail
+# cascade_fail
 # ---------------------------------------------------------------------------
 
 
@@ -90,7 +86,7 @@ class TestCascadeFail:
             {"name": "b", "depends_on": ["a"]},
         ]
         phases = {"a": "SUCCEEDED", "b": "PENDING"}
-        _cascade_fail(dag, phases)
+        cascade_fail(dag, phases)
         assert phases["b"] == "PENDING"
 
     def test_direct_dep_failed(self):
@@ -99,7 +95,7 @@ class TestCascadeFail:
             {"name": "b", "depends_on": ["a"]},
         ]
         phases = {"a": "FAILED", "b": "PENDING"}
-        _cascade_fail(dag, phases)
+        cascade_fail(dag, phases)
         assert phases["b"] == "SKIPPED"
 
     def test_transitive_cascade(self):
@@ -109,7 +105,7 @@ class TestCascadeFail:
             {"name": "c", "depends_on": ["b"]},
         ]
         phases = {"a": "FAILED", "b": "PENDING", "c": "PENDING"}
-        _cascade_fail(dag, phases)
+        cascade_fail(dag, phases)
         assert phases["b"] == "SKIPPED"
         assert phases["c"] == "SKIPPED"
 
@@ -122,7 +118,7 @@ class TestCascadeFail:
             {"name": "d", "depends_on": ["b", "c"]},
         ]
         phases = {"a": "SUCCEEDED", "b": "FAILED", "c": "SUCCEEDED", "d": "PENDING"}
-        _cascade_fail(dag, phases)
+        cascade_fail(dag, phases)
         assert phases["d"] == "SKIPPED"
 
     def test_running_step_not_cascade_failed(self):
@@ -131,7 +127,7 @@ class TestCascadeFail:
             {"name": "b", "depends_on": ["a"]},
         ]
         phases = {"a": "FAILED", "b": "RUNNING"}
-        _cascade_fail(dag, phases)
+        cascade_fail(dag, phases)
         # RUNNING steps are not touched — they were already submitted
         assert phases["b"] == "RUNNING"
 
@@ -144,7 +140,7 @@ class TestCascadeFail:
             {"name": "c", "depends_on": ["b"]},
         ]
         phases = {"a": "CANCELLED", "b": "PENDING", "c": "PENDING"}
-        _cascade_fail(dag, phases)
+        cascade_fail(dag, phases)
         assert phases["a"] == "CANCELLED"
         assert phases["b"] == "SKIPPED"
         assert phases["c"] == "SKIPPED"
@@ -157,12 +153,12 @@ class TestCascadeFail:
             {"name": "c", "depends_on": ["b"]},
         ]
         phases = {"a": "FAILED", "b": "PENDING", "c": "PENDING"}
-        _cascade_fail(dag, phases)
+        cascade_fail(dag, phases)
         assert phases == {"a": "FAILED", "b": "SKIPPED", "c": "SKIPPED"}
 
 
 # ---------------------------------------------------------------------------
-# _submit_ready_steps
+# submit_ready_steps
 # ---------------------------------------------------------------------------
 
 
@@ -172,12 +168,12 @@ class TestSubmitReadySteps:
         js_to_step: dict = {}
         mock_k8s = _make_k8s_custom([], existing_jobsets=existing_jobsets)
 
-        with patch.object(controller, "_load_manifest") as mock_load:
+        with patch.object(scheduling, "load_manifest") as mock_load:
             mock_load.side_effect = lambda _assets, name: {
                 "metadata": {"name": f"{name}-js"},
                 "spec": {},
             }
-            _submit_ready_steps(dag, phases, js_names, js_to_step, "/assets", "ns", [], mock_k8s)
+            submit_ready_steps(dag, phases, js_names, js_to_step, "/assets", "ns", [], mock_k8s)
 
         return js_names, js_to_step, mock_k8s
 
@@ -213,7 +209,7 @@ class TestSubmitReadySteps:
     def test_pending_step_with_skipped_dep_not_submitted(self):
         """A step is only submitted once all its deps SUCCEEDED — a SKIPPED
         dep (never ran) must never satisfy that, so the dependent stays
-        PENDING for _cascade_fail to pick up rather than being submitted."""
+        PENDING for cascade_fail to pick up rather than being submitted."""
         dag = [
             {"name": "a", "depends_on": []},
             {"name": "b", "depends_on": ["a"]},
@@ -242,9 +238,9 @@ class TestSubmitReadySteps:
         mock_k8s = MagicMock()
         mock_k8s.create_namespaced_custom_object.side_effect = ApiException(status=500)
 
-        with patch.object(controller, "_load_manifest") as mock_load:
+        with patch.object(scheduling, "load_manifest") as mock_load:
             mock_load.return_value = {"metadata": {"name": "a-js"}, "spec": {}}
-            _submit_ready_steps(dag, phases, js_names, js_to_step, "/assets", "ns", [], mock_k8s)
+            submit_ready_steps(dag, phases, js_names, js_to_step, "/assets", "ns", [], mock_k8s)
 
         # Step should remain PENDING — it will be retried on the next iteration
         assert phases["a"] == "PENDING"
@@ -265,9 +261,9 @@ class TestSubmitReadySteps:
         mock_k8s = MagicMock()
         mock_k8s.create_namespaced_custom_object.side_effect = ApiException(status=403)
 
-        with patch.object(controller, "_load_manifest") as mock_load:
+        with patch.object(scheduling, "load_manifest") as mock_load:
             mock_load.return_value = {"metadata": {"name": "a-js"}, "spec": {}}
-            _submit_ready_steps(dag, phases, js_names, js_to_step, "/assets", "ns", [], mock_k8s)
+            submit_ready_steps(dag, phases, js_names, js_to_step, "/assets", "ns", [], mock_k8s)
 
         # Step a should be FAILED (permanent error), not PENDING
         assert phases["a"] == "FAILED"
@@ -276,7 +272,7 @@ class TestSubmitReadySteps:
 
 
 # ---------------------------------------------------------------------------
-# _load_phases / _save_phases
+# load_phases / save_phases
 # ---------------------------------------------------------------------------
 
 
@@ -300,13 +296,13 @@ class TestLoadPhases:
 
     def test_no_configmap_returns_all_pending(self):
         dag = [{"name": "a"}, {"name": "b"}]
-        phases = _load_phases(self._make_v1(status=404), "ns", "wf-abc", dag)
+        phases = load_phases(self._make_v1(status=404), "ns", "wf-abc", dag)
         assert phases == {"a": "PENDING", "b": "PENDING"}
 
     def test_restores_succeeded_and_failed(self):
         dag = [{"name": "a"}, {"name": "b"}, {"name": "c"}]
         saved = {"a": "SUCCEEDED", "b": "FAILED", "c": "RUNNING"}
-        phases = _load_phases(self._make_v1(cm_data=saved), "ns", "wf-abc", dag)
+        phases = load_phases(self._make_v1(cm_data=saved), "ns", "wf-abc", dag)
         assert phases["a"] == "SUCCEEDED"
         assert phases["b"] == "FAILED"
         # RUNNING is reset to PENDING on restore
@@ -315,21 +311,21 @@ class TestLoadPhases:
     def test_restores_skipped(self):
         dag = [{"name": "a"}, {"name": "b"}]
         saved = {"a": "FAILED", "b": "SKIPPED"}
-        phases = _load_phases(self._make_v1(cm_data=saved), "ns", "wf-abc", dag)
+        phases = load_phases(self._make_v1(cm_data=saved), "ns", "wf-abc", dag)
         assert phases == {"a": "FAILED", "b": "SKIPPED"}
 
     def test_ignores_unknown_step_names(self):
         """ConfigMap may contain stale step names that no longer exist in the DAG."""
         dag = [{"name": "a"}]
         saved = {"a": "SUCCEEDED", "stale-step": "FAILED"}
-        phases = _load_phases(self._make_v1(cm_data=saved), "ns", "wf-abc", dag)
+        phases = load_phases(self._make_v1(cm_data=saved), "ns", "wf-abc", dag)
         assert phases == {"a": "SUCCEEDED"}
         assert "stale-step" not in phases
 
     def test_non_404_api_error_is_warned_not_raised(self):
         dag = [{"name": "a"}]
         # 500 error should not propagate — fall back to all-PENDING
-        phases = _load_phases(self._make_v1(status=500), "ns", "wf-abc", dag)
+        phases = load_phases(self._make_v1(status=500), "ns", "wf-abc", dag)
         assert phases == {"a": "PENDING"}
 
 
@@ -342,7 +338,7 @@ class TestSavePhases:
         mock_v1.patch_namespaced_config_map.side_effect = ApiException(status=404)
         mock_v1.create_namespaced_config_map.return_value = {}
 
-        _save_phases(mock_v1, "ns", "wf-abc", {"a": "SUCCEEDED"}, [])
+        save_phases(mock_v1, "ns", "wf-abc", {"a": "SUCCEEDED"}, [])
 
         mock_v1.create_namespaced_config_map.assert_called_once()
 
@@ -350,20 +346,20 @@ class TestSavePhases:
         mock_v1 = MagicMock()
         mock_v1.patch_namespaced_config_map.return_value = {}
 
-        _save_phases(mock_v1, "ns", "wf-abc", {"a": "SUCCEEDED"}, [])
+        save_phases(mock_v1, "ns", "wf-abc", {"a": "SUCCEEDED"}, [])
 
         mock_v1.patch_namespaced_config_map.assert_called_once()
         mock_v1.create_namespaced_config_map.assert_not_called()
 
     def test_api_error_does_not_raise(self):
-        """_save_phases must be best-effort — errors are logged, not raised."""
+        """save_phases must be best-effort — errors are logged, not raised."""
         from kubernetes.client.exceptions import ApiException
 
         mock_v1 = MagicMock()
         mock_v1.patch_namespaced_config_map.side_effect = ApiException(status=500)
 
         # Should not raise
-        _save_phases(mock_v1, "ns", "wf-abc", {"a": "SUCCEEDED"}, [])
+        save_phases(mock_v1, "ns", "wf-abc", {"a": "SUCCEEDED"}, [])
 
 
 # ---------------------------------------------------------------------------
@@ -377,12 +373,12 @@ def _run_main(
     existing_jobsets: list[str] | None = None,
     initial_phases: dict[str, str] | None = None,
 ):
-    """Run controller.main() with a mocked environment and watch stream.
+    """Run watch.main() with a mocked environment and watch stream.
 
     event_sequences: list of event batches, one per watch stream open() call.
     Each batch is exhausted before the next watch reconnect (if any).
 
-    Returns (exit_code, mock_emit) — mock_emit is the patched _emit_event, so
+    Returns (exit_code, mock_emit) — mock_emit is the patched emit_event, so
     callers can assert on emitted events without hand-rolling the harness.
     """
     env = {
@@ -426,7 +422,7 @@ def _run_main(
     def _load_manifest_mock(_assets, name):
         return {"metadata": {"name": f"{name}-js", "resourceVersion": "1"}, "spec": {}}
 
-    # _load_phases: return persisted state if provided, otherwise all-PENDING
+    # load_phases: return persisted state if provided, otherwise all-PENDING
     def _load_phases_mock(_v1, _ns, _wid, dag):
         if initial_phases is not None:
             return dict(initial_phases)
@@ -434,15 +430,15 @@ def _run_main(
 
     with (
         patch.dict("os.environ", env),
-        patch.object(controller.kubernetes.config, "load_incluster_config"),
-        patch.object(controller.kubernetes.client, "CustomObjectsApi", mock_custom_api_cls),
-        patch.object(controller.kubernetes.client, "CoreV1Api", mock_core_v1_cls),
-        patch.object(controller.kubernetes, "watch", MagicMock(Watch=mock_watch_cls)),
-        patch.object(controller, "_load_manifest", side_effect=_load_manifest_mock),
-        patch.object(controller, "_load_phases", side_effect=_load_phases_mock),
-        patch.object(controller, "_save_phases"),
-        patch.object(controller, "_emit_event") as mock_emit,
-        patch.object(controller, "_touch_heartbeat"),
+        patch.object(watch.kubernetes.config, "load_incluster_config"),
+        patch.object(watch.kubernetes.client, "CustomObjectsApi", mock_custom_api_cls),
+        patch.object(watch.kubernetes.client, "CoreV1Api", mock_core_v1_cls),
+        patch.object(watch.kubernetes, "watch", MagicMock(Watch=mock_watch_cls)),
+        patch.object(scheduling, "load_manifest", side_effect=_load_manifest_mock),
+        patch.object(watch, "load_phases", side_effect=_load_phases_mock),
+        patch.object(watch, "save_phases"),
+        patch.object(watch, "emit_event") as mock_emit,
+        patch.object(watch, "touch_heartbeat"),
         patch(
             "builtins.open",
             MagicMock(
@@ -453,9 +449,9 @@ def _run_main(
                 )
             ),
         ),
-        patch.object(controller.json, "load", return_value=dag_json),
+        patch.object(watch.json, "load", return_value=dag_json),
     ):
-        result = controller.main()
+        result = watch.main()
 
     return result, mock_emit
 
@@ -660,22 +656,20 @@ class TestMainWatchReconnect:
 
         with (
             patch.dict("os.environ", env),
-            patch.object(controller.kubernetes.config, "load_incluster_config"),
-            patch.object(controller.kubernetes.client, "CustomObjectsApi", MagicMock(return_value=mock_k8s)),
-            patch.object(controller.kubernetes.client, "CoreV1Api", MagicMock()),
-            patch.object(controller.kubernetes, "watch", MagicMock(Watch=mock_watch_cls)),
-            patch.object(controller, "_load_manifest", return_value={"metadata": {"name": "a-js"}, "spec": {}}),
-            patch.object(
-                controller, "_load_phases", side_effect=lambda _v1, _ns, _wid, d: {s["name"]: "PENDING" for s in d}
-            ),
-            patch.object(controller, "_save_phases"),
-            patch.object(controller, "_emit_event"),
-            patch.object(controller, "_touch_heartbeat"),
-            patch.object(controller.json, "load", return_value=dag),
-            patch.object(controller.time, "sleep"),
+            patch.object(watch.kubernetes.config, "load_incluster_config"),
+            patch.object(watch.kubernetes.client, "CustomObjectsApi", MagicMock(return_value=mock_k8s)),
+            patch.object(watch.kubernetes.client, "CoreV1Api", MagicMock()),
+            patch.object(watch.kubernetes, "watch", MagicMock(Watch=mock_watch_cls)),
+            patch.object(scheduling, "load_manifest", return_value={"metadata": {"name": "a-js"}, "spec": {}}),
+            patch.object(watch, "load_phases", side_effect=lambda _v1, _ns, _wid, d: {s["name"]: "PENDING" for s in d}),
+            patch.object(watch, "save_phases"),
+            patch.object(watch, "emit_event"),
+            patch.object(watch, "touch_heartbeat"),
+            patch.object(watch.json, "load", return_value=dag),
+            patch.object(watch.time, "sleep"),
             patch("builtins.open", MagicMock(__enter__=lambda s, *a: s, __exit__=lambda s, *a: None)),
         ):
-            result = controller.main()
+            result = watch.main()
 
         assert result == 0
         assert call_count[0] == 2  # streamed twice: once failed, once succeeded
@@ -714,22 +708,20 @@ class TestMainWatchReconnect:
 
         with (
             patch.dict("os.environ", env),
-            patch.object(controller.kubernetes.config, "load_incluster_config"),
-            patch.object(controller.kubernetes.client, "CustomObjectsApi", MagicMock(return_value=mock_k8s)),
-            patch.object(controller.kubernetes.client, "CoreV1Api", MagicMock()),
-            patch.object(controller.kubernetes, "watch", MagicMock(Watch=mock_watch_cls)),
-            patch.object(controller, "_load_manifest", return_value={"metadata": {"name": "a-js"}, "spec": {}}),
-            patch.object(
-                controller, "_load_phases", side_effect=lambda _v1, _ns, _wid, d: {s["name"]: "PENDING" for s in d}
-            ),
-            patch.object(controller, "_save_phases"),
-            patch.object(controller, "_emit_event"),
-            patch.object(controller, "_touch_heartbeat"),
-            patch.object(controller.json, "load", return_value=dag),
-            patch.object(controller.time, "sleep"),
+            patch.object(watch.kubernetes.config, "load_incluster_config"),
+            patch.object(watch.kubernetes.client, "CustomObjectsApi", MagicMock(return_value=mock_k8s)),
+            patch.object(watch.kubernetes.client, "CoreV1Api", MagicMock()),
+            patch.object(watch.kubernetes, "watch", MagicMock(Watch=mock_watch_cls)),
+            patch.object(scheduling, "load_manifest", return_value={"metadata": {"name": "a-js"}, "spec": {}}),
+            patch.object(watch, "load_phases", side_effect=lambda _v1, _ns, _wid, d: {s["name"]: "PENDING" for s in d}),
+            patch.object(watch, "save_phases"),
+            patch.object(watch, "emit_event"),
+            patch.object(watch, "touch_heartbeat"),
+            patch.object(watch.json, "load", return_value=dag),
+            patch.object(watch.time, "sleep"),
             patch("builtins.open", MagicMock(__enter__=lambda s, *a: s, __exit__=lambda s, *a: None)),
         ):
-            result = controller.main()
+            result = watch.main()
 
         assert result == 0
         # After 410, resourceVersion should be reset to "" for the retry
@@ -812,19 +804,19 @@ class TestMainControllerRetry:
 
         with (
             patch.dict("os.environ", env),
-            patch.object(controller.kubernetes.config, "load_incluster_config"),
-            patch.object(controller.kubernetes.client, "CustomObjectsApi", MagicMock(return_value=mock_custom)),
-            patch.object(controller.kubernetes.client, "CoreV1Api", MagicMock()),
-            patch.object(controller.kubernetes, "watch", MagicMock(Watch=mock_watch_cls)),
-            patch.object(controller, "_load_manifest", side_effect=_load_manifest_mock),
-            patch.object(controller, "_load_phases", return_value=dict(persisted)),
-            patch.object(controller, "_save_phases"),
-            patch.object(controller, "_emit_event"),
-            patch.object(controller, "_touch_heartbeat"),
-            patch.object(controller.json, "load", return_value=dag),
+            patch.object(watch.kubernetes.config, "load_incluster_config"),
+            patch.object(watch.kubernetes.client, "CustomObjectsApi", MagicMock(return_value=mock_custom)),
+            patch.object(watch.kubernetes.client, "CoreV1Api", MagicMock()),
+            patch.object(watch.kubernetes, "watch", MagicMock(Watch=mock_watch_cls)),
+            patch.object(scheduling, "load_manifest", side_effect=_load_manifest_mock),
+            patch.object(watch, "load_phases", return_value=dict(persisted)),
+            patch.object(watch, "save_phases"),
+            patch.object(watch, "emit_event"),
+            patch.object(watch, "touch_heartbeat"),
+            patch.object(watch.json, "load", return_value=dag),
             patch("builtins.open", MagicMock(__enter__=lambda s, *a: s, __exit__=lambda s, *a: None)),
         ):
-            result = controller.main()
+            result = watch.main()
 
         assert result == 0
 
@@ -868,21 +860,19 @@ class TestWatchTimeout:
 
         with (
             patch.dict("os.environ", env),
-            patch.object(controller.kubernetes.config, "load_incluster_config"),
-            patch.object(controller.kubernetes.client, "CustomObjectsApi", MagicMock(return_value=mock_k8s)),
-            patch.object(controller.kubernetes.client, "CoreV1Api", MagicMock()),
-            patch.object(controller.kubernetes, "watch", MagicMock(Watch=mock_watch_cls)),
-            patch.object(controller, "_load_manifest", return_value={"metadata": {"name": "a-js"}, "spec": {}}),
-            patch.object(
-                controller, "_load_phases", side_effect=lambda _v1, _ns, _wid, d: {s["name"]: "PENDING" for s in d}
-            ),
-            patch.object(controller, "_save_phases"),
-            patch.object(controller, "_emit_event"),
-            patch.object(controller, "_touch_heartbeat"),
-            patch.object(controller.json, "load", return_value=dag),
+            patch.object(watch.kubernetes.config, "load_incluster_config"),
+            patch.object(watch.kubernetes.client, "CustomObjectsApi", MagicMock(return_value=mock_k8s)),
+            patch.object(watch.kubernetes.client, "CoreV1Api", MagicMock()),
+            patch.object(watch.kubernetes, "watch", MagicMock(Watch=mock_watch_cls)),
+            patch.object(scheduling, "load_manifest", return_value={"metadata": {"name": "a-js"}, "spec": {}}),
+            patch.object(watch, "load_phases", side_effect=lambda _v1, _ns, _wid, d: {s["name"]: "PENDING" for s in d}),
+            patch.object(watch, "save_phases"),
+            patch.object(watch, "emit_event"),
+            patch.object(watch, "touch_heartbeat"),
+            patch.object(watch.json, "load", return_value=dag),
             patch("builtins.open", MagicMock(__enter__=lambda s, *a: s, __exit__=lambda s, *a: None)),
         ):
-            result = controller.main()
+            result = watch.main()
 
         assert result == 0
         # Verify timeout_seconds was passed to w.stream()
@@ -936,21 +926,19 @@ class TestTransientSubmitRetry:
 
         with (
             patch.dict("os.environ", env),
-            patch.object(controller.kubernetes.config, "load_incluster_config"),
-            patch.object(controller.kubernetes.client, "CustomObjectsApi", MagicMock(return_value=mock_k8s)),
-            patch.object(controller.kubernetes.client, "CoreV1Api", MagicMock()),
-            patch.object(controller.kubernetes, "watch", MagicMock(Watch=mock_watch_cls)),
-            patch.object(controller, "_load_manifest", return_value={"metadata": {"name": "a-js"}, "spec": {}}),
-            patch.object(
-                controller, "_load_phases", side_effect=lambda _v1, _ns, _wid, d: {s["name"]: "PENDING" for s in d}
-            ),
-            patch.object(controller, "_save_phases"),
-            patch.object(controller, "_emit_event"),
-            patch.object(controller, "_touch_heartbeat"),
-            patch.object(controller.json, "load", return_value=dag),
+            patch.object(watch.kubernetes.config, "load_incluster_config"),
+            patch.object(watch.kubernetes.client, "CustomObjectsApi", MagicMock(return_value=mock_k8s)),
+            patch.object(watch.kubernetes.client, "CoreV1Api", MagicMock()),
+            patch.object(watch.kubernetes, "watch", MagicMock(Watch=mock_watch_cls)),
+            patch.object(scheduling, "load_manifest", return_value={"metadata": {"name": "a-js"}, "spec": {}}),
+            patch.object(watch, "load_phases", side_effect=lambda _v1, _ns, _wid, d: {s["name"]: "PENDING" for s in d}),
+            patch.object(watch, "save_phases"),
+            patch.object(watch, "emit_event"),
+            patch.object(watch, "touch_heartbeat"),
+            patch.object(watch.json, "load", return_value=dag),
             patch("builtins.open", MagicMock(__enter__=lambda s, *a: s, __exit__=lambda s, *a: None)),
         ):
-            result = controller.main()
+            result = watch.main()
 
         assert result == 0
         # Submit was called twice: first failed, second succeeded
