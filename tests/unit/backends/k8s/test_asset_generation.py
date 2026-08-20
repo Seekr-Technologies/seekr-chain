@@ -90,18 +90,18 @@ class TestHostfileGeneration:
         config = _single_role_config(num_nodes=3, gpus_per_node=4)
         step = config.steps[0]
         role = step.model_copy()
-        role.name = ""  # single-role normalisation mirrors build_jobset_context
+        role.name = "main"  # single-role normalisation mirrors build_jobset_context
 
         _construct_hostfile(
             js_name="ab-train-js",
-            js_pod_name="",
+            js_pod_name="main",
             subdomain="ab-train-js",
             role_config=role,
             assets_path=tmp_path,
             step_name="train",
         )
 
-        hostfile = tmp_path / "step=train/hostfile"
+        hostfile = tmp_path / "step=train/role=main/hostfile"
         assert hostfile.exists()
         lines = [line for line in hostfile.read_text().splitlines() if line.strip()]
         assert len(lines) == 3
@@ -110,18 +110,18 @@ class TestHostfileGeneration:
         config = _single_role_config(num_nodes=2, gpus_per_node=8)
         step = config.steps[0]
         role = step.model_copy()
-        role.name = ""
+        role.name = "main"
 
         _construct_hostfile(
             js_name="ab-train-js",
-            js_pod_name="",
+            js_pod_name="main",
             subdomain="ab-train-js",
             role_config=role,
             assets_path=tmp_path,
             step_name="train",
         )
 
-        hostfile = tmp_path / "step=train/hostfile"
+        hostfile = tmp_path / "step=train/role=main/hostfile"
         content = hostfile.read_text()
         for line in content.splitlines():
             if line.strip():
@@ -131,31 +131,31 @@ class TestHostfileGeneration:
         config = _single_role_config(num_nodes=2, gpus_per_node=1)
         step = config.steps[0]
         role = step.model_copy()
-        role.name = ""
+        role.name = "main"
         js_name = "ab1234-train-js"
 
         _construct_hostfile(
             js_name=js_name,
-            js_pod_name="",
+            js_pod_name="main",
             subdomain=js_name,
             role_config=role,
             assets_path=tmp_path,
             step_name="train",
         )
 
-        hostfile = tmp_path / "step=train/hostfile"
+        hostfile = tmp_path / "step=train/role=main/hostfile"
         lines = [line for line in hostfile.read_text().splitlines() if line.strip()]
-        assert lines[0].startswith(f"{js_name}--0-0.{js_name}")
-        assert lines[1].startswith(f"{js_name}--1-0.{js_name}")
+        assert lines[0].startswith(f"{js_name}-main-0-0.{js_name}")
+        assert lines[1].startswith(f"{js_name}-main-1-0.{js_name}")
 
 
 class TestPeermapGeneration:
     def test_single_role_returns_list(self):
         config = _single_role_config(num_nodes=2)
         step_config = config.steps[0]
-        # single-role normalisation: copy with name=""
+        # single-role normalisation: copy with name="main"
         role_copy = step_config.model_copy()
-        role_copy.name = ""
+        role_copy.name = "main"
 
         peermap = _compute_peermap(
             role_configs=[role_copy],
@@ -165,8 +165,8 @@ class TestPeermapGeneration:
 
         assert isinstance(peermap, list)
         assert len(peermap) == 2
-        assert peermap[0] == "ab-train-js--0-0.ab-train-js"
-        assert peermap[1] == "ab-train-js--1-0.ab-train-js"
+        assert peermap[0] == "ab-train-js-main-0-0.ab-train-js"
+        assert peermap[1] == "ab-train-js-main-1-0.ab-train-js"
 
     def test_multi_role_returns_dict(self):
         config = _multi_role_config(role_a_nodes=1, role_b_nodes=2)
@@ -198,7 +198,7 @@ class TestScriptGeneration:
         )
         step = config.steps[0]
         role = step.model_copy()
-        role.name = ""
+        role.name = "main"
 
         _write_peermaps_and_scripts(
             role_configs=[role],
@@ -207,7 +207,7 @@ class TestScriptGeneration:
             assets_path=tmp_path,
         )
 
-        role_path = tmp_path / "step=train"
+        role_path = tmp_path / "step=train/role=main"
         for script_name in ("script.sh", "before_script.sh", "after_script.sh"):
             content = (role_path / script_name).read_text()
             assert content.startswith("#!/bin/bash\n"), f"{script_name} missing shebang"
@@ -216,7 +216,7 @@ class TestScriptGeneration:
         config = _single_role_config(script="echo main", shell="")
         step = config.steps[0]
         role = step.model_copy()
-        role.name = ""
+        role.name = "main"
 
         _write_peermaps_and_scripts(
             role_configs=[role],
@@ -225,7 +225,7 @@ class TestScriptGeneration:
             assets_path=tmp_path,
         )
 
-        script_path = tmp_path / "step=train/script.sh"
+        script_path = tmp_path / "step=train/role=main/script.sh"
         content = script_path.read_text()
         assert not content.startswith("#!")
 
@@ -237,7 +237,7 @@ class TestScriptGeneration:
         )
         step = config.steps[0]
         role = step.model_copy()
-        role.name = ""
+        role.name = "main"
 
         _write_peermaps_and_scripts(
             role_configs=[role],
@@ -246,7 +246,7 @@ class TestScriptGeneration:
             assets_path=tmp_path,
         )
 
-        role_path = tmp_path / "step=train"
+        role_path = tmp_path / "step=train/role=main"
         for script_name in ("script.sh", "before_script.sh", "after_script.sh"):
             mode = (role_path / script_name).stat().st_mode
             assert mode & 0o555 == 0o555, (
@@ -258,7 +258,7 @@ class TestScriptGeneration:
         config = _single_role_config(script="echo custom-content")
         step = config.steps[0]
         role = step.model_copy()
-        role.name = ""
+        role.name = "main"
 
         _write_peermaps_and_scripts(
             role_configs=[role],
@@ -267,14 +267,14 @@ class TestScriptGeneration:
             assets_path=tmp_path,
         )
 
-        content = (tmp_path / "step=train/script.sh").read_text()
+        content = (tmp_path / "step=train/role=main/script.sh").read_text()
         assert "echo custom-content" in content
 
     def test_peermap_written_as_json(self, tmp_path):
         config = _single_role_config(num_nodes=2)
         step = config.steps[0]
         role = step.model_copy()
-        role.name = ""
+        role.name = "main"
 
         _write_peermaps_and_scripts(
             role_configs=[role],
@@ -283,7 +283,7 @@ class TestScriptGeneration:
             assets_path=tmp_path,
         )
 
-        peermap_path = tmp_path / "step=train/peermap.json"
+        peermap_path = tmp_path / "step=train/role=main/peermap.json"
         assert peermap_path.exists()
         data = json.loads(peermap_path.read_text())
         assert isinstance(data, list)

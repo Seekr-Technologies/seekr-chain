@@ -54,8 +54,10 @@ class TestLogs:
 
         expected = {
             "step=step": {
-                "index=0": {"attempt=0": ["/seekr-chain/workspace", "hello world", "0", "some error", ""]},
-                "index=1": {"attempt=0": ["/seekr-chain/workspace", "hello world", "1", "some error", ""]},
+                "role=main": {
+                    "index=0": {"attempt=0": ["/seekr-chain/workspace", "hello world", "0", "some error", ""]},
+                    "index=1": {"attempt=0": ["/seekr-chain/workspace", "hello world", "1", "some error", ""]},
+                }
             }
         }
         assert_nested_match(logs, expected)
@@ -63,24 +65,26 @@ class TestLogs:
         logs_ts = job.get_logs(timestamps=True).to_dict()
         expected_ts = {
             "step=step": {
-                "index=0": {
-                    "attempt=0": [
-                        {"date": f"{TS_REGEX}", "log": "/seekr-chain/workspace"},
-                        {"date": f"{TS_REGEX}", "log": "hello world"},
-                        {"date": f"{TS_REGEX}", "log": "0"},
-                        {"date": f"{TS_REGEX}", "log": "some error"},
-                        {"date": f"{TS_REGEX}", "log": ""},
-                    ]
-                },
-                "index=1": {
-                    "attempt=0": [
-                        {"date": f"{TS_REGEX}", "log": "/seekr-chain/workspace"},
-                        {"date": f"{TS_REGEX}", "log": "hello world"},
-                        {"date": f"{TS_REGEX}", "log": "1"},
-                        {"date": f"{TS_REGEX}", "log": "some error"},
-                        {"date": f"{TS_REGEX}", "log": ""},
-                    ]
-                },
+                "role=main": {
+                    "index=0": {
+                        "attempt=0": [
+                            {"date": f"{TS_REGEX}", "log": "/seekr-chain/workspace"},
+                            {"date": f"{TS_REGEX}", "log": "hello world"},
+                            {"date": f"{TS_REGEX}", "log": "0"},
+                            {"date": f"{TS_REGEX}", "log": "some error"},
+                            {"date": f"{TS_REGEX}", "log": ""},
+                        ]
+                    },
+                    "index=1": {
+                        "attempt=0": [
+                            {"date": f"{TS_REGEX}", "log": "/seekr-chain/workspace"},
+                            {"date": f"{TS_REGEX}", "log": "hello world"},
+                            {"date": f"{TS_REGEX}", "log": "1"},
+                            {"date": f"{TS_REGEX}", "log": "some error"},
+                            {"date": f"{TS_REGEX}", "log": ""},
+                        ]
+                    },
+                }
             }
         }
         assert_nested_match(logs_ts, expected_ts)
@@ -92,10 +96,10 @@ class TestLogs:
         expected_s3 = [
             "/.sentinel",
             "/assets.tar.gz",
-            r"/data/step=step/role=/job_index=0/pod_index=0/attempt=0/logs/\d{8}-\d{6}.log.gz-object.+",
-            "/data/step=step/role=/job_index=0/pod_index=0/attempt=0/md.json",
-            r"/data/step=step/role=/job_index=1/pod_index=0/attempt=0/logs/\d{8}-\d{6}.log.gz-object.+",
-            "/data/step=step/role=/job_index=1/pod_index=0/attempt=0/md.json",
+            r"/data/step=step/role=main/job_index=0/pod_index=0/attempt=0/logs/\d{8}-\d{6}.log.gz-object.+",
+            "/data/step=step/role=main/job_index=0/pod_index=0/attempt=0/md.json",
+            r"/data/step=step/role=main/job_index=1/pod_index=0/attempt=0/logs/\d{8}-\d{6}.log.gz-object.+",
+            "/data/step=step/role=main/job_index=1/pod_index=0/attempt=0/md.json",
             "/data/version",
         ]
         assert_nested_match(contents, expected_s3)
@@ -139,8 +143,10 @@ class TestLogs:
 
         expected = {
             "step=step": {
-                "index=0": {"attempt=0": ["/seekr-chain/workspace", "hello world", ""]},
-                "index=1": {"attempt=0": ["/seekr-chain/workspace", "hello world", ""]},
+                "role=main": {
+                    "index=0": {"attempt=0": ["/seekr-chain/workspace", "hello world", ""]},
+                    "index=1": {"attempt=0": ["/seekr-chain/workspace", "hello world", ""]},
+                }
             }
         }
 
@@ -153,10 +159,10 @@ class TestLogs:
         expected = [
             "/.sentinel",
             "/assets.tar.gz",
-            r"/data/step=step/role=/job_index=0/pod_index=0/attempt=0/logs/\d{8}-\d{6}.log.gz-object.+",
-            "/data/step=step/role=/job_index=0/pod_index=0/attempt=0/md.json",
-            r"/data/step=step/role=/job_index=1/pod_index=0/attempt=0/logs/\d{8}-\d{6}.log.gz-object.+",
-            "/data/step=step/role=/job_index=1/pod_index=0/attempt=0/md.json",
+            r"/data/step=step/role=main/job_index=0/pod_index=0/attempt=0/logs/\d{8}-\d{6}.log.gz-object.+",
+            "/data/step=step/role=main/job_index=0/pod_index=0/attempt=0/md.json",
+            r"/data/step=step/role=main/job_index=1/pod_index=0/attempt=0/logs/\d{8}-\d{6}.log.gz-object.+",
+            "/data/step=step/role=main/job_index=1/pod_index=0/attempt=0/md.json",
             "/data/version",
         ]
 
@@ -207,8 +213,10 @@ class TestLogs:
         ]
         expected = {
             "step=step": {
-                "index=0": {"attempt=0": oom_pod_logs},
-                "index=1": {"attempt=0": oom_pod_logs},
+                "role=main": {
+                    "index=0": {"attempt=0": oom_pod_logs},
+                    "index=1": {"attempt=0": oom_pod_logs},
+                }
             }
         }
 
@@ -221,10 +229,10 @@ class TestLogs:
         expected = [
             "/.sentinel",
             "/assets.tar.gz",
-            r"/data/step=step/role=/job_index=0/pod_index=0/attempt=0/logs/\d{8}-\d{6}.log.gz-object.+",
-            "/data/step=step/role=/job_index=0/pod_index=0/attempt=0/md.json",
-            r"/data/step=step/role=/job_index=1/pod_index=0/attempt=0/logs/\d{8}-\d{6}.log.gz-object.+",
-            "/data/step=step/role=/job_index=1/pod_index=0/attempt=0/md.json",
+            r"/data/step=step/role=main/job_index=0/pod_index=0/attempt=0/logs/\d{8}-\d{6}.log.gz-object.+",
+            "/data/step=step/role=main/job_index=0/pod_index=0/attempt=0/md.json",
+            r"/data/step=step/role=main/job_index=1/pod_index=0/attempt=0/logs/\d{8}-\d{6}.log.gz-object.+",
+            "/data/step=step/role=main/job_index=1/pod_index=0/attempt=0/md.json",
             "/data/version",
         ]
 
@@ -264,5 +272,5 @@ class TestLogs:
         reconnected = ArgoWorkflow(id=job_id)
         logs = reconnected.get_logs().to_dict()
 
-        expected = {"step=step": {"index=0": {"attempt=0": ["reconnect-test", ""]}}}
+        expected = {"step=step": {"role=main": {"index=0": {"attempt=0": ["reconnect-test", ""]}}}}
         assert_nested_match(logs, expected)

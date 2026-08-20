@@ -263,9 +263,7 @@ def _construct_hostfile(
 
 
 def _generate_role_asset_path(step_name: str, role_name: str, parent: Optional[Path | str] = None) -> Path | str:
-    out = f"step={step_name}"
-    if role_name:
-        out += f"/role={role_name}"
+    out = f"step={step_name}/role={role_name}"
 
     if parent:
         if isinstance(parent, Path):
@@ -607,12 +605,6 @@ def _build_role_context(
 
     return {
         "name": js_pod_name,
-        # JobSet's failurePolicy rule matcher (v0.8.0) needs a non-empty
-        # replicatedJob name to attach the replicatedjob-name label to child
-        # Jobs; an empty name silently disables all failurePolicy rules. Kept
-        # separate from `name` (the label / S3 log-path segment) so single-role
-        # log layout stays unperturbed.
-        "replicated_job_name": role_config.name or "main",
         "replicas": role_config.resources.num_nodes,
         "image": resolve_image(main_image),
         "privileged": role_config.resources.security.privileged,
@@ -882,7 +874,7 @@ def _compute_peermap(role_configs, js_name: str, step_config: StepConfig) -> dic
         peermap[js_pod_name] = [f"{js_name}-{js_pod_name}-{i}-0.{js_name}" for i in range(cfg.resources.num_nodes)]
 
     if isinstance(step_config, SingleRoleStepConfig):
-        peermap = peermap[""]
+        peermap = peermap[role_configs[0].name]
 
     return peermap
 
@@ -943,13 +935,13 @@ def build_jobset_context(
     # NORMALIZE SINGLE AND MULTI-ROLE STEPS.
     if isinstance(step_config, SingleRoleStepConfig):
         role_configs = [step_config.model_copy()]
-        role_configs[0].name = ""
+        role_configs[0].name = "main"
     else:
         role_configs = step_config.roles
 
     # Check if we will be over 63 character limit
     for role_config in role_configs:
-        if len(f"{js_name}-{role_config.name or 'main'}-00-00-abcde") > 63:
+        if len(f"{js_name}-{role_config.name}-00-00-abcde") > 63:
             js_name = f"{workflow_name.split('-')[-1]}-s{step_index:02d}-js"
             logger.warning(f"Generated jobset name is too long! Shortening to {js_name}")
             break

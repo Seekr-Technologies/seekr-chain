@@ -97,6 +97,38 @@ class TestJobsetTemplateRendering:
         assert jobs[0]["replicas"] == 1
         assert jobs[0]["name"] == "main"
 
+    def test_single_role_master_addr_matches_replicated_job_name(self, tmp_path):
+        """MASTER_ADDR's DNS segment must be the same string as the replicatedJob's
+        name — JobSet derives pod DNS from replicatedJobs[].name
+        (<jobset>-<replicatedJob>-<jobIndex>-<podIndex>.<subdomain>), so if the two
+        drift apart (as happened when the replicatedJob name was templated
+        independently of the role name used to build MASTER_ADDR), single-role
+        multi-node pods get a MASTER_ADDR nobody can resolve.
+        """
+        config = _minimal_config()
+        job_info = _fake_job_info()
+        js_name = "ab1234-train-js"
+
+        _, context = build_jobset_context(
+            workflow_config=config,
+            step_index=0,
+            job_info=job_info,
+            workflow_name="ab1234",
+            workflow_secrets=[],
+            interactive=False,
+            assets_path=tmp_path / "assets",
+        )
+
+        rendered = render.render("jobset.yaml.j2", context)
+        manifest = yaml.safe_load(rendered)
+
+        replicated_job_name = manifest["spec"]["replicatedJobs"][0]["name"]
+        pod_spec = manifest["spec"]["replicatedJobs"][0]["template"]["spec"]["template"]["spec"]
+        main_container = next(c for c in pod_spec["containers"] if c["name"] == "main")
+        master_addr = next(e for e in main_container["env"] if e["name"] == "MASTER_ADDR")["value"]
+
+        assert master_addr == f"{js_name}-{replicated_job_name}-0-0.{js_name}"
+
     def test_init_containers_present(self, tmp_path):
         config = _minimal_config()
         job_info = _fake_job_info()
@@ -1174,7 +1206,7 @@ class TestAffinityRendering:
         # rules never match a failed Job (see jobset.py:_build_role_context).
         assert replicated_job["name"] == "main"
         pod_labels = replicated_job["template"]["spec"]["template"]["metadata"]["labels"]
-        assert not pod_labels["seekr-chain/role"]
+        assert pod_labels["seekr-chain/role"] == "main"
 
         pod_spec = replicated_job["template"]["spec"]
         assert pod_spec["podFailurePolicy"] == {

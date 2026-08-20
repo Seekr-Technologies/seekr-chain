@@ -53,14 +53,16 @@ class TestJobRetries:
 
         expected = {
             "step=step": {
-                "index=0": {
-                    "attempt=1": ["starting", "attempt 1", "succeeding", ""],
-                    "attempt=0": ["starting", "attempt 0", "erroring", ""],
-                },
-                "index=1": {
-                    "attempt=1": ["starting", "attempt 1", "succeeding", ""],
-                    "attempt=0": ["starting", "attempt 0", "succeeding", ""],
-                },
+                "role=main": {
+                    "index=0": {
+                        "attempt=1": ["starting", "attempt 1", "succeeding", ""],
+                        "attempt=0": ["starting", "attempt 0", "erroring", ""],
+                    },
+                    "index=1": {
+                        "attempt=1": ["starting", "attempt 1", "succeeding", ""],
+                        "attempt=0": ["starting", "attempt 0", "succeeding", ""],
+                    },
+                }
             }
         }
 
