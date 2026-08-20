@@ -1,9 +1,17 @@
+import json
+import re
+
 import seekr_chain
 from seekr_chain import K8sWorkflow as ArgoWorkflow
 from seekr_chain import remote_fs
 from seekr_chain._testing import assert_nested_match
 
 TS_REGEX = r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}.\d{6}Z"
+
+# The controller's status.json timestamps come from timeutil.now_iso(), whose
+# fractional-seconds precision (isoformat()'s microseconds, no fixed width)
+# differs from TS_REGEX above, hence a separate pattern.
+ISO_TS = r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,6})?Z"
 
 
 def _list_s3(prefix: str, s3_client) -> list[str]:
@@ -15,6 +23,12 @@ def _list_s3(prefix: str, s3_client) -> list[str]:
         for page in paginator.paginate(Bucket=bucket, Prefix=key_prefix)
         for obj in page.get("Contents", [])
     ]
+
+
+def _read_status_json(s3_path, s3_client):
+    bucket, key = remote_fs.parse_uri(remote_fs.join(s3_path, "status.json"))
+    body = s3_client.get_object(Bucket=bucket, Key=key)["Body"].read()
+    return json.loads(body)
 
 
 class TestLogs:
@@ -101,8 +115,21 @@ class TestLogs:
             r"/data/step=step/role=main/job_index=1/pod_index=0/attempt=0/logs/\d{8}-\d{6}.log.gz-object.+",
             "/data/step=step/role=main/job_index=1/pod_index=0/attempt=0/md.json",
             "/data/version",
+            "/status.json",
         ]
         assert_nested_match(contents, expected_s3)
+
+        status_doc = _read_status_json(job._job_info["s3_path"], s3_client)
+        assert_nested_match(
+            status_doc,
+            {
+                "schema_version": 1,
+                "id": re.escape(job.id),
+                "status": "SUCCEEDED",
+                "steps": [{"name": "step", "phase": "SUCCEEDED", "dt_start": ISO_TS, "dt_end": ISO_TS}],
+                "captured_at": ISO_TS,
+            },
+        )
 
     def test_job_fail(self, s3_client):
         config = seekr_chain.WorkflowConfig.model_validate(
@@ -164,9 +191,22 @@ class TestLogs:
             r"/data/step=step/role=main/job_index=1/pod_index=0/attempt=0/logs/\d{8}-\d{6}.log.gz-object.+",
             "/data/step=step/role=main/job_index=1/pod_index=0/attempt=0/md.json",
             "/data/version",
+            "/status.json",
         ]
 
         assert_nested_match(contents, expected)
+
+        status_doc = _read_status_json(job._job_info["s3_path"], s3_client)
+        assert_nested_match(
+            status_doc,
+            {
+                "schema_version": 1,
+                "id": re.escape(job.id),
+                "status": "FAILED",
+                "steps": [{"name": "step", "phase": "FAILED", "dt_start": ISO_TS, "dt_end": ISO_TS}],
+                "captured_at": ISO_TS,
+            },
+        )
 
     def test_job_oom(self, s3_client, test_code_dir):
         config = seekr_chain.WorkflowConfig.model_validate(
@@ -234,9 +274,22 @@ class TestLogs:
             r"/data/step=step/role=main/job_index=1/pod_index=0/attempt=0/logs/\d{8}-\d{6}.log.gz-object.+",
             "/data/step=step/role=main/job_index=1/pod_index=0/attempt=0/md.json",
             "/data/version",
+            "/status.json",
         ]
 
         assert_nested_match(contents, expected)
+
+        status_doc = _read_status_json(job._job_info["s3_path"], s3_client)
+        assert_nested_match(
+            status_doc,
+            {
+                "schema_version": 1,
+                "id": re.escape(job.id),
+                "status": "FAILED",
+                "steps": [{"name": "step", "phase": "FAILED", "dt_start": ISO_TS, "dt_end": ISO_TS}],
+                "captured_at": ISO_TS,
+            },
+        )
 
     def test_logs_after_reconnect(self):
         """Reconstruct ArgoWorkflow by ID after the workflow is deleted, simulating

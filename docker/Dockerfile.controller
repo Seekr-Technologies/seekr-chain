@@ -1,3 +1,15 @@
+FROM alpine:3.22.0@sha256:8a1f59ffb675680d47db6337b49d22281a139e9d709335b492be023728e11715 AS s5cmd-download
+ARG TARGETARCH
+ARG S5CMD_VERSION=2.2.2
+RUN apk add --no-cache curl ca-certificates \
+    && ARCH="$([ "$TARGETARCH" = "amd64" ] && echo "64bit" || echo "arm64")" \
+    && curl -fsSL "https://github.com/peak/s5cmd/releases/download/v${S5CMD_VERSION}/s5cmd_${S5CMD_VERSION}_Linux-${ARCH}.tar.gz" \
+         | tar -xz s5cmd
+
 FROM python:3.12-slim@sha256:46cb7cc2877e60fbd5e21a9ae6115c30ace7a077b9f8772da879e4590c18c2e3
 COPY controller-requirements.txt /tmp/controller-requirements.txt
 RUN pip install --no-cache-dir --require-hashes -r /tmp/controller-requirements.txt
+# The controller ships status.json to S3 itself via s5cmd (see resources/controller/status.py);
+# the CA bundle lets it verify S3 TLS on this glibc base.
+COPY --from=s5cmd-download /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
+COPY --from=s5cmd-download /s5cmd /usr/local/bin/s5cmd
