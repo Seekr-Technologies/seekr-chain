@@ -6,9 +6,12 @@ modules directly, avoiding any packaging side effects (e.g. seekr_chain/__init__
 pulling in boto3/kubernetes at import time).
 """
 
+import json
 import sys
 from pathlib import Path
 from unittest.mock import MagicMock, patch
+
+import pytest
 
 # ---------------------------------------------------------------------------
 # Bootstrap: make controller importable as a top-level package, exactly as it
@@ -18,13 +21,18 @@ from unittest.mock import MagicMock, patch
 _RESOURCES = Path(__file__).resolve().parents[5] / "src/seekr_chain/backends/k8s/resources"
 sys.path.insert(0, str(_RESOURCES))
 
-from controller import manifests, phases, scheduling, watch  # noqa: E402
+from controller import manifests, phases, scheduling, status, watch  # noqa: E402
 
 cascade_fail = phases.cascade_fail
 submit_ready_steps = scheduling.submit_ready_steps
 load_manifest = manifests.load_manifest
 load_phases = phases.load_phases
 save_phases = phases.save_phases
+_derive_status = status._derive_status
+_build_status = status._build_status
+write_status = status.write_status
+_stamp_starts = watch._stamp_starts
+_stamp_ends = watch._stamp_ends
 
 
 # ---------------------------------------------------------------------------
@@ -360,6 +368,314 @@ class TestSavePhases:
 
         # Should not raise
         save_phases(mock_v1, "ns", "wf-abc", {"a": "SUCCEEDED"}, [])
+
+
+class TestDeriveStatus:
+    @pytest.mark.parametrize(
+        "phases, expected",
+        [
+            ({"a": "CANCELLED", "b": "FAILED"}, "TERMINATED"),
+            ({"a": "CANCELLED", "b": "SUCCEEDED"}, "TERMINATED"),
+            ({"a": "FAILED", "b": "SUCCEEDED"}, "FAILED"),
+            ({"a": "SUCCEEDED", "b": "SKIPPED"}, "SUCCEEDED"),
+            ({"a": "SUCCEEDED", "b": "RUNNING"}, "RUNNING"),
+            ({"a": "PENDING", "b": "PENDING"}, "RUNNING"),
+        ],
+    )
+    def test_precedence(self, phases, expected):
+        assert _derive_status(phases) == expected
+
+
+class TestBuildStatus:
+    def test_schema_shape_with_skipped_step_and_timings(self):
+        dag = [
+            {"name": "a", "depends_on": []},
+            {"name": "b", "depends_on": ["a"]},
+            {"name": "c", "depends_on": ["a"]},
+        ]
+        phases = {"a": "FAILED", "b": "SKIPPED", "c": "SKIPPED"}
+        timings = {"a": {"dt_start": "2026-01-01T00:00:00Z", "dt_end": "2026-01-01T00:00:05Z"}}
+
+        result = _build_status("wf-abc", dag, phases, timings)
+
+        captured_at = result.pop("captured_at")
+        assert isinstance(captured_at, str) and captured_at
+        assert result == {
+            "schema_version": 1,
+            "id": "wf-abc",
+            "status": "FAILED",
+            "steps": [
+                {
+                    "name": "a",
+                    "phase": "FAILED",
+                    "dt_start": "2026-01-01T00:00:00Z",
+                    "dt_end": "2026-01-01T00:00:05Z",
+                },
+                {"name": "b", "phase": "SKIPPED", "dt_start": None, "dt_end": None},
+                {"name": "c", "phase": "SKIPPED", "dt_start": None, "dt_end": None},
+            ],
+        }
+
+    def test_schema_shape_when_succeeded(self):
+        dag = [{"name": "a", "depends_on": []}, {"name": "b", "depends_on": ["a"]}]
+        phases = {"a": "SUCCEEDED", "b": "SUCCEEDED"}
+        timings = {
+            "a": {"dt_start": "2026-01-01T00:00:00Z", "dt_end": "2026-01-01T00:00:05Z"},
+            "b": {"dt_start": "2026-01-01T00:00:06Z", "dt_end": "2026-01-01T00:00:10Z"},
+        }
+
+        result = _build_status("wf-abc", dag, phases, timings)
+
+        captured_at = result.pop("captured_at")
+        assert isinstance(captured_at, str) and captured_at
+        assert result == {
+            "schema_version": 1,
+            "id": "wf-abc",
+            "status": "SUCCEEDED",
+            "steps": [
+                {
+                    "name": "a",
+                    "phase": "SUCCEEDED",
+                    "dt_start": "2026-01-01T00:00:00Z",
+                    "dt_end": "2026-01-01T00:00:05Z",
+                },
+                {
+                    "name": "b",
+                    "phase": "SUCCEEDED",
+                    "dt_start": "2026-01-01T00:00:06Z",
+                    "dt_end": "2026-01-01T00:00:10Z",
+                },
+            ],
+        }
+
+    def test_schema_shape_when_cancelled(self):
+        dag = [{"name": "a", "depends_on": []}, {"name": "b", "depends_on": ["a"]}]
+        phases = {"a": "SUCCEEDED", "b": "CANCELLED"}
+        timings = {"a": {"dt_start": "2026-01-01T00:00:00Z", "dt_end": "2026-01-01T00:00:05Z"}}
+
+        result = _build_status("wf-abc", dag, phases, timings)
+
+        captured_at = result.pop("captured_at")
+        assert isinstance(captured_at, str) and captured_at
+        assert result == {
+            "schema_version": 1,
+            "id": "wf-abc",
+            "status": "TERMINATED",
+            "steps": [
+                {
+                    "name": "a",
+                    "phase": "SUCCEEDED",
+                    "dt_start": "2026-01-01T00:00:00Z",
+                    "dt_end": "2026-01-01T00:00:05Z",
+                },
+                {"name": "b", "phase": "CANCELLED", "dt_start": None, "dt_end": None},
+            ],
+        }
+
+
+class TestWriteStatus:
+    """Round-trip tests for write_status(): the actual file writer, previously untested."""
+
+    def _write_and_read(self, tmp_path, monkeypatch, workflow_id, dag, phases, timings):
+        monkeypatch.setattr(status, "_STATUS_PATH", str(tmp_path / "status.json"))
+        monkeypatch.delenv(status._REMOTE_STATUS_ENV, raising=False)
+        write_status(workflow_id, dag, phases, timings)
+        with open(tmp_path / "status.json") as f:
+            doc = json.load(f)
+        captured_at = doc.pop("captured_at")
+        assert isinstance(captured_at, str) and captured_at
+        return doc
+
+    def test_writes_succeeded_doc(self, tmp_path, monkeypatch):
+        dag = [{"name": "a", "depends_on": []}, {"name": "b", "depends_on": ["a"]}]
+        phases = {"a": "SUCCEEDED", "b": "SUCCEEDED"}
+        timings = {
+            "a": {"dt_start": "2026-01-01T00:00:00Z", "dt_end": "2026-01-01T00:00:05Z"},
+            "b": {"dt_start": "2026-01-01T00:00:06Z", "dt_end": "2026-01-01T00:00:10Z"},
+        }
+        doc = self._write_and_read(tmp_path, monkeypatch, "wf-abc", dag, phases, timings)
+        assert doc == {
+            "schema_version": 1,
+            "id": "wf-abc",
+            "status": "SUCCEEDED",
+            "steps": [
+                {
+                    "name": "a",
+                    "phase": "SUCCEEDED",
+                    "dt_start": "2026-01-01T00:00:00Z",
+                    "dt_end": "2026-01-01T00:00:05Z",
+                },
+                {
+                    "name": "b",
+                    "phase": "SUCCEEDED",
+                    "dt_start": "2026-01-01T00:00:06Z",
+                    "dt_end": "2026-01-01T00:00:10Z",
+                },
+            ],
+        }
+
+    def test_writes_failed_and_skipped_doc(self, tmp_path, monkeypatch):
+        dag = [
+            {"name": "a", "depends_on": []},
+            {"name": "b", "depends_on": ["a"]},
+            {"name": "c", "depends_on": ["a"]},
+        ]
+        phases = {"a": "FAILED", "b": "SKIPPED", "c": "SKIPPED"}
+        timings = {"a": {"dt_start": "2026-01-01T00:00:00Z", "dt_end": "2026-01-01T00:00:05Z"}}
+        doc = self._write_and_read(tmp_path, monkeypatch, "wf-abc", dag, phases, timings)
+        assert doc == {
+            "schema_version": 1,
+            "id": "wf-abc",
+            "status": "FAILED",
+            "steps": [
+                {
+                    "name": "a",
+                    "phase": "FAILED",
+                    "dt_start": "2026-01-01T00:00:00Z",
+                    "dt_end": "2026-01-01T00:00:05Z",
+                },
+                {"name": "b", "phase": "SKIPPED", "dt_start": None, "dt_end": None},
+                {"name": "c", "phase": "SKIPPED", "dt_start": None, "dt_end": None},
+            ],
+        }
+
+    def test_writes_cancelled_doc_as_terminated(self, tmp_path, monkeypatch):
+        dag = [{"name": "a", "depends_on": []}, {"name": "b", "depends_on": ["a"]}]
+        phases = {"a": "SUCCEEDED", "b": "CANCELLED"}
+        timings = {"a": {"dt_start": "2026-01-01T00:00:00Z", "dt_end": "2026-01-01T00:00:05Z"}}
+        doc = self._write_and_read(tmp_path, monkeypatch, "wf-abc", dag, phases, timings)
+        assert doc == {
+            "schema_version": 1,
+            "id": "wf-abc",
+            "status": "TERMINATED",
+            "steps": [
+                {
+                    "name": "a",
+                    "phase": "SUCCEEDED",
+                    "dt_start": "2026-01-01T00:00:00Z",
+                    "dt_end": "2026-01-01T00:00:05Z",
+                },
+                {"name": "b", "phase": "CANCELLED", "dt_start": None, "dt_end": None},
+            ],
+        }
+
+    def test_writes_running_doc(self, tmp_path, monkeypatch):
+        dag = [{"name": "a", "depends_on": []}, {"name": "b", "depends_on": ["a"]}]
+        phases = {"a": "SUCCEEDED", "b": "RUNNING"}
+        timings = {"a": {"dt_start": "2026-01-01T00:00:00Z", "dt_end": "2026-01-01T00:00:05Z"}}
+        doc = self._write_and_read(tmp_path, monkeypatch, "wf-abc", dag, phases, timings)
+        assert doc == {
+            "schema_version": 1,
+            "id": "wf-abc",
+            "status": "RUNNING",
+            "steps": [
+                {
+                    "name": "a",
+                    "phase": "SUCCEEDED",
+                    "dt_start": "2026-01-01T00:00:00Z",
+                    "dt_end": "2026-01-01T00:00:05Z",
+                },
+                {"name": "b", "phase": "RUNNING", "dt_start": None, "dt_end": None},
+            ],
+        }
+
+
+class TestShipOnce:
+    """_ship_once() is the s5cmd upload boundary: it must invoke s5cmd exactly
+    when shipping is configured, and never raise regardless of subprocess
+    outcome."""
+
+    def test_invokes_s5cmd_with_status_path_and_remote_when_configured(self, monkeypatch):
+        monkeypatch.setenv(status._REMOTE_STATUS_ENV, "s3://bucket/jobs/wf/abc/status.json")
+        captured = []
+        monkeypatch.setattr(status.subprocess, "run", lambda argv, **kwargs: captured.append(argv))
+        status._ship_once()
+        assert captured == [["s5cmd", "cp", status._STATUS_PATH, "s3://bucket/jobs/wf/abc/status.json"]]
+
+    def test_does_not_invoke_s5cmd_when_remote_path_unset(self, monkeypatch):
+        monkeypatch.delenv(status._REMOTE_STATUS_ENV, raising=False)
+        calls = []
+        monkeypatch.setattr(status.subprocess, "run", lambda *a, **k: calls.append((a, k)))
+        status._ship_once()
+        assert calls == []
+
+    def test_swallows_subprocess_timeout(self, monkeypatch):
+        monkeypatch.setenv(status._REMOTE_STATUS_ENV, "s3://bucket/jobs/wf/abc/status.json")
+
+        def _raise(*a, **k):
+            raise status.subprocess.TimeoutExpired(cmd="s5cmd", timeout=15)
+
+        monkeypatch.setattr(status.subprocess, "run", _raise)
+        assert status._ship_once() is None
+
+    def test_swallows_generic_exception(self, monkeypatch):
+        monkeypatch.setenv(status._REMOTE_STATUS_ENV, "s3://bucket/jobs/wf/abc/status.json")
+
+        def _raise(*a, **k):
+            raise RuntimeError("boom")
+
+        monkeypatch.setattr(status.subprocess, "run", _raise)
+        assert status._ship_once() is None
+
+
+class TestStampTimings:
+    """_stamp_starts/_stamp_ends only record run timestamps for steps that
+    actually ran — SKIPPED (and any other never-started) steps must carry
+    neither dt_start nor dt_end."""
+
+    def test_skipped_step_gets_no_timestamps(self):
+        phases = {"a": "FAILED", "b": "SKIPPED"}
+        dag = [{"name": "a", "depends_on": []}, {"name": "b", "depends_on": ["a"]}]
+        timings = {"a": {"dt_start": "2026-01-01T00:00:00Z"}}
+
+        _stamp_starts(dag, phases, timings)
+        _stamp_ends(phases, timings)
+
+        assert set(timings.get("b", {}).keys()) == set()
+
+    def test_running_step_gets_only_dt_start(self):
+        dag = [{"name": "a", "depends_on": []}]
+        phases = {"a": "RUNNING"}
+        timings = {}
+
+        _stamp_starts(dag, phases, timings)
+        _stamp_ends(phases, timings)
+
+        assert set(timings["a"].keys()) == {"dt_start"}
+        assert isinstance(timings["a"]["dt_start"], str) and timings["a"]["dt_start"]
+
+    def test_ran_terminal_step_gets_both_timestamps(self):
+        dag = [{"name": "a", "depends_on": []}, {"name": "b", "depends_on": []}]
+        phases = {"a": "SUCCEEDED", "b": "FAILED"}
+        timings = {}
+
+        _stamp_starts(dag, phases, timings)
+        _stamp_ends(phases, timings)
+
+        for name in ("a", "b"):
+            assert set(timings[name].keys()) == {"dt_start", "dt_end"}
+            assert isinstance(timings[name]["dt_start"], str) and timings[name]["dt_start"]
+            assert isinstance(timings[name]["dt_end"], str) and timings[name]["dt_end"]
+
+    def test_dt_end_never_set_without_a_prior_dt_start(self):
+        """Guards the end-before-start bug: a step reaching a terminal phase
+        without ever recording a dt_start (e.g. SKIPPED, cascaded straight
+        from PENDING) must not get a dt_end either."""
+        phases = {"b": "SKIPPED"}
+        timings = {}
+
+        _stamp_ends(phases, timings)
+
+        assert set(timings.get("b", {}).keys()) == set()
+
+    def test_stamp_starts_is_idempotent(self):
+        dag = [{"name": "a", "depends_on": []}]
+        phases = {"a": "RUNNING"}
+        timings = {"a": {"dt_start": "2026-01-01T00:00:00Z"}}
+
+        _stamp_starts(dag, phases, timings)
+
+        assert timings["a"]["dt_start"] == "2026-01-01T00:00:00Z"
 
 
 # ---------------------------------------------------------------------------

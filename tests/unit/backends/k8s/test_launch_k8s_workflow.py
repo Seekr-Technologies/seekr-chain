@@ -23,6 +23,7 @@ from seekr_chain.user_config import UserConfig
 # import_module() reads straight from sys.modules and sidesteps that.
 lkw_module = importlib.import_module("seekr_chain.backends.k8s.launch_k8s_workflow")
 _package_assets = lkw_module._package_assets
+_build_controller_jobset = lkw_module._build_controller_jobset
 
 
 def _make_config() -> WorkflowConfig:
@@ -221,4 +222,46 @@ class TestCodeStaging:
         lkw_module.launch_k8s_workflow(config)
 
         assert captured["staged_code_dir"] is not None
-        assert captured["workspace_file_is_symlink"] is True
+
+
+class TestControllerJobsetStatusSyncSidecar:
+    """The controller ships status.json to S3 itself via s5cmd — no sidecar
+    is involved, and the controller container needs S3 credentials plus the
+    destination path wired into its env."""
+
+    def _build(self):
+        config = WorkflowConfig(
+            name="t",
+            steps=[{"name": "a", "image": "ubuntu", "script": "echo hi"}],
+        )
+        job_info = {
+            "id": "wf-abc",
+            "s3_path": "s3://bucket/jobs/wf/abc",
+            "remote_assets_path": "s3://bucket/jobs/wf/abc/assets.tar.gz",
+            "remote_status_path": "s3://bucket/jobs/wf/abc/status.json",
+        }
+        return lkw_module._build_controller_jobset(
+            workflow_id="wf-abc",
+            config=config,
+            job_info=job_info,
+            workflow_secrets=[],
+            datastore_root="s3://bucket/",
+            interactive=False,
+            service_account="sa",
+        )
+
+    def test_no_status_sync_sidecar_remains(self):
+        jobset = self._build()
+        init_containers = jobset["spec"]["replicatedJobs"][0]["template"]["spec"]["template"]["spec"]["initContainers"]
+        assert [c["name"] for c in init_containers] == ["chain-init"]
+
+    def test_controller_container_env_carries_s3_creds_and_remote_status_path(self):
+        jobset = self._build()
+        controller = jobset["spec"]["replicatedJobs"][0]["template"]["spec"]["template"]["spec"]["containers"][0]
+        env_by_name = {e["name"]: e for e in controller["env"]}
+
+        assert env_by_name["AWS_ACCESS_KEY_ID"]["valueFrom"]["secretKeyRef"] == {
+            "name": "wf-abc",
+            "key": "AWS_ACCESS_KEY_ID",
+        }
+        assert env_by_name["SEEKR_CHAIN_REMOTE_STATUS_PATH"]["value"] == "s3://bucket/jobs/wf/abc/status.json"
