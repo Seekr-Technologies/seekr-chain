@@ -120,7 +120,10 @@ def assert_nested_match(actual, expected):
     """
     assert type(actual) is type(expected)
 
-    if isinstance(actual, (int, bool)):
+    if actual is None:
+        # type() equality above already proves expected is None too.
+        return
+    elif isinstance(actual, (int, bool)):
         # Direct comparison for integers and floats
         assert actual == expected
     elif isinstance(actual, str):
