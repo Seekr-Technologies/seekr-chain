@@ -302,7 +302,7 @@ class TestCollectPodState:
             labels={
                 "jobset.sigs.k8s.io/job-index": "2",
                 "jobset.sigs.k8s.io/job-global-index": "5",
-                "jobset.sigs.k8s.io/restart-attempt": "1",
+                "seekr-chain/attempt": "1",
             },
         )
         state = _collect_pod_state(pod)

@@ -209,7 +209,7 @@ def _get_env(
         },
         {
             "name": "RESTART_ATTEMPT",
-            "valueFrom": {"fieldRef": {"fieldPath": "metadata.annotations['jobset.sigs.k8s.io/restart-attempt']"}},
+            "valueFrom": {"fieldRef": {"fieldPath": "metadata.annotations['seekr-chain/attempt']"}},
         },
         {"name": "NNODES", "value": str(step_config.resources.num_nodes)},
         {
@@ -263,7 +263,9 @@ def _construct_hostfile(
 
 
 def _generate_role_asset_path(step_name: str, role_name: str, parent: Optional[Path | str] = None) -> Path | str:
-    out = f"step={step_name}/role={role_name}"
+    out = f"step={step_name}"
+    if role_name:
+        out += f"/role={role_name}"
 
     if parent:
         if isinstance(parent, Path):
@@ -634,7 +636,6 @@ def _build_role_context(
         # different roles in the same step can have different closure terms.
         "closure_hash": closure_hash,
         "affinity": role_affinity,
-        "pod_failure_policy": _build_pod_failure_policy(step_config, role_config.name),
         # Log sidecar
         "log_sidecar_image": resolve_image("fluent/fluent-bit:2.2-debug"),
         "log_sidecar_s3_bucket": s3_bucket,
@@ -805,68 +806,6 @@ def _build_success_policy(step_config) -> dict | None:
     return policy
 
 
-def _normalize_literal(lit: str) -> str:
-    return "".join([x.capitalize() for x in lit.split("_")])
-
-
-def _build_pod_failure_policy(step_config, role_name: str) -> dict | None:
-    fp_config = getattr(step_config, "failure_policy", None)
-    if fp_config is None:
-        return None
-
-    rules = []
-    for rule in fp_config.rules:
-        if rule.on_exit_codes is None:
-            continue
-        if rule.target_roles is not None and role_name not in rule.target_roles:
-            continue
-        rules.append(
-            {
-                "action": "FailJob",
-                "onExitCodes": {
-                    "containerName": "main",
-                    "operator": _normalize_literal(rule.operator),
-                    "values": sorted(set(rule.on_exit_codes)),
-                },
-            }
-        )
-    if not rules:
-        return None
-    return {"rules": rules}
-
-
-def _build_failure_policy(step_config) -> dict | None:
-    fp_config = getattr(step_config, "failure_policy", None)
-    if fp_config is None:
-        return None
-
-    policy = {"maxRestarts": fp_config.max_restarts}
-
-    exit_code_rules = []
-    plain_rules = []
-    for rule in fp_config.rules:
-        if rule.on_exit_codes is not None:
-            exit_code_rules.append(
-                {
-                    "action": "FailJobSet",
-                    "onJobFailureReasons": ["PodFailurePolicy"],
-                    "targetReplicatedJobs": rule.target_roles,
-                }
-            )
-        else:
-            plain_rules.append(
-                {
-                    "action": _normalize_literal(rule.action),
-                    "onJobFailureReasons": None,
-                    "targetReplicatedJobs": rule.target_roles,
-                },
-            )
-    rules = exit_code_rules + plain_rules
-    if rules:
-        policy["rules"] = rules
-    return policy
-
-
 def _compute_peermap(role_configs, js_name: str, step_config: StepConfig) -> dict:
     peermap = {}
     for cfg in role_configs:
@@ -874,7 +813,7 @@ def _compute_peermap(role_configs, js_name: str, step_config: StepConfig) -> dic
         peermap[js_pod_name] = [f"{js_name}-{js_pod_name}-{i}-0.{js_name}" for i in range(cfg.resources.num_nodes)]
 
     if isinstance(step_config, SingleRoleStepConfig):
-        peermap = peermap[role_configs[0].name]
+        peermap = peermap[""]
 
     return peermap
 
@@ -935,13 +874,13 @@ def build_jobset_context(
     # NORMALIZE SINGLE AND MULTI-ROLE STEPS.
     if isinstance(step_config, SingleRoleStepConfig):
         role_configs = [step_config.model_copy()]
-        role_configs[0].name = "main"
+        role_configs[0].name = ""
     else:
         role_configs = step_config.roles
 
     # Check if we will be over 63 character limit
     for role_config in role_configs:
-        if len(f"{js_name}-{role_config.name}-00-00-abcde") > 63:
+        if len(f"{js_name}-{role_config.name or 'main'}-00-00-abcde") > 63:
             js_name = f"{workflow_name.split('-')[-1]}-s{step_index:02d}-js"
             logger.warning(f"Generated jobset name is too long! Shortening to {js_name}")
             break
@@ -959,7 +898,11 @@ def build_jobset_context(
         "workflow_name": workflow_name,
         "remote_assets_path": job_info["remote_assets_path"],
         "success_policy": _build_success_policy(step_config),
-        "failure_policy": _build_failure_policy(step_config),
+        # New JobSet objects are always fail-fast (maxRestarts: 0, no rules,
+        # no podFailurePolicy) — the controller now evaluates failure_policy
+        # after the JobSet reaches terminal Failed, race-free against
+        # multi-pod exit-code ordering. See resources/controller/failure.py.
+        "attempt": 0,
         "affinity": affinity,
         "pack_groups": pack_groups,
         "labels": _build_jobset_labels(workflow_config),

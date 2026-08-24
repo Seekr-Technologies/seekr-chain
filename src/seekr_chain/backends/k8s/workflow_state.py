@@ -348,7 +348,7 @@ def _collect_pod_state(pod) -> PodState:
         containers=_collect_container_states(pod.status.container_statuses, is_init=False),
         job_index=int(pod.metadata.labels.get("jobset.sigs.k8s.io/job-index", 0)),
         job_global_index=int(pod.metadata.labels.get("jobset.sigs.k8s.io/job-global-index", 0)),
-        restart_attempt=int(pod.metadata.labels.get("jobset.sigs.k8s.io/restart-attempt", 0)),
+        restart_attempt=int(pod.metadata.labels.get("seekr-chain/attempt", 0)),
     )
     pod_state.status = _derive_pod_status(
         pod_phase=(pod.status.phase or "UNKNOWN").upper(),
@@ -573,12 +573,25 @@ def read_controller_jobset(k8s_custom, namespace: str, workflow_id: str) -> Opti
 
 
 def _group_jobsets_by_step(jobsets: list[dict]) -> dict[str, dict]:
-    """Return ``{step_name: jobset_dict}`` from a list of raw JobSet objects."""
-    return {
-        js["metadata"]["labels"]["seekr-chain/step-name"]: js
-        for js in jobsets
-        if "seekr-chain/step-name" in js.get("metadata", {}).get("labels", {})
-    }
+    """Return ``{step_name: jobset_dict}`` from a list of raw JobSet objects.
+
+    A retried step has one JobSet per attempt, all sharing the same
+    ``seekr-chain/step-name`` label — pick the one with the highest
+    ``seekr-chain/attempt`` label (labels are strings, so compared as ints)
+    so status reflects the current attempt rather than an earlier one.
+    """
+    by_step: dict[str, dict] = {}
+    for js in jobsets:
+        labels = js.get("metadata", {}).get("labels", {})
+        step_name = labels.get("seekr-chain/step-name")
+        if step_name is None:
+            continue
+        attempt = int(labels.get("seekr-chain/attempt", 0))
+        if step_name not in by_step or attempt > int(
+            by_step[step_name]["metadata"]["labels"].get("seekr-chain/attempt", 0)
+        ):
+            by_step[step_name] = js
+    return by_step
 
 
 def list_jobsets(k8s_custom, namespace: str, workflow_id: str) -> tuple[list[dict], str]:

@@ -49,8 +49,13 @@ def _load_manifest_mock(_assets, name):
     """Stand in for controller.manifests.load_manifest. Includes the
     seekr-chain/step-name label real JobSet manifests carry (see
     templates/jobset.yaml.j2) — FakeK8sCluster reads it back to resolve a
-    create call to the step that was scripted with script_step()."""
-    return {"metadata": {"name": f"{name}-js", "labels": {"seekr-chain/step-name": name}}, "spec": {}}
+    create call to the step that was scripted with script_step(). An empty
+    replicatedJobs list is enough for manifests.stamp_attempt (used on retry
+    resubmission) to run without a real role template."""
+    return {
+        "metadata": {"name": f"{name}-js", "labels": {"seekr-chain/step-name": name}},
+        "spec": {"replicatedJobs": []},
+    }
 
 
 def _record_status_call(cluster: FakeK8sCluster, workflow_id, dag, phases, timings) -> None:
@@ -405,14 +410,15 @@ class TestLoadPhases:
 
     def test_no_configmap_returns_all_pending(self):
         dag = [{"name": "a"}, {"name": "b"}]
-        phases, timings = load_phases(self._make_v1(status=404), "ns", "wf-abc", dag)
+        phases, timings, attempts = load_phases(self._make_v1(status=404), "ns", "wf-abc", dag)
         assert phases == {"a": "PENDING", "b": "PENDING"}
         assert timings == {}
+        assert attempts == {"a": 0, "b": 0}
 
     def test_restores_succeeded_and_failed(self):
         dag = [{"name": "a"}, {"name": "b"}, {"name": "c"}]
         saved = {"a": "SUCCEEDED", "b": "FAILED", "c": "RUNNING"}
-        phases, _ = load_phases(self._make_v1(cm_data=saved), "ns", "wf-abc", dag)
+        phases, _, _ = load_phases(self._make_v1(cm_data=saved), "ns", "wf-abc", dag)
         assert phases["a"] == "SUCCEEDED"
         assert phases["b"] == "FAILED"
         # RUNNING is reset to PENDING on restore
@@ -421,29 +427,30 @@ class TestLoadPhases:
     def test_restores_skipped(self):
         dag = [{"name": "a"}, {"name": "b"}]
         saved = {"a": "FAILED", "b": "SKIPPED"}
-        phases, _ = load_phases(self._make_v1(cm_data=saved), "ns", "wf-abc", dag)
+        phases, _, _ = load_phases(self._make_v1(cm_data=saved), "ns", "wf-abc", dag)
         assert phases == {"a": "FAILED", "b": "SKIPPED"}
 
     def test_ignores_unknown_step_names(self):
         """ConfigMap may contain stale step names that no longer exist in the DAG."""
         dag = [{"name": "a"}]
         saved = {"a": "SUCCEEDED", "stale-step": "FAILED"}
-        phases, _ = load_phases(self._make_v1(cm_data=saved), "ns", "wf-abc", dag)
+        phases, _, _ = load_phases(self._make_v1(cm_data=saved), "ns", "wf-abc", dag)
         assert phases == {"a": "SUCCEEDED"}
         assert "stale-step" not in phases
 
     def test_non_404_api_error_is_warned_not_raised(self):
         dag = [{"name": "a"}]
         # 500 error should not propagate — fall back to all-PENDING
-        phases, timings = load_phases(self._make_v1(status=500), "ns", "wf-abc", dag)
+        phases, timings, attempts = load_phases(self._make_v1(status=500), "ns", "wf-abc", dag)
         assert phases == {"a": "PENDING"}
         assert timings == {}
+        assert attempts == {"a": 0}
 
     def test_restores_timings_for_terminal_step(self):
         dag = [{"name": "a"}]
         saved = {"a": "SUCCEEDED"}
         saved_timings = {"a": {"dt_start": "2026-01-01T00:00:00Z", "dt_end": "2026-01-01T00:00:05Z"}}
-        _, timings = load_phases(self._make_v1(cm_data=saved, timings_data=saved_timings), "ns", "wf-abc", dag)
+        _, timings, _ = load_phases(self._make_v1(cm_data=saved, timings_data=saved_timings), "ns", "wf-abc", dag)
         assert timings == saved_timings
 
     def test_drops_timings_for_step_reset_running_to_pending(self):
@@ -452,9 +459,21 @@ class TestLoadPhases:
         dag = [{"name": "a"}]
         saved = {"a": "RUNNING"}
         saved_timings = {"a": {"dt_start": "2026-01-01T00:00:00Z"}}
-        phases, timings = load_phases(self._make_v1(cm_data=saved, timings_data=saved_timings), "ns", "wf-abc", dag)
+        phases, timings, _ = load_phases(
+            self._make_v1(cm_data=saved, timings_data=saved_timings), "ns", "wf-abc", dag
+        )
         assert phases == {"a": "PENDING"}
         assert timings == {}
+
+    def test_restores_attempts_for_a_running_step(self):
+        """Attempts are restored unconditionally (not gated on terminal phase) —
+        a step mid-retry is RUNNING but the controller still needs its attempt
+        count across a restart to know which attempt JobSet to resubmit as."""
+        dag = [{"name": "a"}]
+        mock = self._make_v1(cm_data={"a": "RUNNING"})
+        mock.read_namespaced_config_map.return_value.data["attempts"] = json.dumps({"a": 2})
+        _, _, attempts = load_phases(mock, "ns", "wf-abc", dag)
+        assert attempts == {"a": 2}
 
 
 class TestSavePhases:
@@ -466,7 +485,7 @@ class TestSavePhases:
         mock_v1.patch_namespaced_config_map.side_effect = ApiException(status=404)
         mock_v1.create_namespaced_config_map.return_value = {}
 
-        save_phases(mock_v1, "ns", "wf-abc", {"a": "SUCCEEDED"}, {}, [])
+        save_phases(mock_v1, "ns", "wf-abc", {"a": "SUCCEEDED"}, {}, {"a": 0}, [])
 
         mock_v1.create_namespaced_config_map.assert_called_once()
 
@@ -474,7 +493,7 @@ class TestSavePhases:
         mock_v1 = MagicMock()
         mock_v1.patch_namespaced_config_map.return_value = {}
 
-        save_phases(mock_v1, "ns", "wf-abc", {"a": "SUCCEEDED"}, {}, [])
+        save_phases(mock_v1, "ns", "wf-abc", {"a": "SUCCEEDED"}, {}, {"a": 0}, [])
 
         mock_v1.patch_namespaced_config_map.assert_called_once()
         mock_v1.create_namespaced_config_map.assert_not_called()
@@ -487,18 +506,27 @@ class TestSavePhases:
         mock_v1.patch_namespaced_config_map.side_effect = ApiException(status=500)
 
         # Should not raise
-        save_phases(mock_v1, "ns", "wf-abc", {"a": "SUCCEEDED"}, {}, [])
+        save_phases(mock_v1, "ns", "wf-abc", {"a": "SUCCEEDED"}, {}, {"a": 0}, [])
 
     def test_persists_both_phases_and_timings_keys(self):
         mock_v1 = MagicMock()
         mock_v1.patch_namespaced_config_map.return_value = {}
         timings = {"a": {"dt_start": "2026-01-01T00:00:00Z", "dt_end": "2026-01-01T00:00:05Z"}}
 
-        save_phases(mock_v1, "ns", "wf-abc", {"a": "SUCCEEDED"}, timings, [])
+        save_phases(mock_v1, "ns", "wf-abc", {"a": "SUCCEEDED"}, timings, {"a": 0}, [])
 
         data = mock_v1.patch_namespaced_config_map.call_args.kwargs["body"]["data"]
         assert json.loads(data["phases"]) == {"a": "SUCCEEDED"}
         assert json.loads(data["timings"]) == timings
+
+    def test_persists_attempts_key(self):
+        mock_v1 = MagicMock()
+        mock_v1.patch_namespaced_config_map.return_value = {}
+
+        save_phases(mock_v1, "ns", "wf-abc", {"a": "RUNNING"}, {}, {"a": 1}, [])
+
+        data = mock_v1.patch_namespaced_config_map.call_args.kwargs["body"]["data"]
+        assert json.loads(data["attempts"]) == {"a": 1}
 
 
 class TestDeriveStatus:

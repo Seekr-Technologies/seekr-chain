@@ -8,9 +8,10 @@ import time
 import kubernetes
 import kubernetes.watch
 
+from . import failure
 from .events import emit_event, touch_heartbeat
 from .phases import TERMINAL_PHASES, cascade_fail, load_phases, save_phases
-from .scheduling import submit_ready_steps
+from .scheduling import retry_pending_steps, submit_ready_steps
 from .status import flush_status, write_status
 from .timeutil import now_iso
 
@@ -87,6 +88,8 @@ def main() -> int:
 
     print(f"[controller] loaded DAG with {len(dag)} steps: {[s['name'] for s in dag]}", flush=True)
 
+    failure_policy_by_step = {s["name"]: s.get("failure_policy") for s in dag}
+
     # ownerReference so JobSets and the phases ConfigMap are cascade-deleted when
     # this controller JobSet is deleted.
     owner_ref = [
@@ -100,9 +103,9 @@ def main() -> int:
         }
     ]
 
-    # Restore persisted phase and timing state so a restarted controller pod
-    # resumes correctly.
-    phases, timings = load_phases(k8s_v1, namespace, workflow_id, dag)
+    # Restore persisted phase, timing, and attempt-count state so a restarted
+    # controller pod resumes correctly.
+    phases, timings, attempts = load_phases(k8s_v1, namespace, workflow_id, dag)
 
     # Timings are persisted alongside phases in the ConfigMap and restored
     # (terminal-only) on restart. They remain a best-effort outcome detail,
@@ -112,12 +115,19 @@ def main() -> int:
     js_names: dict[str, str] = {}
     # reverse map: jobset name -> step name (for event dispatch); updated incrementally
     js_to_step: dict[str, str] = {}
+    # step name -> next attempt number, for steps whose retry resubmission hit
+    # a retriable API error and must be retried on a later loop iteration.
+    pending_retries: dict[str, int] = {}
+    # JobSet names whose terminal event has been fully processed — makes a
+    # duplicate or late-arriving event for a superseded (retried) attempt name
+    # a safe no-op even if js_to_step still had a stale entry for it.
+    handled: set[str] = set()
 
     # Submit all initially-ready steps before opening the watch.
     submit_ready_steps(dag, phases, js_names, js_to_step, assets_path, namespace, owner_ref, k8s_custom)
     _stamp_starts(dag, phases, timings)
     _stamp_ends(phases, timings)
-    save_phases(k8s_v1, namespace, workflow_id, phases, timings, owner_ref)
+    save_phases(k8s_v1, namespace, workflow_id, phases, timings, attempts, owner_ref)
     write_status(workflow_id, dag, phases, timings)
 
     if all(p in TERMINAL_PHASES for p in phases.values()):
@@ -140,13 +150,17 @@ def main() -> int:
             touch_heartbeat()
 
             # Retry any steps that failed to submit on a previous iteration
-            # (retriable API errors leave them PENDING).  Also cascade-fail
+            # (retriable API errors leave them PENDING, or — for a retry
+            # resubmission — in pending_retries).  Also cascade-fail
             # dependents of any step marked FAILED by a permanent submit error.
             submit_ready_steps(dag, phases, js_names, js_to_step, assets_path, namespace, owner_ref, k8s_custom)
+            retry_pending_steps(
+                pending_retries, phases, js_names, js_to_step, assets_path, namespace, owner_ref, k8s_custom
+            )
             cascade_fail(dag, phases)
             _stamp_starts(dag, phases, timings)
             _stamp_ends(phases, timings)
-            save_phases(k8s_v1, namespace, workflow_id, phases, timings, owner_ref)
+            save_phases(k8s_v1, namespace, workflow_id, phases, timings, attempts, owner_ref)
             write_status(workflow_id, dag, phases, timings)
 
             if all(p in TERMINAL_PHASES for p in phases.values()):
@@ -177,6 +191,9 @@ def main() -> int:
                     obj = event["object"]
                     js_name = obj["metadata"]["name"]
 
+                    if js_name in handled:
+                        continue
+
                     step_name = js_to_step.get(js_name)
                     if step_name is None or phases[step_name] in TERMINAL_PHASES:
                         continue
@@ -196,17 +213,40 @@ def main() -> int:
                             f"Step {step_name!r} completed successfully",
                         )
                     elif terminal == "Failed":
-                        phases[step_name] = "FAILED"
-                        print(f"[controller] step={step_name!r} FAILED", flush=True)
-                        emit_event(
+                        should_retry, reason = failure.evaluate_step_failure(
                             k8s_v1,
                             namespace,
                             workflow_id,
-                            job_uid,
-                            "StepFailed",
-                            f"Step {step_name!r} failed",
-                            event_type="Warning",
+                            step_name,
+                            attempts[step_name],
+                            failure_policy_by_step.get(step_name),
                         )
+                        if should_retry:
+                            # Superseding this attempt's JobSet name: mark it handled
+                            # (belt-and-suspenders alongside the js_to_step deletion
+                            # below) so a duplicate or late-arriving event for it is a
+                            # safe no-op, then queue the next attempt for resubmission.
+                            handled.add(js_name)
+                            del js_to_step[js_name]
+                            attempts[step_name] += 1
+                            pending_retries[step_name] = attempts[step_name]
+                            print(
+                                f"[controller] step={step_name!r} attempt failed ({reason}), "
+                                f"retrying (attempt {attempts[step_name]})",
+                                flush=True,
+                            )
+                        else:
+                            phases[step_name] = "FAILED"
+                            print(f"[controller] step={step_name!r} FAILED ({reason})", flush=True)
+                            emit_event(
+                                k8s_v1,
+                                namespace,
+                                workflow_id,
+                                job_uid,
+                                "StepFailed",
+                                f"Step {step_name!r} failed",
+                                event_type="Warning",
+                            )
                     elif suspended:
                         # Suspended without a terminalState means `chain cancel` (or
                         # any other spec.suspend=true patch) stopped this JobSet — not
@@ -228,13 +268,18 @@ def main() -> int:
 
                     cascade_fail(dag, phases)
                     _stamp_ends(phases, timings)
-                    save_phases(k8s_v1, namespace, workflow_id, phases, timings, owner_ref)
+                    save_phases(k8s_v1, namespace, workflow_id, phases, timings, attempts, owner_ref)
                     write_status(workflow_id, dag, phases, timings)
 
-                    # Submit any steps now unblocked by this completion.
+                    # Submit any steps now unblocked by this completion, and resubmit
+                    # this (or any other pending) retry without waiting for the next
+                    # watch iteration.
                     submit_ready_steps(dag, phases, js_names, js_to_step, assets_path, namespace, owner_ref, k8s_custom)
+                    retry_pending_steps(
+                        pending_retries, phases, js_names, js_to_step, assets_path, namespace, owner_ref, k8s_custom
+                    )
                     _stamp_starts(dag, phases, timings)
-                    save_phases(k8s_v1, namespace, workflow_id, phases, timings, owner_ref)
+                    save_phases(k8s_v1, namespace, workflow_id, phases, timings, attempts, owner_ref)
                     write_status(workflow_id, dag, phases, timings)
 
                     if all(p in TERMINAL_PHASES for p in phases.values()):
