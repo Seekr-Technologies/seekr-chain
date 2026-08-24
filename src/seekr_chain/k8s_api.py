@@ -8,7 +8,7 @@ once and hands out the same instance forever. Nothing else in the package should
 call ``kubernetes.config.*`` or ``kubernetes.client.*Api()`` directly;
 ``tests/unit/test_k8s_api.py`` has a guard test that enforces this.
 
-The one sanctioned exception is ``backends/k8s/resources/controller.py``, which
+The one sanctioned exception is ``backends/k8s/resources/controller/``, which
 ships standalone into the controller pod and cannot import ``seekr_chain``.
 
 Only out-of-cluster (kubeconfig) auth is handled here. The single in-cluster
