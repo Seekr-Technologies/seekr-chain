@@ -220,6 +220,12 @@ class FakeK8sCluster:
         # changed) collapse to a single trace entry per real transition.
         self._last_phases: dict | None = None
         self._last_status: str | None = None
+        # Populated only by run_controller_main(..., capture_status=True) —
+        # the s5cmd argv the real _ship_once() would have invoked, and the
+        # parsed status.json it wrote.
+        self.ship_calls: list[list[str]] = []
+        self.status_doc: dict | None = None
+        self.status_path: str | None = None
 
     def _bump_rv(self) -> str:
         self._resource_version += 1

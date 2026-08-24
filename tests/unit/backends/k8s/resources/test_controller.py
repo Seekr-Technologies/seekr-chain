@@ -7,7 +7,9 @@ pulling in boto3/kubernetes at import time).
 """
 
 import json
+import os
 import sys
+import tempfile
 from functools import partial
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -60,6 +62,14 @@ def _record_status_call(cluster: FakeK8sCluster, workflow_id, dag, phases, timin
     cluster.record_status(_workflow_status_from_phases(phases))
 
 
+def _record_ship_call(cluster: FakeK8sCluster, argv: list[str], **kwargs) -> MagicMock:
+    """side_effect for status.subprocess.run in capture_status mode: records
+    the s5cmd argv the real _ship_once() would have invoked onto
+    cluster.ship_calls instead of actually invoking it."""
+    cluster.ship_calls.append(argv)
+    return MagicMock(returncode=0)
+
+
 def run_controller_main(
     cluster: FakeK8sCluster,
     dag: list[dict],
@@ -67,12 +77,22 @@ def run_controller_main(
     job_name: str = "wf-abc",
     namespace: str = "ns",
     assets_path: str = "/assets",
+    capture_status: bool = False,
 ) -> int:
     """Patch kubernetes.config/client/watch to `cluster`, patch open()/json.load
     for dag.json and write_status/flush_status to record onto cluster.trace,
-    set env vars, call controller.watch.main(), return its result."""
+    set env vars, call controller.watch.main(), return its result.
+
+    capture_status=True instead exercises the real status.py doc-build +
+    file-write + s5cmd-ship path end to end (see
+    _run_controller_main_capturing_status) and leaves the parsed status.json
+    on cluster.status_doc; the default False path is unchanged.
+    """
     if job_name not in cluster.jobsets:
         cluster.set_controller_jobset(job_name, "uid-123")
+
+    if capture_status:
+        return _run_controller_main_capturing_status(cluster, dag, job_name=job_name, namespace=namespace)
 
     env = {
         "SEEKR_CHAIN_JOB_ASSET_PATH": assets_path,
@@ -103,6 +123,58 @@ def run_controller_main(
         patch.object(watch.json, "load", return_value=dag),
     ):
         result = watch.main()
+
+    return result
+
+
+def _run_controller_main_capturing_status(
+    cluster: FakeK8sCluster,
+    dag: list[dict],
+    *,
+    job_name: str,
+    namespace: str,
+) -> int:
+    """capture_status=True path for run_controller_main: unlike the default
+    path, write_status/flush_status and dag.json's open()/json.load are left
+    real, so the actual status.py doc-build + file-write + s5cmd-ship runs
+    through main() instead of being mocked onto cluster.trace. The
+    background shipper is stubbed to a no-op — otherwise the async
+    write_status() calls would spin up a real daemon thread — so only the
+    synchronous terminal flush_status() ship is observed, which is
+    deterministic. s5cmd itself is replaced by a recorder onto
+    cluster.ship_calls.
+    """
+    cluster.ship_calls = []
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        with open(os.path.join(tmpdir, "dag.json"), "w") as f:
+            json.dump(dag, f)
+        status_path = os.path.join(tmpdir, "status.json")
+
+        env = {
+            "SEEKR_CHAIN_JOB_ASSET_PATH": tmpdir,
+            "SEEKR_CHAIN_NAMESPACE": namespace,
+            "SEEKR_CHAIN_CONTROLLER_JOB_NAME": job_name,
+            "SEEKR_CHAIN_REMOTE_STATUS_PATH": "s3://bucket/wf-abc/status.json",
+        }
+
+        with (
+            patch.dict("os.environ", env),
+            patch.object(watch.kubernetes.config, "load_incluster_config"),
+            patch.object(watch.kubernetes.client, "CustomObjectsApi", cluster.custom_objects_api),
+            patch.object(watch.kubernetes.client, "CoreV1Api", cluster.core_v1_api),
+            patch.object(watch.kubernetes.watch, "Watch", cluster.watch),
+            patch.object(scheduling, "load_manifest", side_effect=_load_manifest_mock),
+            patch.object(watch.time, "sleep"),
+            patch.object(status, "_STATUS_PATH", status_path),
+            patch.object(status, "_ensure_shipper"),
+            patch.object(status.subprocess, "run", side_effect=partial(_record_ship_call, cluster)),
+        ):
+            result = watch.main()
+
+        with open(status_path) as f:
+            cluster.status_doc = json.load(f)
+        cluster.status_path = status_path
 
     return result
 
@@ -1235,3 +1307,103 @@ class TestTransientSubmitRetry:
             ("status", "SUCCEEDED"),
             ("event", "WorkflowSucceeded", "All steps completed successfully"),
         ]
+
+
+# ---------------------------------------------------------------------------
+# End-to-end status.json (real status.py doc-build + file-write + s5cmd-ship,
+# via run_controller_main(..., capture_status=True))
+# ---------------------------------------------------------------------------
+
+
+def _pop_dynamic_status_fields(doc: dict) -> dict:
+    """Pop status.json's real-timestamp fields (top-level captured_at, each
+    step's dt_start/dt_end) off `doc` in place, so the remainder can be
+    asserted with a single equality on a literal. Returns the popped values
+    for the caller to assert shape on separately."""
+    captured_at = doc.pop("captured_at")
+    dt_by_step = {step["name"]: (step.pop("dt_start"), step.pop("dt_end")) for step in doc["steps"]}
+    return {"captured_at": captured_at, "dt_by_step": dt_by_step}
+
+
+class TestMainStatusJson:
+    def test_success(self, cluster):
+        """Linear a -> b, both succeed: the real status.json ends up
+        SUCCEEDED with both steps SUCCEEDED and timestamped, and the
+        terminal flush_status() ships it."""
+        dag = [
+            {"name": "a", "depends_on": []},
+            {"name": "b", "depends_on": ["a"]},
+        ]
+        cluster.script_step("a", exit_code=0)
+        cluster.script_step("b", exit_code=0)
+
+        assert run_controller_main(cluster, dag, capture_status=True) == 0
+
+        dynamic = _pop_dynamic_status_fields(cluster.status_doc)
+        assert dynamic["captured_at"] is not None
+        for name in ("a", "b"):
+            dt_start, dt_end = dynamic["dt_by_step"][name]
+            assert dt_start is not None
+            assert dt_end is not None
+        assert cluster.status_doc == {
+            "schema_version": 1,
+            "id": "wf-abc",
+            "status": "SUCCEEDED",
+            "steps": [
+                {"name": "a", "phase": "SUCCEEDED"},
+                {"name": "b", "phase": "SUCCEEDED"},
+            ],
+        }
+        assert ["s5cmd", "cp", cluster.status_path, "s3://bucket/wf-abc/status.json"] in cluster.ship_calls
+
+    def test_failure_and_skip(self, cluster):
+        """Diamond a -> b, a -> c, b+c -> d; b fails. d is SKIPPED (never
+        ran) and must have no dt_start/dt_end, unlike a/b/c which all ran."""
+        dag = [
+            {"name": "a", "depends_on": []},
+            {"name": "b", "depends_on": ["a"]},
+            {"name": "c", "depends_on": ["a"]},
+            {"name": "d", "depends_on": ["b", "c"]},
+        ]
+        cluster.script_step("a", exit_code=0)
+        cluster.script_step("b", exit_code=1)
+        cluster.script_step("c", exit_code=0)
+
+        assert run_controller_main(cluster, dag, capture_status=True) == 0
+
+        dynamic = _pop_dynamic_status_fields(cluster.status_doc)
+        for name in ("a", "b", "c"):
+            dt_start, dt_end = dynamic["dt_by_step"][name]
+            assert dt_start is not None
+            assert dt_end is not None
+        assert dynamic["dt_by_step"]["d"] == (None, None)
+        assert cluster.status_doc == {
+            "schema_version": 1,
+            "id": "wf-abc",
+            "status": "FAILED",
+            "steps": [
+                {"name": "a", "phase": "SUCCEEDED"},
+                {"name": "b", "phase": "FAILED"},
+                {"name": "c", "phase": "SUCCEEDED"},
+                {"name": "d", "phase": "SKIPPED"},
+            ],
+        }
+        assert ["s5cmd", "cp", cluster.status_path, "s3://bucket/wf-abc/status.json"] in cluster.ship_calls
+
+    def test_cancellation(self, cluster):
+        """A single cancelled step ends the workflow TERMINATED with the
+        step's phase CANCELLED, and still ships the terminal status."""
+        dag = [{"name": "a", "depends_on": []}]
+        cluster.script_step("a", cancel=True)
+
+        assert run_controller_main(cluster, dag, capture_status=True) == 0
+
+        dynamic = _pop_dynamic_status_fields(cluster.status_doc)
+        assert dynamic["captured_at"] is not None
+        assert cluster.status_doc == {
+            "schema_version": 1,
+            "id": "wf-abc",
+            "status": "TERMINATED",
+            "steps": [{"name": "a", "phase": "CANCELLED"}],
+        }
+        assert ["s5cmd", "cp", cluster.status_path, "s3://bucket/wf-abc/status.json"] in cluster.ship_calls
