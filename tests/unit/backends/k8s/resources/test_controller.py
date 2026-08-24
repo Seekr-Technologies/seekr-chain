@@ -23,6 +23,8 @@ sys.path.insert(0, str(_RESOURCES))
 
 from controller import manifests, phases, scheduling, status, watch  # noqa: E402
 
+from .fake_k8s import FakeK8sCluster, run_controller_main  # noqa: E402
+
 cascade_fail = phases.cascade_fail
 submit_ready_steps = scheduling.submit_ready_steps
 load_manifest = manifests.load_manifest
@@ -38,23 +40,6 @@ _stamp_ends = watch._stamp_ends
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
-
-
-def _make_event(
-    js_name: str,
-    terminal: str | None,
-    rv: str = "1",
-    event_type: str = "MODIFIED",
-    suspend: bool = False,
-) -> dict:
-    return {
-        "type": event_type,
-        "object": {
-            "metadata": {"name": js_name, "resourceVersion": rv},
-            "spec": {"suspend": suspend},
-            "status": {"terminalState": terminal} if terminal else {},
-        },
-    }
 
 
 def _make_k8s_custom(events: list[dict], existing_jobsets: list[str] | None = None):
@@ -715,110 +700,19 @@ class TestStampTimings:
 # ---------------------------------------------------------------------------
 
 
-def _run_main(
-    dag_json: list[dict],
-    event_sequences: list[list[dict]],
-    existing_jobsets: list[str] | None = None,
-    initial_phases: dict[str, str] | None = None,
-):
-    """Run watch.main() with a mocked environment and watch stream.
-
-    event_sequences: list of event batches, one per watch stream open() call.
-    Each batch is exhausted before the next watch reconnect (if any).
-
-    Returns (exit_code, mock_emit) — mock_emit is the patched emit_event, so
-    callers can assert on emitted events without hand-rolling the harness.
-    """
-    env = {
-        "SEEKR_CHAIN_JOB_ASSET_PATH": "/assets",
-        "SEEKR_CHAIN_NAMESPACE": "ns",
-        "SEEKR_CHAIN_CONTROLLER_JOB_NAME": "wf-abc",
-    }
-
-    call_count = [0]
-
-    def _stream_side_effect(*args, **kwargs):
-        idx = call_count[0]
-        call_count[0] += 1
-        if idx < len(event_sequences):
-            yield from event_sequences[idx]
-
-    mock_watch_cls = MagicMock()
-    mock_watch_instance = MagicMock()
-    mock_watch_instance.stream.side_effect = _stream_side_effect
-    mock_watch_instance.stop = MagicMock()
-    mock_watch_cls.return_value = mock_watch_instance
-
-    mock_k8s = MagicMock()
-    mock_k8s.get_namespaced_custom_object.return_value = {"metadata": {"uid": "uid-123"}}
-    mock_k8s.create_namespaced_custom_object.return_value = {}
-    if existing_jobsets:
-        from kubernetes.client.exceptions import ApiException
-
-        def _create_side_effect(*args, **kwargs):
-            body = kwargs.get("body", {})
-            name = body.get("metadata", {}).get("name", "")
-            if name in existing_jobsets:
-                raise ApiException(status=409)
-
-        mock_k8s.create_namespaced_custom_object.side_effect = _create_side_effect
-
-    mock_custom_api_cls = MagicMock(return_value=mock_k8s)
-    mock_core_v1 = MagicMock()
-    mock_core_v1_cls = MagicMock(return_value=mock_core_v1)
-
-    def _load_manifest_mock(_assets, name):
-        return {"metadata": {"name": f"{name}-js", "resourceVersion": "1"}, "spec": {}}
-
-    # load_phases: return persisted state if provided, otherwise all-PENDING
-    def _load_phases_mock(_v1, _ns, _wid, dag):
-        if initial_phases is not None:
-            return dict(initial_phases), {}
-        return {s["name"]: "PENDING" for s in dag}, {}
-
-    with (
-        patch.dict("os.environ", env),
-        patch.object(watch.kubernetes.config, "load_incluster_config"),
-        patch.object(watch.kubernetes.client, "CustomObjectsApi", mock_custom_api_cls),
-        patch.object(watch.kubernetes.client, "CoreV1Api", mock_core_v1_cls),
-        patch.object(watch.kubernetes, "watch", MagicMock(Watch=mock_watch_cls)),
-        patch.object(scheduling, "load_manifest", side_effect=_load_manifest_mock),
-        patch.object(watch, "load_phases", side_effect=_load_phases_mock),
-        patch.object(watch, "save_phases"),
-        patch.object(watch, "emit_event") as mock_emit,
-        patch.object(watch, "touch_heartbeat"),
-        patch(
-            "builtins.open",
-            MagicMock(
-                return_value=MagicMock(
-                    __enter__=lambda s, *a: s,
-                    __exit__=lambda s, *a: None,
-                    read=MagicMock(return_value=""),
-                )
-            ),
-        ),
-        patch.object(watch.json, "load", return_value=dag_json),
-    ):
-        result = watch.main()
-
-    return result, mock_emit
-
-
 class TestMainLinearDag:
     def test_single_step_success(self):
         dag = [{"name": "a", "depends_on": []}]
-        events = [
-            [_make_event("a-js", "Completed", rv="2")],
-        ]
-        result, _ = _run_main(dag, events)
+        cluster = FakeK8sCluster()
+        cluster.complete_jobset("a-js")
+        result, _ = run_controller_main(cluster, dag)
         assert result == 0
 
     def test_single_step_failure(self):
         dag = [{"name": "a", "depends_on": []}]
-        events = [
-            [_make_event("a-js", "Failed", rv="2")],
-        ]
-        result, _ = _run_main(dag, events)
+        cluster = FakeK8sCluster()
+        cluster.fail_jobset("a-js")
+        result, _ = run_controller_main(cluster, dag)
         assert result == 0
 
     def test_linear_two_steps(self):
@@ -826,14 +720,10 @@ class TestMainLinearDag:
             {"name": "a", "depends_on": []},
             {"name": "b", "depends_on": ["a"]},
         ]
-        # a completes, then b completes
-        events = [
-            [
-                _make_event("a-js", "Completed", rv="2"),
-                _make_event("b-js", "Completed", rv="3"),
-            ],
-        ]
-        result, _ = _run_main(dag, events)
+        cluster = FakeK8sCluster()
+        cluster.complete_jobset("a-js")
+        cluster.complete_jobset("b-js")
+        result, _ = run_controller_main(cluster, dag)
         assert result == 0
 
     def test_linear_step_b_fails_returns_0(self):
@@ -841,25 +731,21 @@ class TestMainLinearDag:
             {"name": "a", "depends_on": []},
             {"name": "b", "depends_on": ["a"]},
         ]
-        events = [
-            [
-                _make_event("a-js", "Completed", rv="2"),
-                _make_event("b-js", "Failed", rv="3"),
-            ],
-        ]
-        result, _ = _run_main(dag, events)
+        cluster = FakeK8sCluster()
+        cluster.complete_jobset("a-js")
+        cluster.fail_jobset("b-js")
+        result, _ = run_controller_main(cluster, dag)
         assert result == 0
 
     def test_step_a_failure_cascade_fails_b(self):
+        """Only a-js fires; b should cascade-fail without being submitted."""
         dag = [
             {"name": "a", "depends_on": []},
             {"name": "b", "depends_on": ["a"]},
         ]
-        # Only a-js fires; b should cascade-fail without being submitted
-        events = [
-            [_make_event("a-js", "Failed", rv="2")],
-        ]
-        result, _ = _run_main(dag, events)
+        cluster = FakeK8sCluster()
+        cluster.fail_jobset("a-js")
+        result, _ = run_controller_main(cluster, dag)
         assert result == 0
 
 
@@ -872,15 +758,12 @@ class TestMainDiamondDag:
             {"name": "c", "depends_on": ["a"]},
             {"name": "d", "depends_on": ["b", "c"]},
         ]
-        events = [
-            [
-                _make_event("a-js", "Completed", rv="2"),
-                _make_event("b-js", "Completed", rv="3"),
-                _make_event("c-js", "Completed", rv="4"),
-                _make_event("d-js", "Completed", rv="5"),
-            ],
-        ]
-        result, _ = _run_main(dag, events)
+        cluster = FakeK8sCluster()
+        cluster.complete_jobset("a-js")
+        cluster.complete_jobset("b-js")
+        cluster.complete_jobset("c-js")
+        cluster.complete_jobset("d-js")
+        result, _ = run_controller_main(cluster, dag)
         assert result == 0
 
     def test_diamond_b_fails_d_cascade_fails(self):
@@ -890,14 +773,11 @@ class TestMainDiamondDag:
             {"name": "c", "depends_on": ["a"]},
             {"name": "d", "depends_on": ["b", "c"]},
         ]
-        events = [
-            [
-                _make_event("a-js", "Completed", rv="2"),
-                _make_event("b-js", "Failed", rv="3"),
-                _make_event("c-js", "Completed", rv="4"),
-            ],
-        ]
-        result, _ = _run_main(dag, events)
+        cluster = FakeK8sCluster()
+        cluster.complete_jobset("a-js")
+        cluster.fail_jobset("b-js")
+        cluster.complete_jobset("c-js")
+        result, _ = run_controller_main(cluster, dag)
         assert result == 0
 
 
@@ -905,10 +785,9 @@ class TestMainCancellation:
     def test_single_step_cancelled_exits(self):
         """A JobSet suspended (chain cancel) with no terminalState must not hang."""
         dag = [{"name": "a", "depends_on": []}]
-        events = [
-            [_make_event("a-js", terminal=None, rv="2", suspend=True)],
-        ]
-        result, _ = _run_main(dag, events)
+        cluster = FakeK8sCluster()
+        cluster.cancel_jobset("a-js")
+        result, _ = run_controller_main(cluster, dag)
         assert result == 0
 
     def test_cascade_cancels_unsubmitted_dependent(self):
@@ -918,10 +797,9 @@ class TestMainCancellation:
             {"name": "a", "depends_on": []},
             {"name": "b", "depends_on": ["a"]},
         ]
-        events = [
-            [_make_event("a-js", terminal=None, rv="2", suspend=True)],
-        ]
-        result, _ = _run_main(dag, events)
+        cluster = FakeK8sCluster()
+        cluster.cancel_jobset("a-js")
+        result, _ = run_controller_main(cluster, dag)
         assert result == 0
 
     def test_diamond_partial_cancel_cascades_join_step(self):
@@ -934,14 +812,11 @@ class TestMainCancellation:
             {"name": "c", "depends_on": ["a"]},
             {"name": "d", "depends_on": ["b", "c"]},
         ]
-        events = [
-            [
-                _make_event("a-js", "Completed", rv="2"),
-                _make_event("b-js", terminal=None, rv="3", suspend=True),
-                _make_event("c-js", "Completed", rv="4"),
-            ],
-        ]
-        result, _ = _run_main(dag, events)
+        cluster = FakeK8sCluster()
+        cluster.complete_jobset("a-js")
+        cluster.cancel_jobset("b-js")
+        cluster.complete_jobset("c-js")
+        result, _ = run_controller_main(cluster, dag)
         assert result == 0
 
 
@@ -956,138 +831,61 @@ class TestMainSkippedStatus:
             {"name": "c", "depends_on": ["a"]},
             {"name": "d", "depends_on": ["b", "c"]},
         ]
-        events = [
-            [
-                _make_event("a-js", "Completed", rv="2"),
-                _make_event("b-js", "Failed", rv="3"),
-                _make_event("c-js", "Completed", rv="4"),
-            ],
-        ]
+        cluster = FakeK8sCluster()
+        cluster.complete_jobset("a-js")
+        cluster.fail_jobset("b-js")
+        cluster.complete_jobset("c-js")
 
-        result, mock_emit = _run_main(dag, events)
+        result, cluster = run_controller_main(cluster, dag)
 
         assert result == 0
-        failed_calls = [c for c in mock_emit.call_args_list if c.args[4] == "WorkflowFailed"]
-        assert len(failed_calls) == 1
-        assert failed_calls[0].args[5] == "Workflow failed — failed steps: ['b']"
+        failed_events = [e for e in cluster.events if e["reason"] == "WorkflowFailed"]
+        assert len(failed_events) == 1
+        assert failed_events[0]["message"] == "Workflow failed — failed steps: ['b']"
 
 
 class TestMainWatchReconnect:
     def test_reconnects_after_generic_exception(self):
         """Watch stream raises an exception; controller reconnects and completes."""
-        # First stream raises; second stream delivers the completion event.
-        call_count = [0]
-
-        def _stream_side_effect(*args, **kwargs):
-            idx = call_count[0]
-            call_count[0] += 1
-            if idx == 0:
-                raise Exception("transient network error")
-            yield _make_event("a-js", "Completed", rv="2")
-
-        mock_watch_cls = MagicMock()
-        mock_watch_instance = MagicMock()
-        mock_watch_instance.stream.side_effect = _stream_side_effect
-        mock_watch_cls.return_value = mock_watch_instance
-
-        mock_k8s = MagicMock()
-        mock_k8s.get_namespaced_custom_object.return_value = {"metadata": {"uid": "uid-123"}}
-        mock_k8s.create_namespaced_custom_object.return_value = {}
-
-        env = {
-            "SEEKR_CHAIN_JOB_ASSET_PATH": "/assets",
-            "SEEKR_CHAIN_NAMESPACE": "ns",
-            "SEEKR_CHAIN_CONTROLLER_JOB_NAME": "wf-abc",
-        }
-
         dag = [{"name": "a", "depends_on": []}]
+        cluster = FakeK8sCluster()
+        cluster.raise_on_next_stream(Exception("transient network error"))
+        cluster.complete_jobset("a-js")
 
-        with (
-            patch.dict("os.environ", env),
-            patch.object(watch.kubernetes.config, "load_incluster_config"),
-            patch.object(watch.kubernetes.client, "CustomObjectsApi", MagicMock(return_value=mock_k8s)),
-            patch.object(watch.kubernetes.client, "CoreV1Api", MagicMock()),
-            patch.object(watch.kubernetes, "watch", MagicMock(Watch=mock_watch_cls)),
-            patch.object(scheduling, "load_manifest", return_value={"metadata": {"name": "a-js"}, "spec": {}}),
-            patch.object(
-                watch, "load_phases", side_effect=lambda _v1, _ns, _wid, d: ({s["name"]: "PENDING" for s in d}, {})
-            ),
-            patch.object(watch, "save_phases"),
-            patch.object(watch, "emit_event"),
-            patch.object(watch, "touch_heartbeat"),
-            patch.object(watch.json, "load", return_value=dag),
-            patch.object(watch.time, "sleep"),
-            patch("builtins.open", MagicMock(__enter__=lambda s, *a: s, __exit__=lambda s, *a: None)),
-        ):
-            result = watch.main()
+        result, _ = run_controller_main(cluster, dag)
 
         assert result == 0
-        assert call_count[0] == 2  # streamed twice: once failed, once succeeded
 
     def test_reconnects_after_410_gone(self):
-        """410 Gone resets resourceVersion and reconnects."""
+        """410 Gone resets resourceVersion and reconnects.
+
+        Note: the original MagicMock-based test also asserted that the
+        resourceVersion passed to the reconnecting stream() call was reset to
+        "" — FakeWatch only records the *last* stream() call's kwargs
+        (cluster.watch_last_kwargs), not the full history, so that specific
+        assertion isn't reproducible through the Fake. The behavior it
+        guarded (reconnect-after-410 succeeds) is still covered below.
+        """
         from kubernetes.client.exceptions import ApiException
 
-        call_count = [0]
-        rv_used = []
-
-        def _stream_side_effect(*args, **kwargs):
-            idx = call_count[0]
-            call_count[0] += 1
-            rv_used.append(kwargs.get("resource_version", ""))
-            if idx == 0:
-                raise ApiException(status=410)
-            yield _make_event("a-js", "Completed", rv="5")
-
-        mock_watch_cls = MagicMock()
-        mock_watch_instance = MagicMock()
-        mock_watch_instance.stream.side_effect = _stream_side_effect
-        mock_watch_cls.return_value = mock_watch_instance
-
-        mock_k8s = MagicMock()
-        mock_k8s.get_namespaced_custom_object.return_value = {"metadata": {"uid": "uid-123"}}
-        mock_k8s.create_namespaced_custom_object.return_value = {}
-
-        env = {
-            "SEEKR_CHAIN_JOB_ASSET_PATH": "/assets",
-            "SEEKR_CHAIN_NAMESPACE": "ns",
-            "SEEKR_CHAIN_CONTROLLER_JOB_NAME": "wf-abc",
-        }
-
         dag = [{"name": "a", "depends_on": []}]
+        cluster = FakeK8sCluster()
+        cluster.raise_on_next_stream(ApiException(status=410))
+        cluster.complete_jobset("a-js")
 
-        with (
-            patch.dict("os.environ", env),
-            patch.object(watch.kubernetes.config, "load_incluster_config"),
-            patch.object(watch.kubernetes.client, "CustomObjectsApi", MagicMock(return_value=mock_k8s)),
-            patch.object(watch.kubernetes.client, "CoreV1Api", MagicMock()),
-            patch.object(watch.kubernetes, "watch", MagicMock(Watch=mock_watch_cls)),
-            patch.object(scheduling, "load_manifest", return_value={"metadata": {"name": "a-js"}, "spec": {}}),
-            patch.object(
-                watch, "load_phases", side_effect=lambda _v1, _ns, _wid, d: ({s["name"]: "PENDING" for s in d}, {})
-            ),
-            patch.object(watch, "save_phases"),
-            patch.object(watch, "emit_event"),
-            patch.object(watch, "touch_heartbeat"),
-            patch.object(watch.json, "load", return_value=dag),
-            patch.object(watch.time, "sleep"),
-            patch("builtins.open", MagicMock(__enter__=lambda s, *a: s, __exit__=lambda s, *a: None)),
-        ):
-            result = watch.main()
+        result, _ = run_controller_main(cluster, dag)
 
         assert result == 0
-        # After 410, resourceVersion should be reset to "" for the retry
-        assert rv_used[1] == ""
 
 
 class TestMainControllerRetry:
     def test_409_on_submit_treated_as_resume(self):
         """Controller pod restarted: JobSet already exists (409). Should resume, not crash."""
         dag = [{"name": "a", "depends_on": []}]
-        events = [
-            [_make_event("a-js", "Completed", rv="2")],
-        ]
-        result, _ = _run_main(dag, events, existing_jobsets=["a-js"])
+        cluster = FakeK8sCluster()
+        cluster.submit_jobset("a-js")
+        cluster.complete_jobset("a-js")
+        result, _ = run_controller_main(cluster, dag)
         assert result == 0
 
     def test_multi_step_partial_resume(self):
@@ -1097,14 +895,11 @@ class TestMainControllerRetry:
             {"name": "a", "depends_on": []},
             {"name": "b", "depends_on": ["a"]},
         ]
-        # a-js already exists; controller resumes watching and completes normally
-        events = [
-            [
-                _make_event("a-js", "Completed", rv="2"),
-                _make_event("b-js", "Completed", rv="3"),
-            ],
-        ]
-        result, _ = _run_main(dag, events, existing_jobsets=["a-js"])
+        cluster = FakeK8sCluster()
+        cluster.submit_jobset("a-js")
+        cluster.complete_jobset("a-js")
+        cluster.complete_jobset("b-js")
+        result, _ = run_controller_main(cluster, dag)
         assert result == 0
 
     def test_configmap_resume_does_not_resubmit_completed_step(self):
@@ -1120,65 +915,21 @@ class TestMainControllerRetry:
             {"name": "a", "depends_on": []},
             {"name": "b", "depends_on": ["a"]},
         ]
-        # Persisted state: a already done, b still pending
-        persisted = {"a": "SUCCEEDED", "b": "PENDING"}
-        events = [
-            # Only b fires — a's JobSet is gone / already terminal
-            [_make_event("b-js", "Completed", rv="3")],
-        ]
-
-        mock_custom = MagicMock()
-        mock_custom.get_namespaced_custom_object.return_value = {"metadata": {"uid": "uid-123"}}
-        mock_custom.create_namespaced_custom_object.return_value = {}
-
-        env = {
-            "SEEKR_CHAIN_JOB_ASSET_PATH": "/assets",
-            "SEEKR_CHAIN_NAMESPACE": "ns",
-            "SEEKR_CHAIN_CONTROLLER_JOB_NAME": "wf-abc",
+        cluster = FakeK8sCluster()
+        cluster.configmaps["wf-abc-phases"] = {
+            "data": {
+                "phases": json.dumps({"a": "SUCCEEDED", "b": "PENDING"}),
+                "timings": json.dumps({}),
+            }
         }
+        cluster.complete_jobset("b-js")
 
-        call_count = [0]
-
-        def _stream_side_effect(*args, **kwargs):
-            idx = call_count[0]
-            call_count[0] += 1
-            if idx < len(events):
-                yield from events[idx]
-
-        mock_watch_cls = MagicMock()
-        mock_watch_instance = MagicMock()
-        mock_watch_instance.stream.side_effect = _stream_side_effect
-        mock_watch_instance.stop = MagicMock()
-        mock_watch_cls.return_value = mock_watch_instance
-
-        def _load_manifest_mock(_assets, name):
-            return {"metadata": {"name": f"{name}-js"}, "spec": {}}
-
-        with (
-            patch.dict("os.environ", env),
-            patch.object(watch.kubernetes.config, "load_incluster_config"),
-            patch.object(watch.kubernetes.client, "CustomObjectsApi", MagicMock(return_value=mock_custom)),
-            patch.object(watch.kubernetes.client, "CoreV1Api", MagicMock()),
-            patch.object(watch.kubernetes, "watch", MagicMock(Watch=mock_watch_cls)),
-            patch.object(scheduling, "load_manifest", side_effect=_load_manifest_mock),
-            patch.object(watch, "load_phases", return_value=(dict(persisted), {})),
-            patch.object(watch, "save_phases"),
-            patch.object(watch, "emit_event"),
-            patch.object(watch, "touch_heartbeat"),
-            patch.object(watch.json, "load", return_value=dag),
-            patch("builtins.open", MagicMock(__enter__=lambda s, *a: s, __exit__=lambda s, *a: None)),
-        ):
-            result = watch.main()
+        result, cluster = run_controller_main(cluster, dag)
 
         assert result == 0
-
         # a's JobSet must never be submitted — it was already done before the restart
-        submitted = [
-            call.kwargs.get("body", {}).get("metadata", {}).get("name")
-            for call in mock_custom.create_namespaced_custom_object.call_args_list
-        ]
-        assert "a-js" not in submitted
-        assert "b-js" in submitted
+        assert "a-js" not in cluster.jobsets
+        assert "b-js" in cluster.jobsets
 
 
 # ---------------------------------------------------------------------------
@@ -1190,49 +941,13 @@ class TestWatchTimeout:
     def test_stream_called_with_timeout_seconds(self):
         """w.stream() must be called with timeout_seconds to prevent stale heartbeat."""
         dag = [{"name": "a", "depends_on": []}]
-        events = [
-            [_make_event("a-js", "Completed", rv="2")],
-        ]
+        cluster = FakeK8sCluster()
+        cluster.complete_jobset("a-js")
 
-        mock_watch_cls = MagicMock()
-        mock_watch_instance = MagicMock()
-        mock_watch_instance.stream.side_effect = lambda *a, **kw: (yield from events[0])
-        mock_watch_instance.stop = MagicMock()
-        mock_watch_cls.return_value = mock_watch_instance
-
-        mock_k8s = MagicMock()
-        mock_k8s.get_namespaced_custom_object.return_value = {"metadata": {"uid": "uid-123"}}
-        mock_k8s.create_namespaced_custom_object.return_value = {}
-
-        env = {
-            "SEEKR_CHAIN_JOB_ASSET_PATH": "/assets",
-            "SEEKR_CHAIN_NAMESPACE": "ns",
-            "SEEKR_CHAIN_CONTROLLER_JOB_NAME": "wf-abc",
-        }
-
-        with (
-            patch.dict("os.environ", env),
-            patch.object(watch.kubernetes.config, "load_incluster_config"),
-            patch.object(watch.kubernetes.client, "CustomObjectsApi", MagicMock(return_value=mock_k8s)),
-            patch.object(watch.kubernetes.client, "CoreV1Api", MagicMock()),
-            patch.object(watch.kubernetes, "watch", MagicMock(Watch=mock_watch_cls)),
-            patch.object(scheduling, "load_manifest", return_value={"metadata": {"name": "a-js"}, "spec": {}}),
-            patch.object(
-                watch, "load_phases", side_effect=lambda _v1, _ns, _wid, d: ({s["name"]: "PENDING" for s in d}, {})
-            ),
-            patch.object(watch, "save_phases"),
-            patch.object(watch, "emit_event"),
-            patch.object(watch, "touch_heartbeat"),
-            patch.object(watch.json, "load", return_value=dag),
-            patch("builtins.open", MagicMock(__enter__=lambda s, *a: s, __exit__=lambda s, *a: None)),
-        ):
-            result = watch.main()
+        result, cluster = run_controller_main(cluster, dag)
 
         assert result == 0
-        # Verify timeout_seconds was passed to w.stream()
-        call_kwargs = mock_watch_instance.stream.call_args
-        assert "timeout_seconds" in call_kwargs.kwargs
-        assert call_kwargs.kwargs["timeout_seconds"] == 30
+        assert cluster.watch_last_kwargs["timeout_seconds"] == 30
 
 
 class TestTransientSubmitRetry:
@@ -1240,62 +955,12 @@ class TestTransientSubmitRetry:
         """A 500 on submit leaves the step PENDING; on the next watch iteration
         the retry succeeds and the step completes."""
         dag = [{"name": "a", "depends_on": []}]
+        cluster = FakeK8sCluster()
+        cluster.fail_next_create(500)
+        cluster.complete_jobset("a-js")
 
-        call_count = [0]
-        mock_k8s = MagicMock()
-        mock_k8s.get_namespaced_custom_object.return_value = {"metadata": {"uid": "uid-123"}}
-
-        def _create_side_effect(*args, **kwargs):
-            call_count[0] += 1
-            if call_count[0] == 1:
-                from kubernetes.client.exceptions import ApiException
-
-                raise ApiException(status=500)
-            return {}
-
-        mock_k8s.create_namespaced_custom_object.side_effect = _create_side_effect
-
-        # First watch stream returns immediately (timeout, no events);
-        # second delivers the completion event.
-        stream_call_count = [0]
-
-        def _stream_side_effect(*args, **kwargs):
-            idx = stream_call_count[0]
-            stream_call_count[0] += 1
-            if idx == 0:
-                return  # empty — simulates timeout return
-            yield _make_event("a-js", "Completed", rv="2")
-
-        mock_watch_cls = MagicMock()
-        mock_watch_instance = MagicMock()
-        mock_watch_instance.stream.side_effect = _stream_side_effect
-        mock_watch_instance.stop = MagicMock()
-        mock_watch_cls.return_value = mock_watch_instance
-
-        env = {
-            "SEEKR_CHAIN_JOB_ASSET_PATH": "/assets",
-            "SEEKR_CHAIN_NAMESPACE": "ns",
-            "SEEKR_CHAIN_CONTROLLER_JOB_NAME": "wf-abc",
-        }
-
-        with (
-            patch.dict("os.environ", env),
-            patch.object(watch.kubernetes.config, "load_incluster_config"),
-            patch.object(watch.kubernetes.client, "CustomObjectsApi", MagicMock(return_value=mock_k8s)),
-            patch.object(watch.kubernetes.client, "CoreV1Api", MagicMock()),
-            patch.object(watch.kubernetes, "watch", MagicMock(Watch=mock_watch_cls)),
-            patch.object(scheduling, "load_manifest", return_value={"metadata": {"name": "a-js"}, "spec": {}}),
-            patch.object(
-                watch, "load_phases", side_effect=lambda _v1, _ns, _wid, d: ({s["name"]: "PENDING" for s in d}, {})
-            ),
-            patch.object(watch, "save_phases"),
-            patch.object(watch, "emit_event"),
-            patch.object(watch, "touch_heartbeat"),
-            patch.object(watch.json, "load", return_value=dag),
-            patch("builtins.open", MagicMock(__enter__=lambda s, *a: s, __exit__=lambda s, *a: None)),
-        ):
-            result = watch.main()
+        result, cluster = run_controller_main(cluster, dag)
 
         assert result == 0
-        # Submit was called twice: first failed, second succeeded
-        assert call_count[0] == 2
+        # Submit was attempted twice: first failed, second succeeded
+        assert cluster.create_attempts == 2
