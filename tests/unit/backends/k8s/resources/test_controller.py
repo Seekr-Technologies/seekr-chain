@@ -6,7 +6,6 @@ modules directly, avoiding any packaging side effects (e.g. seekr_chain/__init__
 pulling in boto3/kubernetes at import time).
 """
 
-import copy
 import json
 import sys
 from functools import partial
@@ -52,18 +51,13 @@ def _load_manifest_mock(_assets, name):
     return {"metadata": {"name": f"{name}-js", "labels": {"seekr-chain/step-name": name}}, "spec": {}}
 
 
-def _record_status_call(cluster: FakeK8sCluster, action_type: str, workflow_id, dag, phases, timings) -> None:
+def _record_status_call(cluster: FakeK8sCluster, workflow_id, dag, phases, timings) -> None:
     """side_effect for watch.write_status/watch.flush_status: status.py's
-    file write + S3 ship have no place in an in-memory fake, so record the
-    call on cluster.actions instead."""
-    cluster.actions.append(
-        {
-            "type": action_type,
-            "workflow_id": workflow_id,
-            "phases": dict(phases),
-            "timings": copy.deepcopy(timings),
-        }
-    )
+    file write + S3 ship have no place in an in-memory fake, so instead
+    record the workflow-level status onto cluster.trace (deduped against the
+    last-recorded status), derived the same way the real status document
+    derives it."""
+    cluster.record_status(_workflow_status_from_phases(phases))
 
 
 def run_controller_main(
@@ -73,10 +67,10 @@ def run_controller_main(
     job_name: str = "wf-abc",
     namespace: str = "ns",
     assets_path: str = "/assets",
-):
+) -> int:
     """Patch kubernetes.config/client/watch to `cluster`, patch open()/json.load
-    for dag.json and write_status/flush_status to record onto cluster.actions,
-    set env vars, call controller.watch.main(), return (result, cluster)."""
+    for dag.json and write_status/flush_status to record onto cluster.trace,
+    set env vars, call controller.watch.main(), return its result."""
     if job_name not in cluster.jobsets:
         cluster.set_controller_jobset(job_name, "uid-123")
 
@@ -94,8 +88,8 @@ def run_controller_main(
         patch.object(watch.kubernetes.watch, "Watch", cluster.watch),
         patch.object(scheduling, "load_manifest", side_effect=_load_manifest_mock),
         patch.object(watch.time, "sleep"),
-        patch.object(watch, "write_status", side_effect=partial(_record_status_call, cluster, "write_status")),
-        patch.object(watch, "flush_status", side_effect=partial(_record_status_call, cluster, "flush_status")),
+        patch.object(watch, "write_status", side_effect=partial(_record_status_call, cluster)),
+        patch.object(watch, "flush_status", side_effect=partial(_record_status_call, cluster)),
         patch(
             "builtins.open",
             MagicMock(
@@ -110,7 +104,7 @@ def run_controller_main(
     ):
         result = watch.main()
 
-    return result, cluster
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -748,61 +742,115 @@ class TestStampTimings:
 # ---------------------------------------------------------------------------
 
 
+@pytest.fixture
+def cluster():
+    return FakeK8sCluster()
+
+
 class TestMainLinearDag:
-    def test_single_step_success(self):
+    def test_single_step_success(self, cluster):
         dag = [{"name": "a", "depends_on": []}]
-        cluster = FakeK8sCluster()
         cluster.script_step("a", exit_code=0)
-        result, _ = run_controller_main(cluster, dag)
-        assert result == 0
+        assert run_controller_main(cluster, dag) == 0
+        assert cluster.trace == [
+            ("status", "RUNNING"),
+            ("submit", "a"),
+            ("phases", {"a": "RUNNING"}),
+            ("exit", "a", 0),
+            ("event", "StepSucceeded", "Step 'a' completed successfully"),
+            ("phases", {"a": "SUCCEEDED"}),
+            ("status", "SUCCEEDED"),
+            ("event", "WorkflowSucceeded", "All steps completed successfully"),
+        ]
 
-    def test_single_step_failure(self):
+    def test_single_step_failure(self, cluster):
         dag = [{"name": "a", "depends_on": []}]
-        cluster = FakeK8sCluster()
         cluster.script_step("a", exit_code=1)
-        result, _ = run_controller_main(cluster, dag)
-        assert result == 0
+        assert run_controller_main(cluster, dag) == 0
+        assert cluster.trace == [
+            ("status", "RUNNING"),
+            ("submit", "a"),
+            ("phases", {"a": "RUNNING"}),
+            ("exit", "a", 1),
+            ("event", "StepFailed", "Step 'a' failed"),
+            ("phases", {"a": "FAILED"}),
+            ("status", "FAILED"),
+            ("event", "WorkflowFailed", "Workflow failed — failed steps: ['a']"),
+        ]
 
-    def test_linear_two_steps(self):
+    def test_linear_two_steps(self, cluster):
         dag = [
             {"name": "a", "depends_on": []},
             {"name": "b", "depends_on": ["a"]},
         ]
-        cluster = FakeK8sCluster()
         cluster.script_step("a", exit_code=0)
         cluster.script_step("b", exit_code=0)
-        result, _ = run_controller_main(cluster, dag)
-        assert result == 0
+        assert run_controller_main(cluster, dag) == 0
         # b is only submitted once a has succeeded.
-        assert [a["step"] for a in cluster.actions if a["type"] == "create_jobset"] == ["a", "b"]
+        assert cluster.trace == [
+            ("status", "RUNNING"),
+            ("submit", "a"),
+            ("phases", {"a": "RUNNING", "b": "PENDING"}),
+            ("exit", "a", 0),
+            ("event", "StepSucceeded", "Step 'a' completed successfully"),
+            ("phases", {"a": "SUCCEEDED", "b": "PENDING"}),
+            ("submit", "b"),
+            ("phases", {"a": "SUCCEEDED", "b": "RUNNING"}),
+            ("exit", "b", 0),
+            ("event", "StepSucceeded", "Step 'b' completed successfully"),
+            ("phases", {"a": "SUCCEEDED", "b": "SUCCEEDED"}),
+            ("status", "SUCCEEDED"),
+            ("event", "WorkflowSucceeded", "All steps completed successfully"),
+        ]
 
-    def test_linear_step_b_fails_returns_0(self):
+    def test_linear_step_b_fails_returns_0(self, cluster):
         dag = [
             {"name": "a", "depends_on": []},
             {"name": "b", "depends_on": ["a"]},
         ]
-        cluster = FakeK8sCluster()
         cluster.script_step("a", exit_code=0)
         cluster.script_step("b", exit_code=1)
-        result, _ = run_controller_main(cluster, dag)
-        assert result == 0
+        assert run_controller_main(cluster, dag) == 0
+        assert cluster.trace == [
+            ("status", "RUNNING"),
+            ("submit", "a"),
+            ("phases", {"a": "RUNNING", "b": "PENDING"}),
+            ("exit", "a", 0),
+            ("event", "StepSucceeded", "Step 'a' completed successfully"),
+            ("phases", {"a": "SUCCEEDED", "b": "PENDING"}),
+            ("submit", "b"),
+            ("phases", {"a": "SUCCEEDED", "b": "RUNNING"}),
+            ("exit", "b", 1),
+            ("event", "StepFailed", "Step 'b' failed"),
+            ("phases", {"a": "SUCCEEDED", "b": "FAILED"}),
+            ("status", "FAILED"),
+            ("event", "WorkflowFailed", "Workflow failed — failed steps: ['b']"),
+        ]
 
-    def test_step_a_failure_cascade_fails_b(self):
+    def test_step_a_failure_cascade_fails_b(self, cluster):
         """Only a-js fires; b should cascade-fail without being submitted."""
         dag = [
             {"name": "a", "depends_on": []},
             {"name": "b", "depends_on": ["a"]},
         ]
-        cluster = FakeK8sCluster()
         cluster.script_step("a", exit_code=1)
-        result, _ = run_controller_main(cluster, dag)
-        assert result == 0
+        assert run_controller_main(cluster, dag) == 0
         # b must never be submitted — a's failure cascade-skips it.
-        assert [a["step"] for a in cluster.actions if a["type"] == "create_jobset"] == ["a"]
+        assert cluster.trace == [
+            ("status", "RUNNING"),
+            ("submit", "a"),
+            ("phases", {"a": "RUNNING", "b": "PENDING"}),
+            ("exit", "a", 1),
+            ("event", "StepFailed", "Step 'a' failed"),
+            ("phases", {"a": "FAILED", "b": "SKIPPED"}),
+            ("status", "FAILED"),
+            ("event", "WorkflowFailed", "Workflow failed — failed steps: ['a']"),
+        ]
+        assert ("submit", "b") not in cluster.trace
 
 
 class TestMainDiamondDag:
-    def test_diamond_all_succeed(self):
+    def test_diamond_all_succeed(self, cluster):
         """a → b, a → c, b+c → d."""
         dag = [
             {"name": "a", "depends_on": []},
@@ -810,83 +858,154 @@ class TestMainDiamondDag:
             {"name": "c", "depends_on": ["a"]},
             {"name": "d", "depends_on": ["b", "c"]},
         ]
-        cluster = FakeK8sCluster()
         cluster.script_step("a", exit_code=0)
         cluster.script_step("b", exit_code=0)
         cluster.script_step("c", exit_code=0)
         cluster.script_step("d", exit_code=0)
-        result, _ = run_controller_main(cluster, dag)
-        assert result == 0
+        assert run_controller_main(cluster, dag) == 0
+        assert cluster.trace == [
+            ("status", "RUNNING"),
+            ("submit", "a"),
+            ("phases", {"a": "RUNNING", "b": "PENDING", "c": "PENDING", "d": "PENDING"}),
+            ("exit", "a", 0),
+            ("event", "StepSucceeded", "Step 'a' completed successfully"),
+            ("phases", {"a": "SUCCEEDED", "b": "PENDING", "c": "PENDING", "d": "PENDING"}),
+            # Both b and c are submitted from the same submit_ready_steps
+            # pass — a's single completion unblocks both branches at once —
+            # before either one's own exit is observed.
+            ("submit", "b"),
+            ("submit", "c"),
+            ("phases", {"a": "SUCCEEDED", "b": "RUNNING", "c": "RUNNING", "d": "PENDING"}),
+            ("exit", "b", 0),
+            ("event", "StepSucceeded", "Step 'b' completed successfully"),
+            ("phases", {"a": "SUCCEEDED", "b": "SUCCEEDED", "c": "RUNNING", "d": "PENDING"}),
+            ("exit", "c", 0),
+            ("event", "StepSucceeded", "Step 'c' completed successfully"),
+            ("phases", {"a": "SUCCEEDED", "b": "SUCCEEDED", "c": "SUCCEEDED", "d": "PENDING"}),
+            ("submit", "d"),
+            ("phases", {"a": "SUCCEEDED", "b": "SUCCEEDED", "c": "SUCCEEDED", "d": "RUNNING"}),
+            ("exit", "d", 0),
+            ("event", "StepSucceeded", "Step 'd' completed successfully"),
+            ("phases", {"a": "SUCCEEDED", "b": "SUCCEEDED", "c": "SUCCEEDED", "d": "SUCCEEDED"}),
+            ("status", "SUCCEEDED"),
+            ("event", "WorkflowSucceeded", "All steps completed successfully"),
+        ]
 
-    def test_diamond_b_fails_d_cascade_fails(self):
+    def test_diamond_b_fails_d_cascade_fails(self, cluster):
         dag = [
             {"name": "a", "depends_on": []},
             {"name": "b", "depends_on": ["a"]},
             {"name": "c", "depends_on": ["a"]},
             {"name": "d", "depends_on": ["b", "c"]},
         ]
-        cluster = FakeK8sCluster()
         cluster.script_step("a", exit_code=0)
         cluster.script_step("b", exit_code=1)
         cluster.script_step("c", exit_code=0)
-        result, _ = run_controller_main(cluster, dag)
-        assert result == 0
+        assert run_controller_main(cluster, dag) == 0
         # d must never be submitted — it cascade-skips once b fails.
-        assert "d" not in [a["step"] for a in cluster.actions if a["type"] == "create_jobset"]
+        assert cluster.trace == [
+            ("status", "RUNNING"),
+            ("submit", "a"),
+            ("phases", {"a": "RUNNING", "b": "PENDING", "c": "PENDING", "d": "PENDING"}),
+            ("exit", "a", 0),
+            ("event", "StepSucceeded", "Step 'a' completed successfully"),
+            ("phases", {"a": "SUCCEEDED", "b": "PENDING", "c": "PENDING", "d": "PENDING"}),
+            ("submit", "b"),
+            ("submit", "c"),
+            ("phases", {"a": "SUCCEEDED", "b": "RUNNING", "c": "RUNNING", "d": "PENDING"}),
+            ("exit", "b", 1),
+            ("event", "StepFailed", "Step 'b' failed"),
+            ("phases", {"a": "SUCCEEDED", "b": "FAILED", "c": "RUNNING", "d": "SKIPPED"}),
+            ("status", "FAILED"),
+            ("exit", "c", 0),
+            ("event", "StepSucceeded", "Step 'c' completed successfully"),
+            ("phases", {"a": "SUCCEEDED", "b": "FAILED", "c": "SUCCEEDED", "d": "SKIPPED"}),
+            ("event", "WorkflowFailed", "Workflow failed — failed steps: ['b']"),
+        ]
+        assert ("submit", "d") not in cluster.trace
 
 
 class TestMainCancellation:
-    """Cancellation is triggered externally (`chain cancel` suspends the
-    JobSet), not by anything the controller's own create call produces — not
-    expressible via script_step, so this class keeps manual mutation."""
-
-    def test_single_step_cancelled_exits(self):
+    def test_single_step_cancelled_exits(self, cluster):
         """A JobSet suspended (chain cancel) with no terminalState must not hang."""
         dag = [{"name": "a", "depends_on": []}]
-        cluster = FakeK8sCluster()
-        cluster.cancel_jobset("a-js")
-        result, _ = run_controller_main(cluster, dag)
-        assert result == 0
+        cluster.script_step("a", cancel=True)
+        assert run_controller_main(cluster, dag) == 0
+        assert cluster.trace == [
+            ("status", "RUNNING"),
+            ("submit", "a"),
+            ("phases", {"a": "RUNNING"}),
+            ("cancel", "a"),
+            ("event", "StepCancelled", "Step 'a' was cancelled"),
+            ("phases", {"a": "CANCELLED"}),
+            ("status", "TERMINATED"),
+            ("event", "WorkflowCancelled", "Workflow cancelled — cancelled steps: ['a']"),
+        ]
 
-    def test_cascade_cancels_unsubmitted_dependent(self):
+    def test_cascade_cancels_unsubmitted_dependent(self, cluster):
         """a is cancelled before b's dependency is satisfied — b must never be
-        submitted and must cascade to CANCELLED instead of hanging."""
+        submitted and must cascade-skip instead of hanging."""
         dag = [
             {"name": "a", "depends_on": []},
             {"name": "b", "depends_on": ["a"]},
         ]
-        cluster = FakeK8sCluster()
-        cluster.cancel_jobset("a-js")
-        result, _ = run_controller_main(cluster, dag)
-        assert result == 0
+        cluster.script_step("a", cancel=True)
+        assert run_controller_main(cluster, dag) == 0
+        assert cluster.trace == [
+            ("status", "RUNNING"),
+            ("submit", "a"),
+            ("phases", {"a": "RUNNING", "b": "PENDING"}),
+            ("cancel", "a"),
+            ("event", "StepCancelled", "Step 'a' was cancelled"),
+            ("phases", {"a": "CANCELLED", "b": "SKIPPED"}),
+            ("status", "TERMINATED"),
+            ("event", "WorkflowCancelled", "Workflow cancelled — cancelled steps: ['a']"),
+        ]
+        assert ("submit", "b") not in cluster.trace
 
-    def test_diamond_partial_cancel_cascades_join_step(self):
+    def test_diamond_partial_cancel_cascades_join_step(self, cluster):
         """a → b, a → c, b+c → d. b is cancelled, c succeeds — d must
-        cascade-cancel rather than waiting forever for a JobSet that is
-        never submitted."""
+        cascade-skip rather than waiting forever for a JobSet that is never
+        submitted.
+
+        Kept on manual complete_jobset/cancel_jobset rather than scripted
+        cancellation: all three of a/b/c must be pre-enqueued *before* the
+        controller starts, so they land in the watch queue together and
+        js_to_step catches each mid-drain via 409-resume. script_step only
+        enqueues its event at create time — mixed with an
+        immediately-enqueued cancel, that can reorder relative to when the
+        controller starts tracking a JobSet and drop the cancel event.
+        """
         dag = [
             {"name": "a", "depends_on": []},
             {"name": "b", "depends_on": ["a"]},
             {"name": "c", "depends_on": ["a"]},
             {"name": "d", "depends_on": ["b", "c"]},
         ]
-        # All three pre-populated (not script_step): a's and c's completion
-        # events must be enqueued *before* the controller starts, same as
-        # b's cancellation, so all three sit in the queue together and
-        # js_to_step catches up to each mid-drain as 409-resume tracks it.
-        # (script_step only enqueues at create time, which — mixed with an
-        # immediately-enqueued cancel — can reorder relative to when the
-        # controller starts tracking a JobSet and drop the cancel event.)
-        cluster = FakeK8sCluster()
         cluster.complete_jobset("a-js")
         cluster.cancel_jobset("b-js")
         cluster.complete_jobset("c-js")
-        result, _ = run_controller_main(cluster, dag)
-        assert result == 0
+        assert run_controller_main(cluster, dag) == 0
+        assert cluster.trace == [
+            ("status", "RUNNING"),
+            ("phases", {"a": "RUNNING", "b": "PENDING", "c": "PENDING", "d": "PENDING"}),
+            ("exit", "a", 0),
+            ("event", "StepSucceeded", "Step 'a' completed successfully"),
+            ("phases", {"a": "SUCCEEDED", "b": "PENDING", "c": "PENDING", "d": "PENDING"}),
+            ("phases", {"a": "SUCCEEDED", "b": "RUNNING", "c": "RUNNING", "d": "PENDING"}),
+            ("cancel", "b"),
+            ("event", "StepCancelled", "Step 'b' was cancelled"),
+            ("phases", {"a": "SUCCEEDED", "b": "CANCELLED", "c": "RUNNING", "d": "SKIPPED"}),
+            ("status", "TERMINATED"),
+            ("exit", "c", 0),
+            ("event", "StepSucceeded", "Step 'c' completed successfully"),
+            ("phases", {"a": "SUCCEEDED", "b": "CANCELLED", "c": "SUCCEEDED", "d": "SKIPPED"}),
+            ("event", "WorkflowCancelled", "Workflow cancelled — cancelled steps: ['b']"),
+        ]
 
 
 class TestMainSkippedStatus:
-    def test_workflow_failed_event_excludes_skipped_steps(self):
+    def test_workflow_failed_event_excludes_skipped_steps(self, cluster):
         """a → b, a → c, b+c → d; only b fails. The WorkflowFailed event's
         failed-steps list must contain only b — d is SKIPPED (never ran), not
         FAILED, so it must not be reported as a failed step."""
@@ -896,32 +1015,61 @@ class TestMainSkippedStatus:
             {"name": "c", "depends_on": ["a"]},
             {"name": "d", "depends_on": ["b", "c"]},
         ]
-        cluster = FakeK8sCluster()
         cluster.script_step("a", exit_code=0)
         cluster.script_step("b", exit_code=1)
         cluster.script_step("c", exit_code=0)
 
-        result, cluster = run_controller_main(cluster, dag)
+        assert run_controller_main(cluster, dag) == 0
 
-        assert result == 0
-        failed_events = [e for e in cluster.events if e["reason"] == "WorkflowFailed"]
+        assert cluster.trace == [
+            ("status", "RUNNING"),
+            ("submit", "a"),
+            ("phases", {"a": "RUNNING", "b": "PENDING", "c": "PENDING", "d": "PENDING"}),
+            ("exit", "a", 0),
+            ("event", "StepSucceeded", "Step 'a' completed successfully"),
+            ("phases", {"a": "SUCCEEDED", "b": "PENDING", "c": "PENDING", "d": "PENDING"}),
+            ("submit", "b"),
+            ("submit", "c"),
+            ("phases", {"a": "SUCCEEDED", "b": "RUNNING", "c": "RUNNING", "d": "PENDING"}),
+            ("exit", "b", 1),
+            ("event", "StepFailed", "Step 'b' failed"),
+            ("phases", {"a": "SUCCEEDED", "b": "FAILED", "c": "RUNNING", "d": "SKIPPED"}),
+            ("status", "FAILED"),
+            ("exit", "c", 0),
+            ("event", "StepSucceeded", "Step 'c' completed successfully"),
+            ("phases", {"a": "SUCCEEDED", "b": "FAILED", "c": "SUCCEEDED", "d": "SKIPPED"}),
+            ("event", "WorkflowFailed", "Workflow failed — failed steps: ['b']"),
+        ]
+        # d is SKIPPED (never ran), not FAILED — it must not appear in the
+        # WorkflowFailed event's failed-steps list, and the event must fire
+        # exactly once.
+        failed_events = [t for t in cluster.trace if t[0] == "event" and t[1] == "WorkflowFailed"]
         assert len(failed_events) == 1
-        assert failed_events[0]["message"] == "Workflow failed — failed steps: ['b']"
 
 
 class TestMainWatchReconnect:
-    def test_reconnects_after_generic_exception(self):
+    def test_reconnects_after_generic_exception(self, cluster):
         """Watch stream raises an exception; controller reconnects and completes."""
         dag = [{"name": "a", "depends_on": []}]
-        cluster = FakeK8sCluster()
         cluster.raise_on_next_stream(Exception("transient network error"))
         cluster.script_step("a", exit_code=0)
 
-        result, _ = run_controller_main(cluster, dag)
+        assert run_controller_main(cluster, dag) == 0
+        assert cluster.trace == [
+            ("status", "RUNNING"),
+            ("submit", "a"),
+            ("phases", {"a": "RUNNING"}),
+            # The stream() call that raises never yields anything, so no
+            # exit is recorded here — the loop simply reconnects and picks
+            # up a's terminal event on the next stream() call.
+            ("exit", "a", 0),
+            ("event", "StepSucceeded", "Step 'a' completed successfully"),
+            ("phases", {"a": "SUCCEEDED"}),
+            ("status", "SUCCEEDED"),
+            ("event", "WorkflowSucceeded", "All steps completed successfully"),
+        ]
 
-        assert result == 0
-
-    def test_reconnects_after_410_gone(self):
+    def test_reconnects_after_410_gone(self, cluster):
         """410 Gone resets resourceVersion and reconnects.
 
         Note: the original MagicMock-based test also asserted that the
@@ -934,17 +1082,24 @@ class TestMainWatchReconnect:
         from kubernetes.client.exceptions import ApiException
 
         dag = [{"name": "a", "depends_on": []}]
-        cluster = FakeK8sCluster()
         cluster.raise_on_next_stream(ApiException(status=410))
         cluster.script_step("a", exit_code=0)
 
-        result, _ = run_controller_main(cluster, dag)
-
-        assert result == 0
+        assert run_controller_main(cluster, dag) == 0
+        assert cluster.trace == [
+            ("status", "RUNNING"),
+            ("submit", "a"),
+            ("phases", {"a": "RUNNING"}),
+            ("exit", "a", 0),
+            ("event", "StepSucceeded", "Step 'a' completed successfully"),
+            ("phases", {"a": "SUCCEEDED"}),
+            ("status", "SUCCEEDED"),
+            ("event", "WorkflowSucceeded", "All steps completed successfully"),
+        ]
 
 
 class TestMainControllerRetry:
-    def test_409_on_submit_treated_as_resume(self):
+    def test_409_on_submit_treated_as_resume(self, cluster):
         """Controller pod restarted: JobSet already exists (409). Should resume, not crash.
 
         submit_jobset + complete_jobset (not script_step) — the JobSet must
@@ -952,27 +1107,46 @@ class TestMainControllerRetry:
         express since it only resolves outcomes at create time.
         """
         dag = [{"name": "a", "depends_on": []}]
-        cluster = FakeK8sCluster()
         cluster.submit_jobset("a-js")
         cluster.complete_jobset("a-js")
-        result, _ = run_controller_main(cluster, dag)
-        assert result == 0
+        assert run_controller_main(cluster, dag) == 0
+        assert cluster.trace == [
+            ("status", "RUNNING"),
+            ("phases", {"a": "RUNNING"}),
+            ("exit", "a", 0),
+            ("event", "StepSucceeded", "Step 'a' completed successfully"),
+            ("phases", {"a": "SUCCEEDED"}),
+            ("status", "SUCCEEDED"),
+            ("event", "WorkflowSucceeded", "All steps completed successfully"),
+        ]
 
-    def test_multi_step_partial_resume(self):
+    def test_multi_step_partial_resume(self, cluster):
         """Controller restarts after step a was already submitted but not yet complete.
         Step b has not been submitted yet."""
         dag = [
             {"name": "a", "depends_on": []},
             {"name": "b", "depends_on": ["a"]},
         ]
-        cluster = FakeK8sCluster()
         cluster.submit_jobset("a-js")
         cluster.complete_jobset("a-js")
         cluster.script_step("b", exit_code=0)
-        result, _ = run_controller_main(cluster, dag)
-        assert result == 0
+        assert run_controller_main(cluster, dag) == 0
+        assert cluster.trace == [
+            ("status", "RUNNING"),
+            ("phases", {"a": "RUNNING", "b": "PENDING"}),
+            ("exit", "a", 0),
+            ("event", "StepSucceeded", "Step 'a' completed successfully"),
+            ("phases", {"a": "SUCCEEDED", "b": "PENDING"}),
+            ("submit", "b"),
+            ("phases", {"a": "SUCCEEDED", "b": "RUNNING"}),
+            ("exit", "b", 0),
+            ("event", "StepSucceeded", "Step 'b' completed successfully"),
+            ("phases", {"a": "SUCCEEDED", "b": "SUCCEEDED"}),
+            ("status", "SUCCEEDED"),
+            ("event", "WorkflowSucceeded", "All steps completed successfully"),
+        ]
 
-    def test_configmap_resume_does_not_resubmit_completed_step(self):
+    def test_configmap_resume_does_not_resubmit_completed_step(self, cluster):
         """Controller restarts after step a already SUCCEEDED (persisted in ConfigMap).
 
         The watch stream only delivers an event for b — there is no second event
@@ -985,7 +1159,6 @@ class TestMainControllerRetry:
             {"name": "a", "depends_on": []},
             {"name": "b", "depends_on": ["a"]},
         ]
-        cluster = FakeK8sCluster()
         cluster.configmaps["wf-abc-phases"] = {
             "data": {
                 "phases": json.dumps({"a": "SUCCEEDED", "b": "PENDING"}),
@@ -994,12 +1167,21 @@ class TestMainControllerRetry:
         }
         cluster.script_step("b", exit_code=0)
 
-        result, cluster = run_controller_main(cluster, dag)
+        assert run_controller_main(cluster, dag) == 0
 
-        assert result == 0
         # a's JobSet must never be submitted — it was already done before the restart
         assert "a-js" not in cluster.jobsets
         assert "b-js" in cluster.jobsets
+        assert cluster.trace == [
+            ("status", "RUNNING"),
+            ("submit", "b"),
+            ("phases", {"a": "SUCCEEDED", "b": "RUNNING"}),
+            ("exit", "b", 0),
+            ("event", "StepSucceeded", "Step 'b' completed successfully"),
+            ("phases", {"a": "SUCCEEDED", "b": "SUCCEEDED"}),
+            ("status", "SUCCEEDED"),
+            ("event", "WorkflowSucceeded", "All steps completed successfully"),
+        ]
 
 
 # ---------------------------------------------------------------------------
@@ -1008,29 +1190,48 @@ class TestMainControllerRetry:
 
 
 class TestWatchTimeout:
-    def test_stream_called_with_timeout_seconds(self):
+    def test_stream_called_with_timeout_seconds(self, cluster):
         """w.stream() must be called with timeout_seconds to prevent stale heartbeat."""
         dag = [{"name": "a", "depends_on": []}]
-        cluster = FakeK8sCluster()
         cluster.script_step("a", exit_code=0)
 
-        result, cluster = run_controller_main(cluster, dag)
+        assert run_controller_main(cluster, dag) == 0
 
-        assert result == 0
         assert cluster.watch_last_kwargs["timeout_seconds"] == 30
+        assert cluster.trace == [
+            ("status", "RUNNING"),
+            ("submit", "a"),
+            ("phases", {"a": "RUNNING"}),
+            ("exit", "a", 0),
+            ("event", "StepSucceeded", "Step 'a' completed successfully"),
+            ("phases", {"a": "SUCCEEDED"}),
+            ("status", "SUCCEEDED"),
+            ("event", "WorkflowSucceeded", "All steps completed successfully"),
+        ]
 
 
 class TestTransientSubmitRetry:
-    def test_step_retried_after_transient_error(self):
+    def test_step_retried_after_transient_error(self, cluster):
         """A 500 on submit leaves the step PENDING; on the next watch iteration
         the retry succeeds and the step completes."""
         dag = [{"name": "a", "depends_on": []}]
-        cluster = FakeK8sCluster()
         cluster.fail_next_create(500)
         cluster.script_step("a", exit_code=0)
 
-        result, cluster = run_controller_main(cluster, dag)
+        assert run_controller_main(cluster, dag) == 0
 
-        assert result == 0
-        # Submit was attempted twice: first failed, second succeeded
+        # Submit was attempted twice: first failed, second succeeded. The
+        # failed attempt raises before recording, so only the successful
+        # submit shows up in the trace.
         assert cluster.create_attempts == 2
+        assert cluster.trace == [
+            ("status", "RUNNING"),
+            ("phases", {"a": "PENDING"}),
+            ("submit", "a"),
+            ("phases", {"a": "RUNNING"}),
+            ("exit", "a", 0),
+            ("event", "StepSucceeded", "Step 'a' completed successfully"),
+            ("phases", {"a": "SUCCEEDED"}),
+            ("status", "SUCCEEDED"),
+            ("event", "WorkflowSucceeded", "All steps completed successfully"),
+        ]

@@ -3,7 +3,7 @@ executor (controllerlib).
 
 Tests script outcomes up front — ``cluster.script_step("a", exit_code=0)`` —
 then run the controller once and assert on the resulting trace
-(``cluster.actions``), rather than interleaving manual cluster mutations
+(``cluster.trace``), rather than interleaving manual cluster mutations
 between watch-loop iterations. A JobSet's outcome is resolved the moment the
 controller creates it (via its ``seekr-chain/step-name`` label), so the fake
 never needs to be told "now let it finish" — it already knows.
@@ -13,7 +13,7 @@ Manual, out-of-band mutation (``complete_jobset``, ``fail_jobset``,
 ``fail_next_create``) is still available for scenarios script_step can't
 express: state that exists before the controller ever creates the JobSet
 (restart-resume), or events not triggered by JobSet creation at all
-(external `chain cancel`, transient watch-stream errors).
+(transient watch-stream errors).
 """
 
 import copy
@@ -40,11 +40,17 @@ _STEP_LABEL = "seekr-chain/step-name"
 # read back by list_namespaced_pod filtering below.
 _ROLE_LABEL = "seekr-chain/role"
 
+# Naming convention shared by _load_manifest_mock (test_controller.py) and
+# the manual JobSet helpers below: every JobSet is named "{step}-js". Manual
+# helpers never see the controller's step-name label (they model state that
+# exists before or outside of a controller create call), so a JobSet name is
+# mapped back to its step by stripping this suffix.
+_JOBSET_SUFFIX = "-js"
+
 
 def _decode_configmap_data(data: dict) -> dict:
     """Best-effort JSON-decode a ConfigMap data dict's values — phases/
-    timings/attempts are all persisted as JSON strings — so action-log
-    entries carry readable dicts instead of opaque strings."""
+    timings are both persisted as JSON strings."""
     decoded = {}
     for key, value in data.items():
         try:
@@ -105,9 +111,10 @@ class _FakeCustomObjectsApi:
         }
         stored["metadata"]["resourceVersion"] = cluster._bump_rv()
         cluster.jobsets[name] = stored
-        cluster.actions.append({"type": "create_jobset", "name": name, "step": step})
 
         if step is not None:
+            cluster._js_to_step[name] = step
+            cluster.trace.append(("submit", step))
             cluster._resolve_scripted_step(name, step)
 
         return stored
@@ -138,17 +145,17 @@ class _FakeCoreV1Api:
             raise ApiException(status=404)
         data = body.get("data", {})
         cluster.configmaps[name]["data"].update(data)
-        cluster.actions.append({"type": "save_phases", "name": name, **_decode_configmap_data(data)})
+        cluster._record_phases(data)
 
     def create_namespaced_config_map(self, namespace, body):
         cluster = self._cluster
         name = body["metadata"]["name"]
         data = dict(body.get("data", {}))
         cluster.configmaps[name] = {"data": data}
-        cluster.actions.append({"type": "save_phases", "name": name, **_decode_configmap_data(data)})
+        cluster._record_phases(data)
 
     def create_namespaced_event(self, namespace, body):
-        self._cluster.events.append(body)
+        self._cluster.trace.append(("event", body["reason"], body["message"]))
 
     def list_namespaced_pod(self, namespace, label_selector: str = "", **kwargs):
         cluster = self._cluster
@@ -170,7 +177,14 @@ class FakeWatch:
             self.cluster._next_stream_exception = None
             raise exc
         queue, self.cluster._watch_queue = self.cluster._watch_queue, []
-        yield from queue
+        for item in queue:
+            # Record exit/cancel at the moment the controller actually
+            # observes the event (yield time), not when the fake resolved or
+            # enqueued it — this is what preserves the real interleaving of
+            # submits vs. exits (e.g. both branches of a diamond submitted
+            # before either exits).
+            self.cluster._record_yield(item)
+            yield item
 
     def stop(self):
         pass
@@ -182,15 +196,15 @@ class FakeK8sCluster:
     the controller through its reconnect and retry paths.
 
     Setup is spec-then-record: script each step's outcome up front with
-    ``script_step``, run the controller once, then assert on ``actions`` —
-    the ordered trace of every side effect the controller performed.
+    ``script_step``, run the controller once, then assert on ``trace`` — the
+    single ordered, append-only record of every side effect the controller
+    performed, in the exact order it performed them.
     """
 
     def __init__(self):
         self.jobsets: dict[str, dict] = {}
         self.configmaps: dict[str, dict] = {}
-        self.events: list[dict] = []
-        self.actions: list[dict] = []
+        self.trace: list[tuple] = []
         self.pods: dict[str, list[dict]] = {}
         self.create_attempts = 0
         self.watch_last_kwargs: dict | None = None
@@ -200,6 +214,12 @@ class FakeK8sCluster:
         self._next_stream_exception: Exception | None = None
         self._next_create_exception: Exception | None = None
         self._scripts: dict[str, dict] = {}
+        self._js_to_step: dict[str, str] = {}
+        # Last-recorded phases/status, so idempotent re-writes (the watch
+        # loop re-saves and re-derives on every iteration, even when nothing
+        # changed) collapse to a single trace entry per real transition.
+        self._last_phases: dict | None = None
+        self._last_status: str | None = None
 
     def _bump_rv(self) -> str:
         self._resource_version += 1
@@ -208,12 +228,63 @@ class FakeK8sCluster:
     def _enqueue(self, name: str) -> None:
         self._watch_queue.append({"type": "MODIFIED", "object": copy.deepcopy(self.jobsets[name])})
 
-    def script_step(self, step: str, *, exit_code: int = 0, pods: list[dict] | None = None) -> None:
+    def _step_for_jobset(self, js_name: str) -> str:
+        if js_name in self._js_to_step:
+            return self._js_to_step[js_name]
+        return js_name.removesuffix(_JOBSET_SUFFIX)
+
+    def _record_phases(self, data: dict) -> None:
+        """Append a ``("phases", ...)`` trace entry from a ConfigMap write,
+        deduped against the last-recorded phases — the watch loop re-saves
+        on every iteration even when nothing changed, and timestamps are
+        excluded so those re-saves would otherwise be indistinguishable
+        duplicates. Timings are excluded outright — they're non-deterministic
+        and would break trace equality."""
+        phases = _decode_configmap_data(data).get("phases")
+        if phases is not None and phases != self._last_phases:
+            self.trace.append(("phases", phases))
+            self._last_phases = phases
+
+    def record_status(self, status: str) -> None:
+        """Append a ``("status", ...)`` trace entry, deduped against the
+        last-recorded status for the same reason _record_phases dedupes."""
+        if status != self._last_status:
+            self.trace.append(("status", status))
+            self._last_status = status
+
+    def _record_yield(self, item: dict) -> None:
+        """Append an ``("exit", step, code)`` or ``("cancel", step)`` trace
+        entry for a watch event as it is yielded to the controller."""
+        obj = item.get("object", {})
+        js_name = obj.get("metadata", {}).get("name")
+        if not js_name:
+            return
+        step = self._step_for_jobset(js_name)
+        terminal = obj.get("status", {}).get("terminalState")
+        suspended = obj.get("spec", {}).get("suspend", False)
+        if terminal == "Completed":
+            self.trace.append(("exit", step, 0))
+        elif terminal == "Failed":
+            code = self._scripts.get(step, {}).get("exit_code", 1)
+            self.trace.append(("exit", step, code))
+        elif suspended:
+            self.trace.append(("cancel", step))
+
+    def script_step(
+        self,
+        step: str,
+        *,
+        exit_code: int = 0,
+        pods: list[dict] | None = None,
+        cancel: bool = False,
+    ) -> None:
         """Script what happens when the controller submits `step`'s JobSet:
-        the fake resolves it to terminal Completed (exit_code == 0) or Failed
-        (exit_code != 0) the instant it's created, enqueuing the matching
-        watch event immediately — no separate complete_jobset/fail_jobset
-        call needed.
+        the fake resolves it the instant it's created, enqueuing the matching
+        watch event immediately — no separate complete_jobset/fail_jobset/
+        cancel_jobset call needed.
+
+        `cancel=True` scripts an externally-triggered cancellation (JobSet
+        suspended, no terminalState) instead of a normal exit.
 
         `pods` (a list of {"role": str, "exit_code": int | None} dicts), if
         given, becomes visible via list_namespaced_pod under this step's
@@ -221,13 +292,15 @@ class FakeK8sCluster:
 
         A step with no script defaults to succeeding immediately.
         """
-        self._scripts[step] = {"exit_code": exit_code, "pods": pods or []}
+        self._scripts[step] = {"exit_code": exit_code, "pods": pods or [], "cancel": cancel}
 
     def _resolve_scripted_step(self, js_name: str, step: str) -> None:
-        outcome = self._scripts.get(step, {"exit_code": 0, "pods": []})
-        terminal = "Completed" if outcome["exit_code"] == 0 else "Failed"
+        outcome = self._scripts.get(step, {"exit_code": 0, "pods": [], "cancel": False})
         js = self.jobsets[js_name]
-        js["status"] = {"terminalState": terminal}
+        if outcome.get("cancel"):
+            js["spec"]["suspend"] = True
+        else:
+            js["status"] = {"terminalState": "Completed" if outcome["exit_code"] == 0 else "Failed"}
         js["metadata"]["resourceVersion"] = self._bump_rv()
         self._enqueue(js_name)
         if outcome["pods"]:
