@@ -172,6 +172,27 @@ def _get_s3_creds() -> dict:
     return creds_dict
 
 
+def _serialize_failure_policy(failure_policy) -> dict | None:
+    """Serialize a step's FailurePolicy into plain JSON for dag.json — the
+    controller pod has no seekr_chain dependency, so it evaluates retry rules
+    against this dict rather than the pydantic config object (see
+    resources/controller/failure.py)."""
+    if failure_policy is None:
+        return None
+    return {
+        "max_restarts": failure_policy.max_restarts,
+        "rules": [
+            {
+                "action": rule.action,
+                "target_roles": rule.target_roles,
+                "on_exit_codes": rule.on_exit_codes,
+                "operator": rule.operator,
+            }
+            for rule in failure_policy.rules
+        ],
+    }
+
+
 def _package_assets(
     config: WorkflowConfig,
     args: dict | None,
@@ -227,6 +248,7 @@ def _package_assets(
             {
                 "name": step_config.name,
                 "depends_on": step_config.depends_on or [],
+                "failure_policy": _serialize_failure_policy(step_config.failure_policy),
             }
         )
 

@@ -302,7 +302,7 @@ class TestCollectPodState:
             labels={
                 "jobset.sigs.k8s.io/job-index": "2",
                 "jobset.sigs.k8s.io/job-global-index": "5",
-                "jobset.sigs.k8s.io/restart-attempt": "1",
+                "seekr-chain/attempt": "1",
             },
         )
         state = _collect_pod_state(pod)
@@ -677,6 +677,36 @@ class TestGroupJobsetsByStep:
     def test_jobset_without_step_name_label_is_skipped(self):
         jobsets = [{"metadata": {"labels": {}}, "spec": {}, "status": {}}]
         assert _group_jobsets_by_step(jobsets) == {}
+
+    def test_highest_attempt_wins_regardless_of_input_order(self):
+        """A retried step has one JobSet per attempt, all sharing the same
+        step-name label — the one with the highest attempt label must win,
+        no matter what order the JobSets arrive in."""
+        attempt_0 = {
+            "metadata": {"name": "a-js", "labels": {"seekr-chain/step-name": "a", "seekr-chain/attempt": "0"}},
+            "spec": {},
+            "status": {},
+        }
+        attempt_1 = {
+            "metadata": {"name": "a-js-a1", "labels": {"seekr-chain/step-name": "a", "seekr-chain/attempt": "1"}},
+            "spec": {},
+            "status": {},
+        }
+        attempt_2 = {
+            "metadata": {"name": "a-js-a2", "labels": {"seekr-chain/step-name": "a", "seekr-chain/attempt": "2"}},
+            "spec": {},
+            "status": {},
+        }
+        other_step = {
+            "metadata": {"name": "b-js", "labels": {"seekr-chain/step-name": "b", "seekr-chain/attempt": "0"}},
+            "spec": {},
+            "status": {},
+        }
+
+        jobsets = [attempt_1, other_step, attempt_2, attempt_0]
+        result = _group_jobsets_by_step(jobsets)
+
+        assert result == {"a": attempt_2, "b": other_step}
 
 
 class TestListJobsets:
