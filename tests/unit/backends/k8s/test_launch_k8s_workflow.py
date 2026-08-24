@@ -8,6 +8,7 @@ normal (non-sleeping) job and attach() had nothing to attach to.
 from __future__ import annotations
 
 import importlib
+import json
 import shutil
 import tarfile
 from pathlib import Path
@@ -123,6 +124,74 @@ def test_package_assets_includes_materialized_nix_workspace_for_builds(monkeypat
     assert "nix-workspaces/abc123/workspace/flake.nix" in names
     assert "assets/step=nix-build-abc/jobset.yaml" in names
     assert "assets/step=train/jobset.yaml" in names
+
+
+def test_package_assets_serializes_failure_policy_into_dag_json(monkeypatch, tmp_path):
+    """failure_policy is evaluated in the controller pod, not from rendered
+    YAML, so it must be serialized into dag.json for steps that set one, and
+    left as _serialize_failure_policy(None) for steps that don't."""
+    monkeypatch.setattr(
+        lkw_module, "create_jobset_manifest", lambda **kwargs: (f"js-{kwargs['step_index']}", "yaml: {}")
+    )
+    monkeypatch.setattr(lkw_module.remote_fs, "upload", lambda *a, **k: None)
+
+    staging_dir = tmp_path / "staging"
+    (staging_dir / "assets").mkdir(parents=True)
+
+    config = WorkflowConfig(
+        name="t",
+        steps=[
+            {
+                "name": "a",
+                "image": "ubuntu",
+                "script": "echo hi",
+                "failure_policy": {
+                    "max_restarts": 2,
+                    "rules": [
+                        {
+                            "action": "FAIL_JOB_SET",
+                            "target_roles": None,
+                            "on_exit_codes": [1, 2],
+                            "operator": "NOT_IN",
+                        }
+                    ],
+                },
+            },
+            {"name": "b", "image": "ubuntu", "script": "echo hi", "depends_on": ["a"]},
+        ],
+    )
+
+    _package_assets(
+        config=config,
+        args=None,
+        job_info={"remote_assets_path": "s3://bucket/assets.tar.gz"},
+        staging_dir=staging_dir,
+        workflow_name="wf-1",
+        workflow_secrets=[],
+        interactive=False,
+    )
+
+    with open(staging_dir / "assets" / "dag.json") as f:
+        dag_entries = json.load(f)
+
+    assert dag_entries == [
+        {
+            "name": "a",
+            "depends_on": [],
+            "failure_policy": {
+                "max_restarts": 2,
+                "rules": [
+                    {
+                        "action": "FAIL_JOB_SET",
+                        "target_roles": None,
+                        "on_exit_codes": [1, 2],
+                        "operator": "NOT_IN",
+                    }
+                ],
+            },
+        },
+        {"name": "b", "depends_on": ["a"], "failure_policy": None},
+    ]
 
 
 class TestCodeStaging:

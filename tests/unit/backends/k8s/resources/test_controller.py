@@ -24,7 +24,7 @@ import pytest
 _RESOURCES = Path(__file__).resolve().parents[5] / "src/seekr_chain/backends/k8s/resources"
 sys.path.insert(0, str(_RESOURCES))
 
-from controller import scheduling, status, watch  # noqa: E402
+from controller import manifests, scheduling, status, watch  # noqa: E402
 
 from .fake_k8s import FakeK8sCluster  # noqa: E402
 
@@ -42,8 +42,13 @@ def _load_manifest_mock(_assets, name):
     """Stand in for controller.manifests.load_manifest. Includes the
     seekr-chain/step-name label real JobSet manifests carry (see
     templates/jobset.yaml.j2) — FakeK8sCluster reads it back to resolve a
-    create call to the step that was scripted with script_step()."""
-    return {"metadata": {"name": f"{name}-js", "labels": {"seekr-chain/step-name": name}}, "spec": {}}
+    create call to the step that was scripted with script_step(). An empty
+    replicatedJobs list is enough for manifests.stamp_attempt (used on retry
+    resubmission) to run without a real role template."""
+    return {
+        "metadata": {"name": f"{name}-js", "labels": {"seekr-chain/step-name": name}},
+        "spec": {"replicatedJobs": []},
+    }
 
 
 def _record_status_call(cluster: FakeK8sCluster, workflow_id, dag, phases, timings) -> None:
@@ -250,6 +255,34 @@ class TestStampTimings:
         _stamp_starts(dag, phases, timings)
 
         assert timings["a"]["dt_start"] == "2026-01-01T00:00:00Z"
+
+
+class TestStampAttempt:
+    """stamp_attempt renames a freshly-loaded manifest to the retry's JobSet
+    name and stamps seekr-chain/attempt everywhere failure.py's per-attempt
+    pod label selector expects it: the JobSet metadata and every
+    replicatedJob's pod-template metadata."""
+
+    def test_renames_and_stamps_attempt_everywhere(self):
+        manifest = {
+            "metadata": {"name": "a-js", "annotations": {}, "labels": {}},
+            "spec": {
+                "replicatedJobs": [
+                    {"template": {"spec": {"template": {"metadata": {"annotations": {}, "labels": {}}}}}},
+                    {"template": {"spec": {"template": {"metadata": {"annotations": {}, "labels": {}}}}}},
+                ]
+            },
+        }
+
+        manifests.stamp_attempt(manifest, "a-js-a2", 2)
+
+        assert manifest["metadata"]["name"] == "a-js-a2"
+        assert manifest["metadata"]["annotations"] == {"seekr-chain/attempt": "2"}
+        assert manifest["metadata"]["labels"] == {"seekr-chain/attempt": "2"}
+        for role in manifest["spec"]["replicatedJobs"]:
+            pod_metadata = role["template"]["spec"]["template"]["metadata"]
+            assert pod_metadata["annotations"] == {"seekr-chain/attempt": "2"}
+            assert pod_metadata["labels"] == {"seekr-chain/attempt": "2"}
 
 
 # ---------------------------------------------------------------------------
@@ -750,6 +783,433 @@ class TestMainControllerRetry:
             ("phases", {"a": "SUCCEEDED", "b": "SUCCEEDED"}),
             ("status", "SUCCEEDED"),
             ("event", "WorkflowSucceeded", "All steps completed successfully"),
+        ]
+
+    def test_restart_mid_retry_resumes_at_persisted_attempt_count(self, cluster):
+        """The attempt counter must survive a controller restart mid-retry:
+        the ConfigMap has a's phase RUNNING (reset to PENDING and resubmitted
+        on restart, since only terminal phases are restored) but attempts
+        already at 2. failure.decide_retry evaluates against this *restored*
+        attempt, not a freshly-zeroed one — with max_restarts=2, attempt 2 is
+        not < 2, so the step fails immediately with no further retry. Had the
+        attempt count not persisted, this would have retried instead.
+        """
+        dag = [{"name": "a", "depends_on": [], "failure_policy": {"max_restarts": 2, "rules": []}}]
+        cluster.configmaps["wf-abc-phases"] = {
+            "data": {
+                "phases": json.dumps({"a": "RUNNING"}),
+                "timings": json.dumps({}),
+                "attempts": json.dumps({"a": 2}),
+            }
+        }
+        cluster.script_step("a", exit_code=1, pods=[{"role": "worker", "exit_code": 1}])
+
+        assert run_controller_main(cluster, dag) == 0
+
+        assert "a-js-a1" not in cluster.jobsets
+        assert cluster.trace == [
+            ("status", "RUNNING"),
+            ("submit", "a"),
+            ("phases", {"a": "RUNNING"}),
+            ("exit", "a", 1),
+            ("event", "StepFailed", "Step 'a' failed"),
+            ("phases", {"a": "FAILED"}),
+            ("status", "FAILED"),
+            ("event", "WorkflowFailed", "Workflow failed — failed steps: ['a']"),
+        ]
+
+
+# ---------------------------------------------------------------------------
+# Failure-policy retry decision matrix (failure.py / watch.py's Failed branch
+# / scheduling.retry_pending_steps)
+# ---------------------------------------------------------------------------
+
+
+class TestMainRetryPolicy:
+    def test_retry_then_succeed_emits_no_step_failed(self, cluster):
+        """max_restarts=1, no rules: the first attempt fails, is retried as
+        a-js-a1, and succeeds. The retried attempt must not look like a
+        failure — no StepFailed event may ever be emitted."""
+        dag = [{"name": "a", "depends_on": [], "failure_policy": {"max_restarts": 1, "rules": []}}]
+        cluster.script_step_sequence(
+            "a",
+            [
+                {"exit_code": 1, "pods": [{"role": "worker", "exit_code": 1}]},
+                {"exit_code": 0},
+            ],
+        )
+
+        assert run_controller_main(cluster, dag) == 0
+
+        assert "a-js-a1" in cluster.jobsets
+        assert cluster.trace == [
+            ("status", "RUNNING"),
+            ("submit", "a"),
+            ("phases", {"a": "RUNNING"}),
+            ("exit", "a", 1),
+            ("submit", "a"),
+            ("exit", "a", 0),
+            ("event", "StepSucceeded", "Step 'a' completed successfully"),
+            ("phases", {"a": "SUCCEEDED"}),
+            ("status", "SUCCEEDED"),
+            ("event", "WorkflowSucceeded", "All steps completed successfully"),
+        ]
+        assert ("event", "StepFailed", "Step 'a' failed") not in cluster.trace
+
+    def test_retries_exhausted_fails_step_and_cascades(self, cluster):
+        """a -> b, max_restarts=1, a always fails: attempt 0 fails and is
+        retried as a-js-a1; attempt 1 fails with attempt == max_restarts, so
+        it is FAILED for good, cascading b to SKIPPED. StepFailed fires
+        exactly once, on the final failure — not on the retried attempt."""
+        dag = [
+            {"name": "a", "depends_on": [], "failure_policy": {"max_restarts": 1, "rules": []}},
+            {"name": "b", "depends_on": ["a"]},
+        ]
+        cluster.script_step("a", exit_code=1, pods=[{"role": "worker", "exit_code": 1}])
+
+        assert run_controller_main(cluster, dag) == 0
+
+        assert "a-js-a1" in cluster.jobsets
+        assert cluster.trace == [
+            ("status", "RUNNING"),
+            ("submit", "a"),
+            ("phases", {"a": "RUNNING", "b": "PENDING"}),
+            ("exit", "a", 1),
+            ("submit", "a"),
+            ("exit", "a", 1),
+            ("event", "StepFailed", "Step 'a' failed"),
+            ("phases", {"a": "FAILED", "b": "SKIPPED"}),
+            ("status", "FAILED"),
+            ("event", "WorkflowFailed", "Workflow failed — failed steps: ['a']"),
+        ]
+        assert len([t for t in cluster.trace if t[0] == "event" and t[1] == "StepFailed"]) == 1
+
+    def test_fail_job_set_rule_prevents_retry(self, cluster):
+        """A FAIL_JOB_SET rule match short-circuits the retry budget entirely
+        — a fails immediately even though max_restarts=5 would otherwise
+        allow retries."""
+        dag = [
+            {
+                "name": "a",
+                "depends_on": [],
+                "failure_policy": {
+                    "max_restarts": 5,
+                    "rules": [{"on_exit_codes": [1], "action": "FAIL_JOB_SET"}],
+                },
+            }
+        ]
+        cluster.script_step("a", exit_code=1, pods=[{"role": "worker", "exit_code": 1}])
+
+        assert run_controller_main(cluster, dag) == 0
+
+        assert "a-js-a1" not in cluster.jobsets
+        assert cluster.trace == [
+            ("status", "RUNNING"),
+            ("submit", "a"),
+            ("phases", {"a": "RUNNING"}),
+            ("exit", "a", 1),
+            ("event", "StepFailed", "Step 'a' failed"),
+            ("phases", {"a": "FAILED"}),
+            ("status", "FAILED"),
+            ("event", "WorkflowFailed", "Workflow failed — failed steps: ['a']"),
+        ]
+
+    def test_ignore_max_restarts_action_retries_past_budget(self, cluster):
+        """RESTART_JOB_SET_AND_IGNORE_MAX_RESTARTS retries even with
+        max_restarts=0 — twice, past the (zero) budget — until it succeeds."""
+        dag = [
+            {
+                "name": "a",
+                "depends_on": [],
+                "failure_policy": {
+                    "max_restarts": 0,
+                    "rules": [
+                        {"on_exit_codes": [1], "action": "RESTART_JOB_SET_AND_IGNORE_MAX_RESTARTS"},
+                    ],
+                },
+            }
+        ]
+        cluster.script_step_sequence(
+            "a",
+            [
+                {"exit_code": 1, "pods": [{"role": "worker", "exit_code": 1}]},
+                {"exit_code": 1, "pods": [{"role": "worker", "exit_code": 1}]},
+                {"exit_code": 0},
+            ],
+        )
+
+        assert run_controller_main(cluster, dag) == 0
+
+        assert "a-js-a1" in cluster.jobsets
+        assert "a-js-a2" in cluster.jobsets
+        assert cluster.trace == [
+            ("status", "RUNNING"),
+            ("submit", "a"),
+            ("phases", {"a": "RUNNING"}),
+            ("exit", "a", 1),
+            ("submit", "a"),
+            ("exit", "a", 1),
+            ("submit", "a"),
+            ("exit", "a", 0),
+            ("event", "StepSucceeded", "Step 'a' completed successfully"),
+            ("phases", {"a": "SUCCEEDED"}),
+            ("status", "SUCCEEDED"),
+            ("event", "WorkflowSucceeded", "All steps completed successfully"),
+        ]
+
+    def test_not_in_operator_matches_unlisted_exit_code(self, cluster):
+        """operator=NOT_IN matches when the pod's exit code is *not* in
+        on_exit_codes: exit 1 is not in {139}, so the rule matches and
+        FAIL_JOB_SET fires — no retry despite max_restarts=2."""
+        dag = [
+            {
+                "name": "a",
+                "depends_on": [],
+                "failure_policy": {
+                    "max_restarts": 2,
+                    "rules": [
+                        {"on_exit_codes": [139], "operator": "NOT_IN", "action": "FAIL_JOB_SET"},
+                    ],
+                },
+            }
+        ]
+        cluster.script_step("a", exit_code=1, pods=[{"role": "worker", "exit_code": 1}])
+
+        assert run_controller_main(cluster, dag) == 0
+
+        assert "a-js-a1" not in cluster.jobsets
+        assert cluster.trace == [
+            ("status", "RUNNING"),
+            ("submit", "a"),
+            ("phases", {"a": "RUNNING"}),
+            ("exit", "a", 1),
+            ("event", "StepFailed", "Step 'a' failed"),
+            ("phases", {"a": "FAILED"}),
+            ("status", "FAILED"),
+            ("event", "WorkflowFailed", "Workflow failed — failed steps: ['a']"),
+        ]
+
+    def test_unconditional_rule_matches_any_exit_code(self, cluster):
+        """A rule with no on_exit_codes matches unconditionally — FAIL_JOB_SET
+        fires with no retry despite max_restarts=3."""
+        dag = [
+            {
+                "name": "a",
+                "depends_on": [],
+                "failure_policy": {"max_restarts": 3, "rules": [{"action": "FAIL_JOB_SET"}]},
+            }
+        ]
+        cluster.script_step("a", exit_code=1, pods=[{"role": "worker", "exit_code": 1}])
+
+        assert run_controller_main(cluster, dag) == 0
+
+        assert "a-js-a1" not in cluster.jobsets
+        assert cluster.trace == [
+            ("status", "RUNNING"),
+            ("submit", "a"),
+            ("phases", {"a": "RUNNING"}),
+            ("exit", "a", 1),
+            ("event", "StepFailed", "Step 'a' failed"),
+            ("phases", {"a": "FAILED"}),
+            ("status", "FAILED"),
+            ("event", "WorkflowFailed", "Workflow failed — failed steps: ['a']"),
+        ]
+
+    def test_no_rule_matches_falls_back_to_max_restarts(self, cluster):
+        """exit 1 does not match the rule's on_exit_codes=[42], so the rule is
+        skipped and the default retry-until-max_restarts policy applies."""
+        dag = [
+            {
+                "name": "a",
+                "depends_on": [],
+                "failure_policy": {
+                    "max_restarts": 1,
+                    "rules": [{"on_exit_codes": [42], "action": "FAIL_JOB_SET"}],
+                },
+            }
+        ]
+        cluster.script_step_sequence(
+            "a",
+            [
+                {"exit_code": 1, "pods": [{"role": "worker", "exit_code": 1}]},
+                {"exit_code": 0},
+            ],
+        )
+
+        assert run_controller_main(cluster, dag) == 0
+
+        assert "a-js-a1" in cluster.jobsets
+        assert cluster.trace == [
+            ("status", "RUNNING"),
+            ("submit", "a"),
+            ("phases", {"a": "RUNNING"}),
+            ("exit", "a", 1),
+            ("submit", "a"),
+            ("exit", "a", 0),
+            ("event", "StepSucceeded", "Step 'a' completed successfully"),
+            ("phases", {"a": "SUCCEEDED"}),
+            ("status", "SUCCEEDED"),
+            ("event", "WorkflowSucceeded", "All steps completed successfully"),
+        ]
+
+    def test_first_matching_rule_wins(self, cluster):
+        """Two rules both match exit 1; the first (RESTART_JOB_SET) wins and
+        the step is retried — proving the second (FAIL_JOB_SET) is never
+        reached."""
+        dag = [
+            {
+                "name": "a",
+                "depends_on": [],
+                "failure_policy": {
+                    "max_restarts": 1,
+                    "rules": [
+                        {"on_exit_codes": [1], "action": "RESTART_JOB_SET"},
+                        {"on_exit_codes": [1], "action": "FAIL_JOB_SET"},
+                    ],
+                },
+            }
+        ]
+        cluster.script_step_sequence(
+            "a",
+            [
+                {"exit_code": 1, "pods": [{"role": "worker", "exit_code": 1}]},
+                {"exit_code": 0},
+            ],
+        )
+
+        assert run_controller_main(cluster, dag) == 0
+
+        assert "a-js-a1" in cluster.jobsets
+        assert cluster.trace == [
+            ("status", "RUNNING"),
+            ("submit", "a"),
+            ("phases", {"a": "RUNNING"}),
+            ("exit", "a", 1),
+            ("submit", "a"),
+            ("exit", "a", 0),
+            ("event", "StepSucceeded", "Step 'a' completed successfully"),
+            ("phases", {"a": "SUCCEEDED"}),
+            ("status", "SUCCEEDED"),
+            ("event", "WorkflowSucceeded", "All steps completed successfully"),
+        ]
+
+    def test_none_pod_exit_code_does_not_match_rule(self, cluster):
+        """The JobSet fails (outcome exit_code=1) but the pod's own exit code
+        is None (e.g. never reported a container exit) — _pod_matches_rule
+        treats that as no match, so the rule is skipped and the default
+        retry policy applies instead."""
+        dag = [
+            {
+                "name": "a",
+                "depends_on": [],
+                "failure_policy": {
+                    "max_restarts": 1,
+                    "rules": [{"on_exit_codes": [1], "action": "FAIL_JOB_SET"}],
+                },
+            }
+        ]
+        cluster.script_step_sequence(
+            "a",
+            [
+                {"exit_code": 1, "pods": [{"role": "main", "exit_code": None}]},
+                {"exit_code": 0},
+            ],
+        )
+
+        assert run_controller_main(cluster, dag) == 0
+
+        assert "a-js-a1" in cluster.jobsets
+        assert cluster.trace == [
+            ("status", "RUNNING"),
+            ("submit", "a"),
+            ("phases", {"a": "RUNNING"}),
+            ("exit", "a", 1),
+            ("submit", "a"),
+            ("exit", "a", 0),
+            ("event", "StepSucceeded", "Step 'a' completed successfully"),
+            ("phases", {"a": "SUCCEEDED"}),
+            ("status", "SUCCEEDED"),
+            ("event", "WorkflowSucceeded", "All steps completed successfully"),
+        ]
+
+
+class TestMainMultinodeFailure:
+    """target_roles scoping matters most in multinode: one role's exit code
+    must not accidentally trigger (or suppress) a rule scoped to another."""
+
+    def test_target_roles_scopes_rule_away_from_non_matching_role(self, cluster):
+        """Rule is scoped to target_roles=["worker"] with on_exit_codes=[1].
+        The launcher exits 1 (would match if the rule were unscoped) but the
+        worker exits 2 (not in {1}) — scoped to worker-only, the rule does not
+        match, so the default retry policy applies instead and the step
+        recovers on retry."""
+        dag = [
+            {
+                "name": "a",
+                "depends_on": [],
+                "failure_policy": {
+                    "max_restarts": 1,
+                    "rules": [{"target_roles": ["worker"], "on_exit_codes": [1], "action": "FAIL_JOB_SET"}],
+                },
+            }
+        ]
+        cluster.script_step_sequence(
+            "a",
+            [
+                {
+                    "exit_code": 1,
+                    "pods": [{"role": "launcher", "exit_code": 1}, {"role": "worker", "exit_code": 2}],
+                },
+                {"exit_code": 0},
+            ],
+        )
+
+        assert run_controller_main(cluster, dag) == 0
+
+        assert "a-js-a1" in cluster.jobsets
+        assert cluster.trace == [
+            ("status", "RUNNING"),
+            ("submit", "a"),
+            ("phases", {"a": "RUNNING"}),
+            ("exit", "a", 1),
+            ("submit", "a"),
+            ("exit", "a", 0),
+            ("event", "StepSucceeded", "Step 'a' completed successfully"),
+            ("phases", {"a": "SUCCEEDED"}),
+            ("status", "SUCCEEDED"),
+            ("event", "WorkflowSucceeded", "All steps completed successfully"),
+        ]
+
+    def test_target_roles_scoping_still_triggers_on_matching_role(self, cluster):
+        """Same scoped rule as above, but this time the worker itself exits 1
+        — the rule matches and FAIL_JOB_SET fires with no retry, showing the
+        scoping cuts both ways."""
+        dag = [
+            {
+                "name": "a",
+                "depends_on": [],
+                "failure_policy": {
+                    "max_restarts": 1,
+                    "rules": [{"target_roles": ["worker"], "on_exit_codes": [1], "action": "FAIL_JOB_SET"}],
+                },
+            }
+        ]
+        cluster.script_step(
+            "a", exit_code=1, pods=[{"role": "launcher", "exit_code": 0}, {"role": "worker", "exit_code": 1}]
+        )
+
+        assert run_controller_main(cluster, dag) == 0
+
+        assert "a-js-a1" not in cluster.jobsets
+        assert cluster.trace == [
+            ("status", "RUNNING"),
+            ("submit", "a"),
+            ("phases", {"a": "RUNNING"}),
+            ("exit", "a", 1),
+            ("event", "StepFailed", "Step 'a' failed"),
+            ("phases", {"a": "FAILED"}),
+            ("status", "FAILED"),
+            ("event", "WorkflowFailed", "Workflow failed — failed steps: ['a']"),
         ]
 
 

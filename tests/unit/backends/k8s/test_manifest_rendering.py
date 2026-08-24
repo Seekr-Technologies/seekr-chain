@@ -1,5 +1,6 @@
 """Tests for Jinja2 template rendering of Argo/JobSet manifests."""
 
+import pytest
 import yaml
 
 from seekr_chain.backends.k8s import render
@@ -1054,8 +1055,23 @@ class TestAffinityRendering:
             },
         }
 
-    def test_failure_policy_renders_rules(self, tmp_path):
-        """failure_policy.rules should render with action and targetReplicatedJobs."""
+    @pytest.mark.parametrize(
+        "failure_policy",
+        [
+            None,
+            {"max_restarts": 5},
+            {"max_restarts": 3, "rules": [{"action": "FAIL_JOB_SET"}]},
+            {"max_restarts": 3, "rules": [{"action": "FAIL_JOB_SET", "on_exit_codes": [42, 43]}]},
+        ],
+        ids=["none", "max-restarts-only", "single-rule", "on-exit-codes-rule"],
+    )
+    def test_failure_policy_never_renders_rules_or_pod_failure_policy(self, tmp_path, failure_policy):
+        """Retry decisions moved entirely to the controller (failure.py), which
+        evaluates a failed JobSet's pods after it reaches terminal Failed —
+        see failure.py's module docstring for why evaluating via
+        podFailurePolicy/failurePolicy.rules in the manifest itself races.
+        The rendered JobSet fails fast unconditionally, regardless of the
+        step's configured failure_policy."""
         config = _minimal_config(
             steps=[
                 {
@@ -1067,12 +1083,7 @@ class TestAffinityRendering:
                         "mem_per_node": "8Gi",
                         "ephemeral_storage_per_node": "10Gi",
                     },
-                    "failure_policy": {
-                        "max_restarts": 3,
-                        "rules": [
-                            {"action": "FAIL_JOB_SET"},
-                        ],
-                    },
+                    "failure_policy": failure_policy,
                 }
             ]
         )
@@ -1091,38 +1102,27 @@ class TestAffinityRendering:
         rendered = render.render("jobset.yaml.j2", context)
         manifest = yaml.safe_load(rendered)
 
-        fp = manifest["spec"]["failurePolicy"]
-        assert fp["maxRestarts"] == 3
-        assert len(fp["rules"]) == 1
-        assert fp["rules"][0]["action"] == "FailJobSet"
+        assert manifest["spec"]["failurePolicy"] == {"maxRestarts": 0}
+        assert "podFailurePolicy" not in manifest["spec"]["replicatedJobs"][0]["template"]["spec"]
 
-    def test_failure_policy_rules_with_target_roles(self, tmp_path):
-        """Multi-role failure_policy rules should render targetReplicatedJobs."""
+    def test_multi_role_failure_policy_rules_with_target_roles_never_rendered(self, tmp_path):
+        """Same invariant as above, exercised with a multi-role step + rules
+        scoped via target_roles — the field that used to become
+        targetReplicatedJobs on the rendered JobSet rule."""
+        role_kwargs = {
+            "resources": {
+                "cpus_per_node": "4",
+                "mem_per_node": "8Gi",
+                "ephemeral_storage_per_node": "10Gi",
+            },
+        }
         config = _minimal_config(
             steps=[
                 {
                     "name": "train",
                     "roles": [
-                        {
-                            "name": "trainer",
-                            "image": "pytorch:2.0",
-                            "script": "echo hello",
-                            "resources": {
-                                "cpus_per_node": "4",
-                                "mem_per_node": "8Gi",
-                                "ephemeral_storage_per_node": "10Gi",
-                            },
-                        },
-                        {
-                            "name": "evaluator",
-                            "image": "pytorch:2.0",
-                            "script": "echo eval",
-                            "resources": {
-                                "cpus_per_node": "4",
-                                "mem_per_node": "8Gi",
-                                "ephemeral_storage_per_node": "10Gi",
-                            },
-                        },
+                        {"name": "trainer", "image": "pytorch:2.0", "script": "echo hello", **role_kwargs},
+                        {"name": "evaluator", "image": "pytorch:2.0", "script": "echo eval", **role_kwargs},
                     ],
                     "failure_policy": {
                         "max_restarts": 2,
@@ -1149,33 +1149,15 @@ class TestAffinityRendering:
         rendered = render.render("jobset.yaml.j2", context)
         manifest = yaml.safe_load(rendered)
 
-        fp = manifest["spec"]["failurePolicy"]
-        assert fp["maxRestarts"] == 2
-        assert len(fp["rules"]) == 2
-        assert fp["rules"][0]["action"] == "FailJobSet"
-        assert fp["rules"][0]["targetReplicatedJobs"] == ["trainer"]
-        assert fp["rules"][1]["action"] == "RestartJobSet"
-        assert fp["rules"][1]["targetReplicatedJobs"] == ["evaluator"]
+        assert manifest["spec"]["failurePolicy"] == {"maxRestarts": 0}
+        for replicated_job in manifest["spec"]["replicatedJobs"]:
+            assert "podFailurePolicy" not in replicated_job["template"]["spec"]
 
-    def test_failure_policy_no_rules_by_default(self, tmp_path):
-        """Without rules, only maxRestarts should be rendered."""
-        config = _minimal_config(
-            steps=[
-                {
-                    "name": "train",
-                    "image": "pytorch:2.0",
-                    "script": "echo hello",
-                    "resources": {
-                        "cpus_per_node": "4",
-                        "mem_per_node": "8Gi",
-                        "ephemeral_storage_per_node": "10Gi",
-                    },
-                    "failure_policy": {
-                        "max_restarts": 5,
-                    },
-                }
-            ]
-        )
+    def test_attempt_annotation_and_label_stamped_on_jobset_and_pod_template(self, tmp_path):
+        """The controller's retry resubmission (manifests.stamp_attempt) relies on
+        every attempt-0 render already carrying seekr-chain/attempt so the
+        pod-listing label selector in failure.py works uniformly across attempts."""
+        config = _minimal_config()
         job_info = _fake_job_info()
 
         _, context = build_jobset_context(
@@ -1191,130 +1173,8 @@ class TestAffinityRendering:
         rendered = render.render("jobset.yaml.j2", context)
         manifest = yaml.safe_load(rendered)
 
-        fp = manifest["spec"]["failurePolicy"]
-        assert fp["maxRestarts"] == 5
-        assert "rules" not in fp
-
-    def test_on_exit_codes_rule_renders_pod_and_jobset_failure_policy(self, tmp_path):
-        """A FAIL_JOB_SET + on_exit_codes rule renders a Job podFailurePolicy and a
-        JobSet FailJobSet rule (ordered before any plain rule)."""
-        config = _minimal_config(
-            steps=[
-                {
-                    "name": "train",
-                    "image": "pytorch:2.0",
-                    "script": "echo hello",
-                    "resources": {
-                        "cpus_per_node": "4",
-                        "mem_per_node": "8Gi",
-                        "ephemeral_storage_per_node": "10Gi",
-                    },
-                    "failure_policy": {
-                        "max_restarts": 3,
-                        "rules": [
-                            {"action": "RESTART_JOB_SET"},
-                            {"action": "FAIL_JOB_SET", "on_exit_codes": [43, 42]},
-                        ],
-                    },
-                }
-            ]
-        )
-        job_info = _fake_job_info()
-
-        _, context = build_jobset_context(
-            workflow_config=config,
-            step_index=0,
-            job_info=job_info,
-            workflow_name="ab1234",
-            workflow_secrets=[],
-            interactive=False,
-            assets_path=tmp_path / "assets",
-        )
-
-        rendered = render.render("jobset.yaml.j2", context)
-        manifest = yaml.safe_load(rendered)
-
-        fp = manifest["spec"]["failurePolicy"]
-        assert fp["rules"][0] == {"action": "FailJobSet", "onJobFailureReasons": ["PodFailurePolicy"]}
-        assert fp["rules"][1]["action"] == "RestartJobSet"
-
-        replicated_job = manifest["spec"]["replicatedJobs"][0]
-        # JobSet needs a non-empty replicatedJob name to attach the
-        # replicatedjob-name label to child Jobs; without it, FailJobSet
-        # rules never match a failed Job (see jobset.py:_build_role_context).
-        assert replicated_job["name"] == "main"
-        pod_labels = replicated_job["template"]["spec"]["template"]["metadata"]["labels"]
-        assert pod_labels["seekr-chain/role"] == "main"
-
-        pod_spec = replicated_job["template"]["spec"]
-        assert pod_spec["podFailurePolicy"] == {
-            "rules": [
-                {
-                    "action": "FailJob",
-                    "onExitCodes": {"containerName": "main", "operator": "In", "values": [42, 43]},
-                }
-            ]
-        }
-
-    def test_on_exit_codes_rule_with_target_roles_scopes_pod_failure_policy(self, tmp_path):
-        """target_roles on an exit-code rule scopes podFailurePolicy to that role's Job only."""
-        config = _minimal_config(
-            steps=[
-                {
-                    "name": "train",
-                    "roles": [
-                        {
-                            "name": "trainer",
-                            "image": "pytorch:2.0",
-                            "script": "echo hello",
-                            "resources": {
-                                "cpus_per_node": "4",
-                                "mem_per_node": "8Gi",
-                                "ephemeral_storage_per_node": "10Gi",
-                            },
-                        },
-                        {
-                            "name": "evaluator",
-                            "image": "pytorch:2.0",
-                            "script": "echo eval",
-                            "resources": {
-                                "cpus_per_node": "4",
-                                "mem_per_node": "8Gi",
-                                "ephemeral_storage_per_node": "10Gi",
-                            },
-                        },
-                    ],
-                    "failure_policy": {
-                        "max_restarts": 3,
-                        "rules": [
-                            {"action": "FAIL_JOB_SET", "on_exit_codes": [42], "target_roles": ["trainer"]},
-                        ],
-                    },
-                }
-            ]
-        )
-        job_info = _fake_job_info()
-
-        _, context = build_jobset_context(
-            workflow_config=config,
-            step_index=0,
-            job_info=job_info,
-            workflow_name="ab1234",
-            workflow_secrets=[],
-            interactive=False,
-            assets_path=tmp_path / "assets",
-        )
-
-        rendered = render.render("jobset.yaml.j2", context)
-        manifest = yaml.safe_load(rendered)
-
-        fp = manifest["spec"]["failurePolicy"]
-        assert fp["rules"][0] == {
-            "action": "FailJobSet",
-            "onJobFailureReasons": ["PodFailurePolicy"],
-            "targetReplicatedJobs": ["trainer"],
-        }
-
-        jobs_by_name = {job["name"]: job for job in manifest["spec"]["replicatedJobs"]}
-        assert "podFailurePolicy" in jobs_by_name["trainer"]["template"]["spec"]
-        assert "podFailurePolicy" not in jobs_by_name["evaluator"]["template"]["spec"]
+        assert manifest["metadata"]["annotations"]["seekr-chain/attempt"] == "0"
+        assert manifest["metadata"]["labels"]["seekr-chain/attempt"] == "0"
+        pod_metadata = manifest["spec"]["replicatedJobs"][0]["template"]["spec"]["template"]["metadata"]
+        assert pod_metadata["annotations"]["seekr-chain/attempt"] == "0"
+        assert pod_metadata["labels"]["seekr-chain/attempt"] == "0"

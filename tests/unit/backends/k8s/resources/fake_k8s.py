@@ -226,6 +226,10 @@ class FakeK8sCluster:
         self.ship_calls: list[list[str]] = []
         self.status_doc: dict | None = None
         self.status_path: str | None = None
+        # Per-attempt outcome scripting (script_step_sequence) and the
+        # create-count that drives it.
+        self._script_sequences: dict[str, list[dict]] = {}
+        self._step_create_counts: dict[str, int] = {}
 
     def _bump_rv(self) -> str:
         self._resource_version += 1
@@ -300,8 +304,30 @@ class FakeK8sCluster:
         """
         self._scripts[step] = {"exit_code": exit_code, "pods": pods or [], "cancel": cancel}
 
+    def script_step_sequence(self, step: str, outcomes: list[dict]) -> None:
+        """Script a different outcome per attempt of `step`: the Nth time the
+        controller creates this step's JobSet (attempt N, 0-indexed) resolves
+        to ``outcomes[N]`` (each shaped like ``{"exit_code": int, "pods": [...]}``,
+        same as script_step's kwargs). Once ``outcomes`` is exhausted, further
+        attempts repeat its last entry.
+
+        Use this instead of script_step when a step must fail on an early
+        attempt and succeed (or fail differently) on a retry — script_step
+        alone always resolves the same way regardless of attempt.
+        """
+        self._script_sequences[step] = [
+            {"exit_code": o.get("exit_code", 0), "pods": o.get("pods") or []} for o in outcomes
+        ]
+
     def _resolve_scripted_step(self, js_name: str, step: str) -> None:
-        outcome = self._scripts.get(step, {"exit_code": 0, "pods": [], "cancel": False})
+        attempt = self._step_create_counts.get(step, 0)
+        self._step_create_counts[step] = attempt + 1
+
+        sequence = self._script_sequences.get(step)
+        if sequence is not None:
+            outcome = sequence[min(attempt, len(sequence) - 1)]
+        else:
+            outcome = self._scripts.get(step, {"exit_code": 0, "pods": [], "cancel": False})
         js = self.jobsets[js_name]
         if outcome.get("cancel"):
             js["spec"]["suspend"] = True

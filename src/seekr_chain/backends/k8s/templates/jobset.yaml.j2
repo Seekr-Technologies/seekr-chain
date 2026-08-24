@@ -2,9 +2,12 @@ apiVersion: jobset.x-k8s.io/v1alpha2
 kind: JobSet
 metadata:
   name: {{ js_name }}
+  annotations:
+    seekr-chain/attempt: "{{ attempt }}"
   labels:
     seekr-chain/job-id: {{ job_id }}
     seekr-chain/step-name: {{ step_name }}
+    seekr-chain/attempt: "{{ attempt }}"
     {% if labels %}
     {% for k, v in labels.items() %}
     {{ k }}: {{ v }}
@@ -25,28 +28,15 @@ spec:
     {% endfor %}
     {% endif %}
   {% endif %}
-  {% if failure_policy %}
+  # Always fail-fast: every JobSet object is one attempt. The controller
+  # decides retries after the JobSet reaches terminal Failed (see
+  # resources/controller/failure.py) — evaluating failure_policy here via
+  # podFailurePolicy/failurePolicy.rules races against pod-failure-event
+  # ordering when multiple pods fail close together (K8s Job controller
+  # evaluates podFailurePolicy per pod-failure event as it arrives, not
+  # after all sibling pods have reported).
   failurePolicy:
-    maxRestarts: {{ failure_policy.maxRestarts }}
-    {% if failure_policy.rules is defined and failure_policy.rules %}
-    rules:
-    {% for rule in failure_policy.rules %}
-    - action: {{ rule.action }}
-      {% if rule.onJobFailureReasons %}
-      onJobFailureReasons:
-      {% for reason in rule.onJobFailureReasons %}
-      - {{ reason }}
-      {% endfor %}
-      {% endif %}
-      {% if rule.targetReplicatedJobs %}
-      targetReplicatedJobs:
-      {% for role_name in rule.targetReplicatedJobs %}
-      - {{ role_name }}
-      {% endfor %}
-      {% endif %}
-    {% endfor %}
-    {% endif %}
-  {% endif %}
+    maxRestarts: 0
   replicatedJobs:
   {% for role in roles %}
   - name: {{ role.name }}
@@ -54,23 +44,15 @@ spec:
     template:
       spec:
         backoffLimit: 0
-        {% if role.pod_failure_policy %}
-        podFailurePolicy:
-          rules:
-          {% for r in role.pod_failure_policy.rules %}
-          - action: {{ r.action }}
-            onExitCodes:
-              containerName: {{ r.onExitCodes.containerName }}
-              operator: {{ r.onExitCodes.operator }}
-              values: [{{ r.onExitCodes['values'] | join(', ') }}]
-          {% endfor %}
-        {% endif %}
         template:
           metadata:
+            annotations:
+              seekr-chain/attempt: "{{ attempt }}"
             labels:
               seekr-chain/role: {{ role.name }}
               seekr-chain/job-id: {{ job_id }}
               seekr-chain/step: {{ step_name }}
+              seekr-chain/attempt: "{{ attempt }}"
               {% for group in pack_groups %}
               seekr-chain/pg.{{ group }}: "true"
               {% endfor %}
@@ -161,7 +143,7 @@ spec:
               - name: RESTART_ATTEMPT
                 valueFrom:
                   fieldRef:
-                    fieldPath: "metadata.annotations['jobset.sigs.k8s.io/restart-attempt']"
+                    fieldPath: "metadata.annotations['seekr-chain/attempt']"
             {% if role.nix_init %}
             {% filter indent(12, first=True) %}
             {% include "_nix_init_container.yaml.j2" %}
@@ -266,7 +248,7 @@ spec:
               - name: RESTART_ATTEMPT
                 valueFrom:
                   fieldRef:
-                    fieldPath: "metadata.annotations['jobset.sigs.k8s.io/restart-attempt']"
+                    fieldPath: "metadata.annotations['seekr-chain/attempt']"
               - name: S3_BUCKET
                 value: {{ role.log_sidecar_s3_bucket | tojson }}
               - name: S3_STEP_DATA_PREFIX
