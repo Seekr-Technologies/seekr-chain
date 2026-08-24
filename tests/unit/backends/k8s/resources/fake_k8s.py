@@ -1,18 +1,27 @@
 """In-memory Fake Kubernetes cluster for testing the controller pod's DAG
-executor (controllerlib), replacing hand-built event dicts and MagicMock
-call-arg inspection with cluster-state mutations.
+executor (controllerlib).
 
-Tests express scenarios in terms of what happened to the cluster
-(``cluster.complete_jobset("a-js")``) rather than what the controller's k8s
-client calls looked like, so the harness survives controller-internals
-changes (e.g. future per-attempt JobSet resubmission) without being
-rewritten.
+Tests script outcomes up front — ``cluster.script_step("a", exit_code=0)`` —
+then run the controller once and assert on the resulting trace
+(``cluster.actions``), rather than interleaving manual cluster mutations
+between watch-loop iterations. A JobSet's outcome is resolved the moment the
+controller creates it (via its ``seekr-chain/step-name`` label), so the fake
+never needs to be told "now let it finish" — it already knows.
+
+Manual, out-of-band mutation (``complete_jobset``, ``fail_jobset``,
+``cancel_jobset``, ``submit_jobset``, ``raise_on_next_stream``,
+``fail_next_create``) is still available for scenarios script_step can't
+express: state that exists before the controller ever creates the JobSet
+(restart-resume), or events not triggered by JobSet creation at all
+(external `chain cancel`, transient watch-stream errors).
 """
 
 import copy
+import json
 import sys
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from types import SimpleNamespace
+from unittest.mock import MagicMock
 
 from kubernetes.client.exceptions import ApiException
 
@@ -21,7 +30,45 @@ from kubernetes.client.exceptions import ApiException
 _RESOURCES = Path(__file__).resolve().parents[5] / "src/seekr_chain/backends/k8s/resources"
 sys.path.insert(0, str(_RESOURCES))
 
-from controller import scheduling, watch  # noqa: E402
+# Label the controller stamps on every JobSet manifest (see
+# templates/jobset.yaml.j2) — used to map a create call back to the step it
+# submits, so a scripted outcome can be resolved without the fake needing to
+# know the controller's JobSet naming/attempt scheme.
+_STEP_LABEL = "seekr-chain/step-name"
+
+# Label the controller stamps on every pod (see templates/jobset.yaml.j2),
+# read back by list_namespaced_pod filtering below.
+_ROLE_LABEL = "seekr-chain/role"
+
+
+def _decode_configmap_data(data: dict) -> dict:
+    """Best-effort JSON-decode a ConfigMap data dict's values — phases/
+    timings/attempts are all persisted as JSON strings — so action-log
+    entries carry readable dicts instead of opaque strings."""
+    decoded = {}
+    for key, value in data.items():
+        try:
+            decoded[key] = json.loads(value)
+        except (TypeError, ValueError):
+            decoded[key] = value
+    return decoded
+
+
+def _parse_label_selector(label_selector: str) -> dict[str, str]:
+    """Parse a comma-separated ``k=v`` label selector into a dict. Only
+    equality clauses are supported — the only form the controller emits."""
+    return dict(pair.split("=", 1) for pair in label_selector.split(",") if "=" in pair)
+
+
+def _fake_pod(role: str, exit_code: int | None) -> SimpleNamespace:
+    """Build a minimal stand-in for a kubernetes.client.V1Pod, shaped exactly
+    as controller.failure._collect_pod_failures reads it."""
+    terminated = SimpleNamespace(exit_code=exit_code) if exit_code is not None else None
+    container_status = SimpleNamespace(name="main", state=SimpleNamespace(terminated=terminated))
+    return SimpleNamespace(
+        metadata=SimpleNamespace(labels={_ROLE_LABEL: role}),
+        status=SimpleNamespace(container_statuses=[container_status]),
+    )
 
 
 class _FakeCustomObjectsApi:
@@ -49,6 +96,8 @@ class _FakeCustomObjectsApi:
         if name in cluster.jobsets:
             raise ApiException(status=409)
 
+        step = body.get("metadata", {}).get("labels", {}).get(_STEP_LABEL)
+
         stored = {
             "metadata": dict(body.get("metadata", {})),
             "spec": dict(body.get("spec", {})),
@@ -56,6 +105,11 @@ class _FakeCustomObjectsApi:
         }
         stored["metadata"]["resourceVersion"] = cluster._bump_rv()
         cluster.jobsets[name] = stored
+        cluster.actions.append({"type": "create_jobset", "name": name, "step": step})
+
+        if step is not None:
+            cluster._resolve_scripted_step(name, step)
+
         return stored
 
     def list_namespaced_custom_object(self, group, version, plural, namespace, **kwargs):
@@ -82,15 +136,25 @@ class _FakeCoreV1Api:
         cluster = self._cluster
         if name not in cluster.configmaps:
             raise ApiException(status=404)
-        cluster.configmaps[name]["data"].update(body.get("data", {}))
+        data = body.get("data", {})
+        cluster.configmaps[name]["data"].update(data)
+        cluster.actions.append({"type": "save_phases", "name": name, **_decode_configmap_data(data)})
 
     def create_namespaced_config_map(self, namespace, body):
         cluster = self._cluster
         name = body["metadata"]["name"]
-        cluster.configmaps[name] = {"data": dict(body.get("data", {}))}
+        data = dict(body.get("data", {}))
+        cluster.configmaps[name] = {"data": data}
+        cluster.actions.append({"type": "save_phases", "name": name, **_decode_configmap_data(data)})
 
     def create_namespaced_event(self, namespace, body):
         self._cluster.events.append(body)
+
+    def list_namespaced_pod(self, namespace, label_selector: str = "", **kwargs):
+        cluster = self._cluster
+        step = _parse_label_selector(label_selector).get("seekr-chain/step")
+        pods = [_fake_pod(p["role"], p.get("exit_code")) for p in cluster.pods.get(step, [])]
+        return SimpleNamespace(items=pods)
 
 
 class FakeWatch:
@@ -113,14 +177,21 @@ class FakeWatch:
 
 
 class FakeK8sCluster:
-    """An in-memory Kubernetes cluster: JobSets, phases ConfigMaps, and
-    Events, plus enough watch-stream/create-call fault injection to drive
-    the controller through its reconnect and retry paths."""
+    """An in-memory Kubernetes cluster: JobSets, phases ConfigMaps, Events,
+    and pods, plus enough watch-stream/create-call fault injection to drive
+    the controller through its reconnect and retry paths.
+
+    Setup is spec-then-record: script each step's outcome up front with
+    ``script_step``, run the controller once, then assert on ``actions`` —
+    the ordered trace of every side effect the controller performed.
+    """
 
     def __init__(self):
         self.jobsets: dict[str, dict] = {}
         self.configmaps: dict[str, dict] = {}
         self.events: list[dict] = []
+        self.actions: list[dict] = []
+        self.pods: dict[str, list[dict]] = {}
         self.create_attempts = 0
         self.watch_last_kwargs: dict | None = None
         self.last_watch: FakeWatch | None = None
@@ -128,6 +199,7 @@ class FakeK8sCluster:
         self._watch_queue: list[dict] = []
         self._next_stream_exception: Exception | None = None
         self._next_create_exception: Exception | None = None
+        self._scripts: dict[str, dict] = {}
 
     def _bump_rv(self) -> str:
         self._resource_version += 1
@@ -135,6 +207,31 @@ class FakeK8sCluster:
 
     def _enqueue(self, name: str) -> None:
         self._watch_queue.append({"type": "MODIFIED", "object": copy.deepcopy(self.jobsets[name])})
+
+    def script_step(self, step: str, *, exit_code: int = 0, pods: list[dict] | None = None) -> None:
+        """Script what happens when the controller submits `step`'s JobSet:
+        the fake resolves it to terminal Completed (exit_code == 0) or Failed
+        (exit_code != 0) the instant it's created, enqueuing the matching
+        watch event immediately — no separate complete_jobset/fail_jobset
+        call needed.
+
+        `pods` (a list of {"role": str, "exit_code": int | None} dicts), if
+        given, becomes visible via list_namespaced_pod under this step's
+        label selector, for testing the pod-listing retry-decision path.
+
+        A step with no script defaults to succeeding immediately.
+        """
+        self._scripts[step] = {"exit_code": exit_code, "pods": pods or []}
+
+    def _resolve_scripted_step(self, js_name: str, step: str) -> None:
+        outcome = self._scripts.get(step, {"exit_code": 0, "pods": []})
+        terminal = "Completed" if outcome["exit_code"] == 0 else "Failed"
+        js = self.jobsets[js_name]
+        js["status"] = {"terminalState": terminal}
+        js["metadata"]["resourceVersion"] = self._bump_rv()
+        self._enqueue(js_name)
+        if outcome["pods"]:
+            self.pods[step] = outcome["pods"]
 
     def set_controller_jobset(self, name: str, uid: str) -> None:
         """Seed the controller's own JobSet (self-read via
@@ -162,7 +259,12 @@ class FakeK8sCluster:
         )
 
     def complete_jobset(self, name: str) -> None:
-        """Mark a jobset Completed and enqueue a MODIFIED watch event."""
+        """Mark a jobset Completed and enqueue a MODIFIED watch event.
+
+        Out-of-band: for state that must exist before the controller submits
+        the JobSet itself (e.g. modeling a pre-existing JobSet on restart).
+        For a JobSet the controller submits normally, prefer script_step.
+        """
         js = self._terminal_jobset(name)
         js["status"] = {"terminalState": "Completed"}
         js["metadata"]["resourceVersion"] = self._bump_rv()
@@ -175,6 +277,9 @@ class FakeK8sCluster:
         self._enqueue(name)
 
     def cancel_jobset(self, name: str) -> None:
+        """Suspend a jobset (models an external `chain cancel`) and enqueue a
+        MODIFIED watch event. Not expressible via script_step — cancellation
+        isn't an outcome of the controller's own create call."""
         js = self._terminal_jobset(name)
         js["spec"]["suspend"] = True
         js["metadata"]["resourceVersion"] = self._bump_rv()
@@ -200,51 +305,3 @@ class FakeK8sCluster:
         w = FakeWatch(self)
         self.last_watch = w
         return w
-
-
-def run_controller_main(
-    cluster: FakeK8sCluster,
-    dag: list[dict],
-    *,
-    job_name: str = "wf-abc",
-    namespace: str = "ns",
-    assets_path: str = "/assets",
-):
-    """Patch kubernetes.config/client/watch to `cluster`, patch open()/json.load
-    for dag.json, set env vars, call controller.watch.main(), return
-    (result, cluster)."""
-    if job_name not in cluster.jobsets:
-        cluster.set_controller_jobset(job_name, "uid-123")
-
-    env = {
-        "SEEKR_CHAIN_JOB_ASSET_PATH": assets_path,
-        "SEEKR_CHAIN_NAMESPACE": namespace,
-        "SEEKR_CHAIN_CONTROLLER_JOB_NAME": job_name,
-    }
-
-    def _load_manifest_mock(_assets, name):
-        return {"metadata": {"name": f"{name}-js"}, "spec": {}}
-
-    with (
-        patch.dict("os.environ", env),
-        patch.object(watch.kubernetes.config, "load_incluster_config"),
-        patch.object(watch.kubernetes.client, "CustomObjectsApi", cluster.custom_objects_api),
-        patch.object(watch.kubernetes.client, "CoreV1Api", cluster.core_v1_api),
-        patch.object(watch.kubernetes.watch, "Watch", cluster.watch),
-        patch.object(scheduling, "load_manifest", side_effect=_load_manifest_mock),
-        patch.object(watch.time, "sleep"),
-        patch(
-            "builtins.open",
-            MagicMock(
-                return_value=MagicMock(
-                    __enter__=lambda s, *a: s,
-                    __exit__=lambda s, *a: None,
-                    read=MagicMock(return_value=""),
-                )
-            ),
-        ),
-        patch.object(watch.json, "load", return_value=dag),
-    ):
-        result = watch.main()
-
-    return result, cluster

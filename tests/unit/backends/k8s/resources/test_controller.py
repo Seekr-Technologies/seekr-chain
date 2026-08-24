@@ -6,8 +6,10 @@ modules directly, avoiding any packaging side effects (e.g. seekr_chain/__init__
 pulling in boto3/kubernetes at import time).
 """
 
+import copy
 import json
 import sys
+from functools import partial
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -23,7 +25,7 @@ sys.path.insert(0, str(_RESOURCES))
 
 from controller import manifests, phases, scheduling, status, watch  # noqa: E402
 
-from .fake_k8s import FakeK8sCluster, run_controller_main  # noqa: E402
+from .fake_k8s import FakeK8sCluster  # noqa: E402
 
 cascade_fail = phases.cascade_fail
 submit_ready_steps = scheduling.submit_ready_steps
@@ -42,29 +44,73 @@ _stamp_ends = watch._stamp_ends
 # ---------------------------------------------------------------------------
 
 
-def _make_k8s_custom(events: list[dict], existing_jobsets: list[str] | None = None):
-    """Return a mock CustomObjectsApi that streams the given events."""
-    mock = MagicMock()
+def _load_manifest_mock(_assets, name):
+    """Stand in for controller.manifests.load_manifest. Includes the
+    seekr-chain/step-name label real JobSet manifests carry (see
+    templates/jobset.yaml.j2) — FakeK8sCluster reads it back to resolve a
+    create call to the step that was scripted with script_step()."""
+    return {"metadata": {"name": f"{name}-js", "labels": {"seekr-chain/step-name": name}}, "spec": {}}
 
-    # list_namespaced_custom_object returns an object with metadata.resourceVersion;
-    # the watch library calls it once to get the initial resourceVersion then streams.
-    mock.list_namespaced_custom_object.return_value = {
-        "metadata": {"resourceVersion": "0"},
-        "items": [],
+
+def _record_status_call(cluster: FakeK8sCluster, action_type: str, workflow_id, dag, phases, timings) -> None:
+    """side_effect for watch.write_status/watch.flush_status: status.py's
+    file write + S3 ship have no place in an in-memory fake, so record the
+    call on cluster.actions instead."""
+    cluster.actions.append(
+        {
+            "type": action_type,
+            "workflow_id": workflow_id,
+            "phases": dict(phases),
+            "timings": copy.deepcopy(timings),
+        }
+    )
+
+
+def run_controller_main(
+    cluster: FakeK8sCluster,
+    dag: list[dict],
+    *,
+    job_name: str = "wf-abc",
+    namespace: str = "ns",
+    assets_path: str = "/assets",
+):
+    """Patch kubernetes.config/client/watch to `cluster`, patch open()/json.load
+    for dag.json and write_status/flush_status to record onto cluster.actions,
+    set env vars, call controller.watch.main(), return (result, cluster)."""
+    if job_name not in cluster.jobsets:
+        cluster.set_controller_jobset(job_name, "uid-123")
+
+    env = {
+        "SEEKR_CHAIN_JOB_ASSET_PATH": assets_path,
+        "SEEKR_CHAIN_NAMESPACE": namespace,
+        "SEEKR_CHAIN_CONTROLLER_JOB_NAME": job_name,
     }
 
-    if existing_jobsets:
-        from kubernetes.client.exceptions import ApiException
+    with (
+        patch.dict("os.environ", env),
+        patch.object(watch.kubernetes.config, "load_incluster_config"),
+        patch.object(watch.kubernetes.client, "CustomObjectsApi", cluster.custom_objects_api),
+        patch.object(watch.kubernetes.client, "CoreV1Api", cluster.core_v1_api),
+        patch.object(watch.kubernetes.watch, "Watch", cluster.watch),
+        patch.object(scheduling, "load_manifest", side_effect=_load_manifest_mock),
+        patch.object(watch.time, "sleep"),
+        patch.object(watch, "write_status", side_effect=partial(_record_status_call, cluster, "write_status")),
+        patch.object(watch, "flush_status", side_effect=partial(_record_status_call, cluster, "flush_status")),
+        patch(
+            "builtins.open",
+            MagicMock(
+                return_value=MagicMock(
+                    __enter__=lambda s, *a: s,
+                    __exit__=lambda s, *a: None,
+                    read=MagicMock(return_value=""),
+                )
+            ),
+        ),
+        patch.object(watch.json, "load", return_value=dag),
+    ):
+        result = watch.main()
 
-        def _create_side_effect(*args, **kwargs):
-            body = kwargs.get("body", {})
-            name = body.get("metadata", {}).get("name", "")
-            if name in existing_jobsets:
-                raise ApiException(status=409)
-
-        mock.create_namespaced_custom_object.side_effect = _create_side_effect
-
-    return mock
+    return result, cluster
 
 
 # ---------------------------------------------------------------------------
@@ -156,28 +202,28 @@ class TestCascadeFail:
 
 
 class TestSubmitReadySteps:
-    def _call(self, dag, phases, existing_jobsets=None):
+    def _call(self, dag, phases, cluster=None):
+        cluster = cluster or FakeK8sCluster()
         js_names: dict = {}
         js_to_step: dict = {}
-        mock_k8s = _make_k8s_custom([], existing_jobsets=existing_jobsets)
 
         with patch.object(scheduling, "load_manifest") as mock_load:
             mock_load.side_effect = lambda _assets, name: {
                 "metadata": {"name": f"{name}-js"},
                 "spec": {},
             }
-            submit_ready_steps(dag, phases, js_names, js_to_step, "/assets", "ns", [], mock_k8s)
+            submit_ready_steps(dag, phases, js_names, js_to_step, "/assets", "ns", [], cluster.custom_objects_api())
 
-        return js_names, js_to_step, mock_k8s
+        return js_names, js_to_step, cluster
 
     def test_no_dep_step_submitted(self):
         dag = [{"name": "a", "depends_on": []}]
         phases = {"a": "PENDING"}
-        js_names, js_to_step, mock_k8s = self._call(dag, phases)
+        js_names, js_to_step, cluster = self._call(dag, phases)
         assert phases["a"] == "RUNNING"
         assert js_names["a"] == "a-js"
         assert js_to_step["a-js"] == "a"
-        mock_k8s.create_namespaced_custom_object.assert_called_once()
+        assert cluster.create_attempts == 1
 
     def test_blocked_step_not_submitted(self):
         dag = [
@@ -185,10 +231,10 @@ class TestSubmitReadySteps:
             {"name": "b", "depends_on": ["a"]},
         ]
         phases = {"a": "PENDING", "b": "PENDING"}
-        js_names, js_to_step, mock_k8s = self._call(dag, phases)
+        js_names, js_to_step, cluster = self._call(dag, phases)
         assert phases["a"] == "RUNNING"
         assert phases["b"] == "PENDING"
-        assert mock_k8s.create_namespaced_custom_object.call_count == 1
+        assert cluster.create_attempts == 1
 
     def test_unblocked_after_dep_succeeds(self):
         dag = [
@@ -196,7 +242,7 @@ class TestSubmitReadySteps:
             {"name": "b", "depends_on": ["a"]},
         ]
         phases = {"a": "SUCCEEDED", "b": "PENDING"}
-        js_names, js_to_step, mock_k8s = self._call(dag, phases)
+        js_names, js_to_step, cluster = self._call(dag, phases)
         assert phases["b"] == "RUNNING"
 
     def test_pending_step_with_skipped_dep_not_submitted(self):
@@ -208,15 +254,17 @@ class TestSubmitReadySteps:
             {"name": "b", "depends_on": ["a"]},
         ]
         phases = {"a": "SKIPPED", "b": "PENDING"}
-        js_names, js_to_step, mock_k8s = self._call(dag, phases)
+        js_names, js_to_step, cluster = self._call(dag, phases)
         assert phases["b"] == "PENDING"
-        mock_k8s.create_namespaced_custom_object.assert_not_called()
+        assert cluster.create_attempts == 0
 
     def test_409_conflict_treated_as_already_running(self):
         """On controller restart, a JobSet may already exist — 409 should not raise."""
         dag = [{"name": "a", "depends_on": []}]
         phases = {"a": "PENDING"}
-        js_names, js_to_step, mock_k8s = self._call(dag, phases, existing_jobsets=["a-js"])
+        cluster = FakeK8sCluster()
+        cluster.submit_jobset("a-js")
+        js_names, js_to_step, cluster = self._call(dag, phases, cluster=cluster)
         assert phases["a"] == "RUNNING"
         assert js_names["a"] == "a-js"
 
@@ -704,14 +752,14 @@ class TestMainLinearDag:
     def test_single_step_success(self):
         dag = [{"name": "a", "depends_on": []}]
         cluster = FakeK8sCluster()
-        cluster.complete_jobset("a-js")
+        cluster.script_step("a", exit_code=0)
         result, _ = run_controller_main(cluster, dag)
         assert result == 0
 
     def test_single_step_failure(self):
         dag = [{"name": "a", "depends_on": []}]
         cluster = FakeK8sCluster()
-        cluster.fail_jobset("a-js")
+        cluster.script_step("a", exit_code=1)
         result, _ = run_controller_main(cluster, dag)
         assert result == 0
 
@@ -721,10 +769,12 @@ class TestMainLinearDag:
             {"name": "b", "depends_on": ["a"]},
         ]
         cluster = FakeK8sCluster()
-        cluster.complete_jobset("a-js")
-        cluster.complete_jobset("b-js")
+        cluster.script_step("a", exit_code=0)
+        cluster.script_step("b", exit_code=0)
         result, _ = run_controller_main(cluster, dag)
         assert result == 0
+        # b is only submitted once a has succeeded.
+        assert [a["step"] for a in cluster.actions if a["type"] == "create_jobset"] == ["a", "b"]
 
     def test_linear_step_b_fails_returns_0(self):
         dag = [
@@ -732,8 +782,8 @@ class TestMainLinearDag:
             {"name": "b", "depends_on": ["a"]},
         ]
         cluster = FakeK8sCluster()
-        cluster.complete_jobset("a-js")
-        cluster.fail_jobset("b-js")
+        cluster.script_step("a", exit_code=0)
+        cluster.script_step("b", exit_code=1)
         result, _ = run_controller_main(cluster, dag)
         assert result == 0
 
@@ -744,9 +794,11 @@ class TestMainLinearDag:
             {"name": "b", "depends_on": ["a"]},
         ]
         cluster = FakeK8sCluster()
-        cluster.fail_jobset("a-js")
+        cluster.script_step("a", exit_code=1)
         result, _ = run_controller_main(cluster, dag)
         assert result == 0
+        # b must never be submitted — a's failure cascade-skips it.
+        assert [a["step"] for a in cluster.actions if a["type"] == "create_jobset"] == ["a"]
 
 
 class TestMainDiamondDag:
@@ -759,10 +811,10 @@ class TestMainDiamondDag:
             {"name": "d", "depends_on": ["b", "c"]},
         ]
         cluster = FakeK8sCluster()
-        cluster.complete_jobset("a-js")
-        cluster.complete_jobset("b-js")
-        cluster.complete_jobset("c-js")
-        cluster.complete_jobset("d-js")
+        cluster.script_step("a", exit_code=0)
+        cluster.script_step("b", exit_code=0)
+        cluster.script_step("c", exit_code=0)
+        cluster.script_step("d", exit_code=0)
         result, _ = run_controller_main(cluster, dag)
         assert result == 0
 
@@ -774,14 +826,20 @@ class TestMainDiamondDag:
             {"name": "d", "depends_on": ["b", "c"]},
         ]
         cluster = FakeK8sCluster()
-        cluster.complete_jobset("a-js")
-        cluster.fail_jobset("b-js")
-        cluster.complete_jobset("c-js")
+        cluster.script_step("a", exit_code=0)
+        cluster.script_step("b", exit_code=1)
+        cluster.script_step("c", exit_code=0)
         result, _ = run_controller_main(cluster, dag)
         assert result == 0
+        # d must never be submitted — it cascade-skips once b fails.
+        assert "d" not in [a["step"] for a in cluster.actions if a["type"] == "create_jobset"]
 
 
 class TestMainCancellation:
+    """Cancellation is triggered externally (`chain cancel` suspends the
+    JobSet), not by anything the controller's own create call produces — not
+    expressible via script_step, so this class keeps manual mutation."""
+
     def test_single_step_cancelled_exits(self):
         """A JobSet suspended (chain cancel) with no terminalState must not hang."""
         dag = [{"name": "a", "depends_on": []}]
@@ -812,6 +870,13 @@ class TestMainCancellation:
             {"name": "c", "depends_on": ["a"]},
             {"name": "d", "depends_on": ["b", "c"]},
         ]
+        # All three pre-populated (not script_step): a's and c's completion
+        # events must be enqueued *before* the controller starts, same as
+        # b's cancellation, so all three sit in the queue together and
+        # js_to_step catches up to each mid-drain as 409-resume tracks it.
+        # (script_step only enqueues at create time, which — mixed with an
+        # immediately-enqueued cancel — can reorder relative to when the
+        # controller starts tracking a JobSet and drop the cancel event.)
         cluster = FakeK8sCluster()
         cluster.complete_jobset("a-js")
         cluster.cancel_jobset("b-js")
@@ -832,9 +897,9 @@ class TestMainSkippedStatus:
             {"name": "d", "depends_on": ["b", "c"]},
         ]
         cluster = FakeK8sCluster()
-        cluster.complete_jobset("a-js")
-        cluster.fail_jobset("b-js")
-        cluster.complete_jobset("c-js")
+        cluster.script_step("a", exit_code=0)
+        cluster.script_step("b", exit_code=1)
+        cluster.script_step("c", exit_code=0)
 
         result, cluster = run_controller_main(cluster, dag)
 
@@ -850,7 +915,7 @@ class TestMainWatchReconnect:
         dag = [{"name": "a", "depends_on": []}]
         cluster = FakeK8sCluster()
         cluster.raise_on_next_stream(Exception("transient network error"))
-        cluster.complete_jobset("a-js")
+        cluster.script_step("a", exit_code=0)
 
         result, _ = run_controller_main(cluster, dag)
 
@@ -871,7 +936,7 @@ class TestMainWatchReconnect:
         dag = [{"name": "a", "depends_on": []}]
         cluster = FakeK8sCluster()
         cluster.raise_on_next_stream(ApiException(status=410))
-        cluster.complete_jobset("a-js")
+        cluster.script_step("a", exit_code=0)
 
         result, _ = run_controller_main(cluster, dag)
 
@@ -880,7 +945,12 @@ class TestMainWatchReconnect:
 
 class TestMainControllerRetry:
     def test_409_on_submit_treated_as_resume(self):
-        """Controller pod restarted: JobSet already exists (409). Should resume, not crash."""
+        """Controller pod restarted: JobSet already exists (409). Should resume, not crash.
+
+        submit_jobset + complete_jobset (not script_step) — the JobSet must
+        exist *before* the controller's create call, which script_step can't
+        express since it only resolves outcomes at create time.
+        """
         dag = [{"name": "a", "depends_on": []}]
         cluster = FakeK8sCluster()
         cluster.submit_jobset("a-js")
@@ -898,7 +968,7 @@ class TestMainControllerRetry:
         cluster = FakeK8sCluster()
         cluster.submit_jobset("a-js")
         cluster.complete_jobset("a-js")
-        cluster.complete_jobset("b-js")
+        cluster.script_step("b", exit_code=0)
         result, _ = run_controller_main(cluster, dag)
         assert result == 0
 
@@ -922,7 +992,7 @@ class TestMainControllerRetry:
                 "timings": json.dumps({}),
             }
         }
-        cluster.complete_jobset("b-js")
+        cluster.script_step("b", exit_code=0)
 
         result, cluster = run_controller_main(cluster, dag)
 
@@ -942,7 +1012,7 @@ class TestWatchTimeout:
         """w.stream() must be called with timeout_seconds to prevent stale heartbeat."""
         dag = [{"name": "a", "depends_on": []}]
         cluster = FakeK8sCluster()
-        cluster.complete_jobset("a-js")
+        cluster.script_step("a", exit_code=0)
 
         result, cluster = run_controller_main(cluster, dag)
 
@@ -957,7 +1027,7 @@ class TestTransientSubmitRetry:
         dag = [{"name": "a", "depends_on": []}]
         cluster = FakeK8sCluster()
         cluster.fail_next_create(500)
-        cluster.complete_jobset("a-js")
+        cluster.script_step("a", exit_code=0)
 
         result, cluster = run_controller_main(cluster, dag)
 
