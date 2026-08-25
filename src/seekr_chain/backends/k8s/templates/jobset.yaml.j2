@@ -116,6 +116,9 @@ spec:
                 ln -sf /seekr-chain/busybox /seekr-chain/bin/head
                 ln -sf /seekr-chain/busybox /seekr-chain/bin/awk
                 ln -sf /seekr-chain/busybox /seekr-chain/bin/cat
+                ln -sf /seekr-chain/busybox /seekr-chain/bin/date
+                ln -sf /seekr-chain/busybox /seekr-chain/bin/mkfifo
+                ln -sf /seekr-chain/busybox /seekr-chain/bin/rm
                 {% endif %}
                 echo "Relaxing permissions for non-root main container..."
                 # /seekr-chain itself: entrypoint writes logs.txt, .hb, .shutdown, .last_rc here
@@ -246,7 +249,7 @@ spec:
               lifecycle:
                 preStop:
                   exec:
-                    command: ["sh", "-c", "touch /seekr-chain/.shutdown || true; sleep 20 || true;"]
+                    command: ["sh", "-c", "touch /seekr-chain/.shutdown; kill -TERM 1 || true; while [ ! -f /seekr-chain/.logs_flushed ]; do sleep 1; done"]
             - name: log-sidecar
               image: {{ role.log_sidecar_image }}
               workingDir: /seekr-chain
@@ -297,7 +300,7 @@ spec:
               lifecycle:
                 preStop:
                   exec:
-                    command: ["sh", "-c", "sleep 10 || true"]
+                    command: ["sh", "-c", "while [ ! -f /seekr-chain/.logs_flushed ]; do sleep 1; done"]
               resources:
                 requests:
                   cpu: 100m

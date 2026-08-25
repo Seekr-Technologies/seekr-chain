@@ -505,13 +505,13 @@ def _select_role_runtime(role_config, *, code_path: str | None, interactive: boo
     if interactive:
         timeout = 1 * 60 * 60  # auto-timeout of 1 hour
         logger.warning("Setting auto-timeout of 1 hour")
-        step_args = f"sleep {timeout}"
+        step_args = f"exec sleep {timeout}"
     elif role_config.nix is not None:
         step_args = _NIX_MAIN_STEP_ARGS.format(
             entrypoint=f"{constants.JOB_RESOURCES_PATH}/chain-entrypoint.sh",
         )
     else:
-        step_args = f"{constants.JOB_RESOURCES_PATH}/chain-entrypoint.sh"
+        step_args = f"exec {constants.JOB_RESOURCES_PATH}/chain-entrypoint.sh"
 
     return main_image, step_args, nix_main_env, nix_init_ctx, nix_volume_ctx
 

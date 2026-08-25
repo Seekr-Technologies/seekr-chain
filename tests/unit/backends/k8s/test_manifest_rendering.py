@@ -301,9 +301,19 @@ class TestJobsetTemplateRendering:
         manifest = yaml.safe_load(rendered)
 
         pod_spec = manifest["spec"]["replicatedJobs"][0]["template"]["spec"]["template"]["spec"]
-        container_names = [c["name"] for c in pod_spec["containers"]]
-        assert "main" in container_names
-        assert "log-sidecar" in container_names
+        containers = {container["name"]: container for container in pod_spec["containers"]}
+
+        assert containers["main"]["args"] == ["exec /seekr-chain/resources/chain-entrypoint.sh"]
+        assert containers["main"]["lifecycle"]["preStop"]["exec"]["command"] == [
+            "sh",
+            "-c",
+            "touch /seekr-chain/.shutdown; kill -TERM 1 || true; while [ ! -f /seekr-chain/.logs_flushed ]; do sleep 1; done",
+        ]
+        assert containers["log-sidecar"]["lifecycle"]["preStop"]["exec"]["command"] == [
+            "sh",
+            "-c",
+            "while [ ! -f /seekr-chain/.logs_flushed ]; do sleep 1; done",
+        ]
 
     def test_env_vars_present(self, tmp_path):
         config = _minimal_config()
