@@ -222,3 +222,27 @@ class TestCodeStaging:
 
         assert captured["staged_code_dir"] is not None
         assert captured["workspace_file_is_symlink"] is True
+
+    def test_step_service_account_does_not_inherit_controller_account(self, monkeypatch):
+        captured = {}
+        self._mock_pipeline(monkeypatch, captured)
+        monkeypatch.setattr(lkw_module, "_user_config", UserConfig(service_account="controller"))
+        monkeypatch.setattr(lkw_module, "_package_assets", lambda **kwargs: captured.update(kwargs))
+
+        lkw_module.launch_k8s_workflow(_make_config())
+
+        assert captured["step_service_account"] is None
+
+    def test_step_service_account_is_passed_to_step_manifests(self, monkeypatch):
+        captured = {}
+        self._mock_pipeline(monkeypatch, captured)
+        monkeypatch.setattr(
+            lkw_module,
+            "_user_config",
+            UserConfig(service_account="controller", step_service_account="workflow-runner"),
+        )
+        monkeypatch.setattr(lkw_module, "_package_assets", lambda **kwargs: captured.update(kwargs))
+
+        lkw_module.launch_k8s_workflow(_make_config())
+
+        assert captured["step_service_account"] == "workflow-runner"

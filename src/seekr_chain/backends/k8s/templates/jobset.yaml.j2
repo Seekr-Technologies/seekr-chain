@@ -79,6 +79,9 @@ spec:
               {% endif %}
           spec:
             restartPolicy: Never
+            {% if step_service_account %}
+            serviceAccountName: {{ step_service_account }}
+            {% endif %}
             hostNetwork: {{ role.host_network | to_yaml_bool }}
             dnsPolicy: {{ 'ClusterFirstWithHostNet' if role.host_network else 'ClusterFirst' }}
             terminationGracePeriodSeconds: 30

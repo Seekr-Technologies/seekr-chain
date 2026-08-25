@@ -151,3 +151,25 @@ class TestControllerImageConfig:
         with no_dotenv(), no_toml_files():
             cfg = _load_config()
         assert cfg.controller_image is None
+
+
+class TestStepServiceAccountConfig:
+    def test_env_var(self, monkeypatch):
+        monkeypatch.setenv("SEEKRCHAIN_STEP_SERVICE_ACCOUNT", "workflow-runner")
+        with no_dotenv(), no_toml_files():
+            cfg = _load_config()
+        assert cfg.step_service_account == "workflow-runner"
+
+    def test_local_seekrchain_toml(self, monkeypatch, tmp_path):
+        monkeypatch.delenv("SEEKRCHAIN_STEP_SERVICE_ACCOUNT", raising=False)
+        toml_file = tmp_path / ".seekrchain.toml"
+        toml_file.write_text('step_service_account = "workflow-runner"\n')
+        with no_dotenv(), patch("seekr_chain.user_config._find_file_walking_up", return_value=toml_file):
+            cfg = _load_config()
+        assert cfg.step_service_account == "workflow-runner"
+
+    def test_returns_none_when_nothing_set(self, monkeypatch):
+        monkeypatch.delenv("SEEKRCHAIN_STEP_SERVICE_ACCOUNT", raising=False)
+        with no_dotenv(), no_toml_files():
+            cfg = _load_config()
+        assert cfg.step_service_account is None
