@@ -180,6 +180,7 @@ def _package_assets(
     workflow_name: str,
     workflow_secrets: list[dict],
     interactive: bool,
+    step_service_account: str | None = None,
 ):
     """Package up assets (code, scripts, jobset manifests, DAG definition) and upload to S3.
 
@@ -214,6 +215,7 @@ def _package_assets(
             workflow_secrets=workflow_secrets,
             interactive=interactive,
             assets_path=assets_path,
+            step_service_account=step_service_account,
         )
 
         # Write jobset manifest alongside the step's other assets
@@ -468,6 +470,7 @@ def launch_k8s_workflow(
             workflow_name=workflow_id,
             workflow_secrets=workflow_secrets,
             interactive=interactive,
+            step_service_account=_user_config.step_service_account,
         )
 
     _create_secrets(workflow_id, s3_creds, config)

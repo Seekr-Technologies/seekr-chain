@@ -922,6 +922,7 @@ def build_jobset_context(
     workflow_secrets,
     interactive: bool,
     assets_path: Path,
+    step_service_account: str | None = None,
 ) -> tuple[str, dict]:
     """Build the Jinja2 template context for a JobSet manifest.
 
@@ -958,6 +959,7 @@ def build_jobset_context(
         "step_name": step_name,
         "workflow_name": workflow_name,
         "remote_assets_path": job_info["remote_assets_path"],
+        "step_service_account": step_service_account,
         "success_policy": _build_success_policy(step_config),
         "failure_policy": _build_failure_policy(step_config),
         "affinity": affinity,
@@ -992,6 +994,7 @@ def create_jobset_manifest(
     workflow_secrets,
     interactive: bool,
     assets_path: Path,
+    step_service_account: str | None = None,
 ) -> tuple[str, str]:
     """Build and render the JobSet manifest.
 
@@ -1007,6 +1010,7 @@ def create_jobset_manifest(
         workflow_secrets=workflow_secrets,
         interactive=interactive,
         assets_path=assets_path,
+        step_service_account=step_service_account,
     )
 
     rendered = render.render("jobset.yaml.j2", context)

@@ -45,3 +45,5 @@ SEEKRCHAIN_DATASTORE_ROOT=s3://my-bucket/seekr-chain/
 | Setting | Env var | TOML key | Description |
 |---------|---------|----------|-------------|
 | Datastore root | `SEEKRCHAIN_DATASTORE_ROOT` | `datastore_root` | S3 path where job data is stored, e.g. `s3://my-bucket/seekr-chain/` |
+| Controller ServiceAccount | `SEEKRCHAIN_SERVICE_ACCOUNT` | `service_account` | ServiceAccount for the controller pod; defaults to automatic detection. |
+| Step ServiceAccount | `SEEKRCHAIN_STEP_SERVICE_ACCOUNT` | `step_service_account` | Optional ServiceAccount for step pods; when unset, Kubernetes uses the namespace default. |

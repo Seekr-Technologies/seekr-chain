@@ -35,6 +35,44 @@ def _fake_job_info():
 
 
 class TestJobsetTemplateRendering:
+    def test_uses_configured_step_service_account(self, tmp_path):
+        config = _minimal_config()
+
+        _, context = build_jobset_context(
+            workflow_config=config,
+            step_index=0,
+            job_info=_fake_job_info(),
+            workflow_name="ab1234",
+            workflow_secrets=[],
+            interactive=False,
+            assets_path=tmp_path / "assets",
+            step_service_account="workflow-runner",
+        )
+
+        manifest = yaml.safe_load(render.render("jobset.yaml.j2", context))
+
+        assert (
+            manifest["spec"]["replicatedJobs"][0]["template"]["spec"]["template"]["spec"]["serviceAccountName"]
+            == "workflow-runner"
+        )
+
+    def test_omits_service_account_by_default(self, tmp_path):
+        config = _minimal_config()
+
+        _, context = build_jobset_context(
+            workflow_config=config,
+            step_index=0,
+            job_info=_fake_job_info(),
+            workflow_name="ab1234",
+            workflow_secrets=[],
+            interactive=False,
+            assets_path=tmp_path / "assets",
+        )
+
+        manifest = yaml.safe_load(render.render("jobset.yaml.j2", context))
+
+        assert "serviceAccountName" not in manifest["spec"]["replicatedJobs"][0]["template"]["spec"]["template"]["spec"]
+
     def test_renders_valid_yaml(self, tmp_path):
         config = _minimal_config()
         job_info = _fake_job_info()
