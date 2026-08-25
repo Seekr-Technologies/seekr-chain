@@ -45,6 +45,7 @@ class PodStatus(str, Enum):
     SUCCEEDED = "SUCCEEDED"
     FAILED = "FAILED"
     TERMINATED = "TERMINATED"
+    SKIPPED = "SKIPPED"
 
     @classmethod
     def _order(cls):
