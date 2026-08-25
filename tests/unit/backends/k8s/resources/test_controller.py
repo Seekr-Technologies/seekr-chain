@@ -6,9 +6,12 @@ modules directly, avoiding any packaging side effects (e.g. seekr_chain/__init__
 pulling in boto3/kubernetes at import time).
 """
 
+import json
 import sys
 from pathlib import Path
 from unittest.mock import MagicMock, patch
+
+import pytest
 
 # ---------------------------------------------------------------------------
 # Bootstrap: make controller importable as a top-level package, exactly as it
@@ -18,13 +21,18 @@ from unittest.mock import MagicMock, patch
 _RESOURCES = Path(__file__).resolve().parents[5] / "src/seekr_chain/backends/k8s/resources"
 sys.path.insert(0, str(_RESOURCES))
 
-from controller import manifests, phases, scheduling, watch  # noqa: E402
+from controller import manifests, phases, scheduling, status, watch  # noqa: E402
 
 cascade_fail = phases.cascade_fail
 submit_ready_steps = scheduling.submit_ready_steps
 load_manifest = manifests.load_manifest
 load_phases = phases.load_phases
 save_phases = phases.save_phases
+_workflow_status_from_phases = status._workflow_status_from_phases
+_build_status = status._build_status
+write_status = status.write_status
+_stamp_starts = watch._stamp_starts
+_stamp_ends = watch._stamp_ends
 
 
 # ---------------------------------------------------------------------------
@@ -277,7 +285,7 @@ class TestSubmitReadySteps:
 
 
 class TestLoadPhases:
-    def _make_v1(self, cm_data: dict | None = None, status: int | None = None):
+    def _make_v1(self, cm_data: dict | None = None, timings_data: dict | None = None, status: int | None = None):
         """Return a mock CoreV1Api for ConfigMap reads."""
         from kubernetes.client.exceptions import ApiException
 
@@ -289,6 +297,8 @@ class TestLoadPhases:
 
             cm = MagicMock()
             cm.data = {"phases": json.dumps(cm_data)}
+            if timings_data is not None:
+                cm.data["timings"] = json.dumps(timings_data)
             mock.read_namespaced_config_map.return_value = cm
         else:
             mock.read_namespaced_config_map.side_effect = ApiException(status=404)
@@ -296,13 +306,14 @@ class TestLoadPhases:
 
     def test_no_configmap_returns_all_pending(self):
         dag = [{"name": "a"}, {"name": "b"}]
-        phases = load_phases(self._make_v1(status=404), "ns", "wf-abc", dag)
+        phases, timings = load_phases(self._make_v1(status=404), "ns", "wf-abc", dag)
         assert phases == {"a": "PENDING", "b": "PENDING"}
+        assert timings == {}
 
     def test_restores_succeeded_and_failed(self):
         dag = [{"name": "a"}, {"name": "b"}, {"name": "c"}]
         saved = {"a": "SUCCEEDED", "b": "FAILED", "c": "RUNNING"}
-        phases = load_phases(self._make_v1(cm_data=saved), "ns", "wf-abc", dag)
+        phases, _ = load_phases(self._make_v1(cm_data=saved), "ns", "wf-abc", dag)
         assert phases["a"] == "SUCCEEDED"
         assert phases["b"] == "FAILED"
         # RUNNING is reset to PENDING on restore
@@ -311,22 +322,40 @@ class TestLoadPhases:
     def test_restores_skipped(self):
         dag = [{"name": "a"}, {"name": "b"}]
         saved = {"a": "FAILED", "b": "SKIPPED"}
-        phases = load_phases(self._make_v1(cm_data=saved), "ns", "wf-abc", dag)
+        phases, _ = load_phases(self._make_v1(cm_data=saved), "ns", "wf-abc", dag)
         assert phases == {"a": "FAILED", "b": "SKIPPED"}
 
     def test_ignores_unknown_step_names(self):
         """ConfigMap may contain stale step names that no longer exist in the DAG."""
         dag = [{"name": "a"}]
         saved = {"a": "SUCCEEDED", "stale-step": "FAILED"}
-        phases = load_phases(self._make_v1(cm_data=saved), "ns", "wf-abc", dag)
+        phases, _ = load_phases(self._make_v1(cm_data=saved), "ns", "wf-abc", dag)
         assert phases == {"a": "SUCCEEDED"}
         assert "stale-step" not in phases
 
     def test_non_404_api_error_is_warned_not_raised(self):
         dag = [{"name": "a"}]
         # 500 error should not propagate — fall back to all-PENDING
-        phases = load_phases(self._make_v1(status=500), "ns", "wf-abc", dag)
+        phases, timings = load_phases(self._make_v1(status=500), "ns", "wf-abc", dag)
         assert phases == {"a": "PENDING"}
+        assert timings == {}
+
+    def test_restores_timings_for_terminal_step(self):
+        dag = [{"name": "a"}]
+        saved = {"a": "SUCCEEDED"}
+        saved_timings = {"a": {"dt_start": "2026-01-01T00:00:00Z", "dt_end": "2026-01-01T00:00:05Z"}}
+        _, timings = load_phases(self._make_v1(cm_data=saved, timings_data=saved_timings), "ns", "wf-abc", dag)
+        assert timings == saved_timings
+
+    def test_drops_timings_for_step_reset_running_to_pending(self):
+        """A RUNNING step is reset to PENDING on restore, so its timings must
+        be dropped too — otherwise a re-run would carry stale start/end times."""
+        dag = [{"name": "a"}]
+        saved = {"a": "RUNNING"}
+        saved_timings = {"a": {"dt_start": "2026-01-01T00:00:00Z"}}
+        phases, timings = load_phases(self._make_v1(cm_data=saved, timings_data=saved_timings), "ns", "wf-abc", dag)
+        assert phases == {"a": "PENDING"}
+        assert timings == {}
 
 
 class TestSavePhases:
@@ -338,7 +367,7 @@ class TestSavePhases:
         mock_v1.patch_namespaced_config_map.side_effect = ApiException(status=404)
         mock_v1.create_namespaced_config_map.return_value = {}
 
-        save_phases(mock_v1, "ns", "wf-abc", {"a": "SUCCEEDED"}, [])
+        save_phases(mock_v1, "ns", "wf-abc", {"a": "SUCCEEDED"}, {}, [])
 
         mock_v1.create_namespaced_config_map.assert_called_once()
 
@@ -346,7 +375,7 @@ class TestSavePhases:
         mock_v1 = MagicMock()
         mock_v1.patch_namespaced_config_map.return_value = {}
 
-        save_phases(mock_v1, "ns", "wf-abc", {"a": "SUCCEEDED"}, [])
+        save_phases(mock_v1, "ns", "wf-abc", {"a": "SUCCEEDED"}, {}, [])
 
         mock_v1.patch_namespaced_config_map.assert_called_once()
         mock_v1.create_namespaced_config_map.assert_not_called()
@@ -359,7 +388,326 @@ class TestSavePhases:
         mock_v1.patch_namespaced_config_map.side_effect = ApiException(status=500)
 
         # Should not raise
-        save_phases(mock_v1, "ns", "wf-abc", {"a": "SUCCEEDED"}, [])
+        save_phases(mock_v1, "ns", "wf-abc", {"a": "SUCCEEDED"}, {}, [])
+
+    def test_persists_both_phases_and_timings_keys(self):
+        mock_v1 = MagicMock()
+        mock_v1.patch_namespaced_config_map.return_value = {}
+        timings = {"a": {"dt_start": "2026-01-01T00:00:00Z", "dt_end": "2026-01-01T00:00:05Z"}}
+
+        save_phases(mock_v1, "ns", "wf-abc", {"a": "SUCCEEDED"}, timings, [])
+
+        data = mock_v1.patch_namespaced_config_map.call_args.kwargs["body"]["data"]
+        assert json.loads(data["phases"]) == {"a": "SUCCEEDED"}
+        assert json.loads(data["timings"]) == timings
+
+
+class TestDeriveStatus:
+    @pytest.mark.parametrize(
+        "phases, expected",
+        [
+            ({"a": "CANCELLED", "b": "FAILED"}, "TERMINATED"),
+            ({"a": "CANCELLED", "b": "SUCCEEDED"}, "TERMINATED"),
+            ({"a": "FAILED", "b": "SUCCEEDED"}, "FAILED"),
+            ({"a": "SUCCEEDED", "b": "SKIPPED"}, "SUCCEEDED"),
+            ({"a": "SUCCEEDED", "b": "RUNNING"}, "RUNNING"),
+            ({"a": "PENDING", "b": "PENDING"}, "RUNNING"),
+        ],
+    )
+    def test_precedence(self, phases, expected):
+        assert _workflow_status_from_phases(phases) == expected
+
+
+class TestBuildStatus:
+    def test_schema_shape_with_skipped_step_and_timings(self):
+        dag = [
+            {"name": "a", "depends_on": []},
+            {"name": "b", "depends_on": ["a"]},
+            {"name": "c", "depends_on": ["a"]},
+        ]
+        phases = {"a": "FAILED", "b": "SKIPPED", "c": "SKIPPED"}
+        timings = {"a": {"dt_start": "2026-01-01T00:00:00Z", "dt_end": "2026-01-01T00:00:05Z"}}
+
+        result = _build_status("wf-abc", dag, phases, timings)
+
+        captured_at = result.pop("captured_at")
+        assert isinstance(captured_at, str) and captured_at
+        assert result == {
+            "schema_version": 1,
+            "id": "wf-abc",
+            "status": "FAILED",
+            "steps": [
+                {
+                    "name": "a",
+                    "phase": "FAILED",
+                    "dt_start": "2026-01-01T00:00:00Z",
+                    "dt_end": "2026-01-01T00:00:05Z",
+                },
+                {"name": "b", "phase": "SKIPPED", "dt_start": None, "dt_end": None},
+                {"name": "c", "phase": "SKIPPED", "dt_start": None, "dt_end": None},
+            ],
+        }
+
+    def test_schema_shape_when_succeeded(self):
+        dag = [{"name": "a", "depends_on": []}, {"name": "b", "depends_on": ["a"]}]
+        phases = {"a": "SUCCEEDED", "b": "SUCCEEDED"}
+        timings = {
+            "a": {"dt_start": "2026-01-01T00:00:00Z", "dt_end": "2026-01-01T00:00:05Z"},
+            "b": {"dt_start": "2026-01-01T00:00:06Z", "dt_end": "2026-01-01T00:00:10Z"},
+        }
+
+        result = _build_status("wf-abc", dag, phases, timings)
+
+        captured_at = result.pop("captured_at")
+        assert isinstance(captured_at, str) and captured_at
+        assert result == {
+            "schema_version": 1,
+            "id": "wf-abc",
+            "status": "SUCCEEDED",
+            "steps": [
+                {
+                    "name": "a",
+                    "phase": "SUCCEEDED",
+                    "dt_start": "2026-01-01T00:00:00Z",
+                    "dt_end": "2026-01-01T00:00:05Z",
+                },
+                {
+                    "name": "b",
+                    "phase": "SUCCEEDED",
+                    "dt_start": "2026-01-01T00:00:06Z",
+                    "dt_end": "2026-01-01T00:00:10Z",
+                },
+            ],
+        }
+
+    def test_schema_shape_when_cancelled(self):
+        dag = [{"name": "a", "depends_on": []}, {"name": "b", "depends_on": ["a"]}]
+        phases = {"a": "SUCCEEDED", "b": "CANCELLED"}
+        timings = {"a": {"dt_start": "2026-01-01T00:00:00Z", "dt_end": "2026-01-01T00:00:05Z"}}
+
+        result = _build_status("wf-abc", dag, phases, timings)
+
+        captured_at = result.pop("captured_at")
+        assert isinstance(captured_at, str) and captured_at
+        assert result == {
+            "schema_version": 1,
+            "id": "wf-abc",
+            "status": "TERMINATED",
+            "steps": [
+                {
+                    "name": "a",
+                    "phase": "SUCCEEDED",
+                    "dt_start": "2026-01-01T00:00:00Z",
+                    "dt_end": "2026-01-01T00:00:05Z",
+                },
+                {"name": "b", "phase": "CANCELLED", "dt_start": None, "dt_end": None},
+            ],
+        }
+
+
+class TestWriteStatus:
+    """Round-trip tests for write_status(): the actual file writer, previously untested."""
+
+    def _write_and_read(self, tmp_path, monkeypatch, workflow_id, dag, phases, timings):
+        monkeypatch.setattr(status, "_STATUS_PATH", str(tmp_path / "status.json"))
+        monkeypatch.delenv(status._REMOTE_STATUS_ENV, raising=False)
+        write_status(workflow_id, dag, phases, timings)
+        with open(tmp_path / "status.json") as f:
+            doc = json.load(f)
+        captured_at = doc.pop("captured_at")
+        assert isinstance(captured_at, str) and captured_at
+        return doc
+
+    def test_writes_succeeded_doc(self, tmp_path, monkeypatch):
+        dag = [{"name": "a", "depends_on": []}, {"name": "b", "depends_on": ["a"]}]
+        phases = {"a": "SUCCEEDED", "b": "SUCCEEDED"}
+        timings = {
+            "a": {"dt_start": "2026-01-01T00:00:00Z", "dt_end": "2026-01-01T00:00:05Z"},
+            "b": {"dt_start": "2026-01-01T00:00:06Z", "dt_end": "2026-01-01T00:00:10Z"},
+        }
+        doc = self._write_and_read(tmp_path, monkeypatch, "wf-abc", dag, phases, timings)
+        assert doc == {
+            "schema_version": 1,
+            "id": "wf-abc",
+            "status": "SUCCEEDED",
+            "steps": [
+                {
+                    "name": "a",
+                    "phase": "SUCCEEDED",
+                    "dt_start": "2026-01-01T00:00:00Z",
+                    "dt_end": "2026-01-01T00:00:05Z",
+                },
+                {
+                    "name": "b",
+                    "phase": "SUCCEEDED",
+                    "dt_start": "2026-01-01T00:00:06Z",
+                    "dt_end": "2026-01-01T00:00:10Z",
+                },
+            ],
+        }
+
+    def test_writes_failed_and_skipped_doc(self, tmp_path, monkeypatch):
+        dag = [
+            {"name": "a", "depends_on": []},
+            {"name": "b", "depends_on": ["a"]},
+            {"name": "c", "depends_on": ["a"]},
+        ]
+        phases = {"a": "FAILED", "b": "SKIPPED", "c": "SKIPPED"}
+        timings = {"a": {"dt_start": "2026-01-01T00:00:00Z", "dt_end": "2026-01-01T00:00:05Z"}}
+        doc = self._write_and_read(tmp_path, monkeypatch, "wf-abc", dag, phases, timings)
+        assert doc == {
+            "schema_version": 1,
+            "id": "wf-abc",
+            "status": "FAILED",
+            "steps": [
+                {
+                    "name": "a",
+                    "phase": "FAILED",
+                    "dt_start": "2026-01-01T00:00:00Z",
+                    "dt_end": "2026-01-01T00:00:05Z",
+                },
+                {"name": "b", "phase": "SKIPPED", "dt_start": None, "dt_end": None},
+                {"name": "c", "phase": "SKIPPED", "dt_start": None, "dt_end": None},
+            ],
+        }
+
+    def test_writes_cancelled_doc_as_terminated(self, tmp_path, monkeypatch):
+        dag = [{"name": "a", "depends_on": []}, {"name": "b", "depends_on": ["a"]}]
+        phases = {"a": "SUCCEEDED", "b": "CANCELLED"}
+        timings = {"a": {"dt_start": "2026-01-01T00:00:00Z", "dt_end": "2026-01-01T00:00:05Z"}}
+        doc = self._write_and_read(tmp_path, monkeypatch, "wf-abc", dag, phases, timings)
+        assert doc == {
+            "schema_version": 1,
+            "id": "wf-abc",
+            "status": "TERMINATED",
+            "steps": [
+                {
+                    "name": "a",
+                    "phase": "SUCCEEDED",
+                    "dt_start": "2026-01-01T00:00:00Z",
+                    "dt_end": "2026-01-01T00:00:05Z",
+                },
+                {"name": "b", "phase": "CANCELLED", "dt_start": None, "dt_end": None},
+            ],
+        }
+
+    def test_writes_running_doc(self, tmp_path, monkeypatch):
+        dag = [{"name": "a", "depends_on": []}, {"name": "b", "depends_on": ["a"]}]
+        phases = {"a": "SUCCEEDED", "b": "RUNNING"}
+        timings = {"a": {"dt_start": "2026-01-01T00:00:00Z", "dt_end": "2026-01-01T00:00:05Z"}}
+        doc = self._write_and_read(tmp_path, monkeypatch, "wf-abc", dag, phases, timings)
+        assert doc == {
+            "schema_version": 1,
+            "id": "wf-abc",
+            "status": "RUNNING",
+            "steps": [
+                {
+                    "name": "a",
+                    "phase": "SUCCEEDED",
+                    "dt_start": "2026-01-01T00:00:00Z",
+                    "dt_end": "2026-01-01T00:00:05Z",
+                },
+                {"name": "b", "phase": "RUNNING", "dt_start": None, "dt_end": None},
+            ],
+        }
+
+
+class TestShipOnce:
+    """_ship_once() is the s5cmd upload boundary: it must invoke s5cmd exactly
+    when shipping is configured, and never raise regardless of subprocess
+    outcome."""
+
+    def test_invokes_s5cmd_with_status_path_and_remote_when_configured(self, monkeypatch):
+        monkeypatch.setenv(status._REMOTE_STATUS_ENV, "s3://bucket/jobs/wf/abc/status.json")
+        captured = []
+        monkeypatch.setattr(status.subprocess, "run", lambda argv, **kwargs: captured.append(argv))
+        status._ship_once()
+        assert captured == [["s5cmd", "cp", status._STATUS_PATH, "s3://bucket/jobs/wf/abc/status.json"]]
+
+    def test_does_not_invoke_s5cmd_when_remote_path_unset(self, monkeypatch):
+        monkeypatch.delenv(status._REMOTE_STATUS_ENV, raising=False)
+        calls = []
+        monkeypatch.setattr(status.subprocess, "run", lambda *a, **k: calls.append((a, k)))
+        status._ship_once()
+        assert calls == []
+
+    def test_swallows_subprocess_timeout(self, monkeypatch):
+        monkeypatch.setenv(status._REMOTE_STATUS_ENV, "s3://bucket/jobs/wf/abc/status.json")
+
+        def _raise(*a, **k):
+            raise status.subprocess.TimeoutExpired(cmd="s5cmd", timeout=15)
+
+        monkeypatch.setattr(status.subprocess, "run", _raise)
+        assert status._ship_once() is None
+
+    def test_swallows_generic_exception(self, monkeypatch):
+        monkeypatch.setenv(status._REMOTE_STATUS_ENV, "s3://bucket/jobs/wf/abc/status.json")
+
+        def _raise(*a, **k):
+            raise RuntimeError("boom")
+
+        monkeypatch.setattr(status.subprocess, "run", _raise)
+        assert status._ship_once() is None
+
+
+class TestStampTimings:
+    """_stamp_starts/_stamp_ends only record run timestamps for steps that
+    actually ran — SKIPPED (and any other never-started) steps must carry
+    neither dt_start nor dt_end."""
+
+    def test_skipped_step_gets_no_timestamps(self):
+        phases = {"a": "FAILED", "b": "SKIPPED"}
+        dag = [{"name": "a", "depends_on": []}, {"name": "b", "depends_on": ["a"]}]
+        timings = {"a": {"dt_start": "2026-01-01T00:00:00Z"}}
+
+        _stamp_starts(dag, phases, timings)
+        _stamp_ends(phases, timings)
+
+        assert set(timings.get("b", {}).keys()) == set()
+
+    def test_running_step_gets_only_dt_start(self):
+        dag = [{"name": "a", "depends_on": []}]
+        phases = {"a": "RUNNING"}
+        timings = {}
+
+        _stamp_starts(dag, phases, timings)
+        _stamp_ends(phases, timings)
+
+        assert set(timings["a"].keys()) == {"dt_start"}
+        assert isinstance(timings["a"]["dt_start"], str) and timings["a"]["dt_start"]
+
+    def test_ran_terminal_step_gets_both_timestamps(self):
+        dag = [{"name": "a", "depends_on": []}, {"name": "b", "depends_on": []}]
+        phases = {"a": "SUCCEEDED", "b": "FAILED"}
+        timings = {}
+
+        _stamp_starts(dag, phases, timings)
+        _stamp_ends(phases, timings)
+
+        for name in ("a", "b"):
+            assert set(timings[name].keys()) == {"dt_start", "dt_end"}
+            assert isinstance(timings[name]["dt_start"], str) and timings[name]["dt_start"]
+            assert isinstance(timings[name]["dt_end"], str) and timings[name]["dt_end"]
+
+    def test_dt_end_never_set_without_a_prior_dt_start(self):
+        """Guards the end-before-start bug: a step reaching a terminal phase
+        without ever recording a dt_start (e.g. SKIPPED, cascaded straight
+        from PENDING) must not get a dt_end either."""
+        phases = {"b": "SKIPPED"}
+        timings = {}
+
+        _stamp_ends(phases, timings)
+
+        assert set(timings.get("b", {}).keys()) == set()
+
+    def test_stamp_starts_is_idempotent(self):
+        dag = [{"name": "a", "depends_on": []}]
+        phases = {"a": "RUNNING"}
+        timings = {"a": {"dt_start": "2026-01-01T00:00:00Z"}}
+
+        _stamp_starts(dag, phases, timings)
+
+        assert timings["a"]["dt_start"] == "2026-01-01T00:00:00Z"
 
 
 # ---------------------------------------------------------------------------
@@ -425,8 +773,8 @@ def _run_main(
     # load_phases: return persisted state if provided, otherwise all-PENDING
     def _load_phases_mock(_v1, _ns, _wid, dag):
         if initial_phases is not None:
-            return dict(initial_phases)
-        return {s["name"]: "PENDING" for s in dag}
+            return dict(initial_phases), {}
+        return {s["name"]: "PENDING" for s in dag}, {}
 
     with (
         patch.dict("os.environ", env),
@@ -661,7 +1009,9 @@ class TestMainWatchReconnect:
             patch.object(watch.kubernetes.client, "CoreV1Api", MagicMock()),
             patch.object(watch.kubernetes, "watch", MagicMock(Watch=mock_watch_cls)),
             patch.object(scheduling, "load_manifest", return_value={"metadata": {"name": "a-js"}, "spec": {}}),
-            patch.object(watch, "load_phases", side_effect=lambda _v1, _ns, _wid, d: {s["name"]: "PENDING" for s in d}),
+            patch.object(
+                watch, "load_phases", side_effect=lambda _v1, _ns, _wid, d: ({s["name"]: "PENDING" for s in d}, {})
+            ),
             patch.object(watch, "save_phases"),
             patch.object(watch, "emit_event"),
             patch.object(watch, "touch_heartbeat"),
@@ -713,7 +1063,9 @@ class TestMainWatchReconnect:
             patch.object(watch.kubernetes.client, "CoreV1Api", MagicMock()),
             patch.object(watch.kubernetes, "watch", MagicMock(Watch=mock_watch_cls)),
             patch.object(scheduling, "load_manifest", return_value={"metadata": {"name": "a-js"}, "spec": {}}),
-            patch.object(watch, "load_phases", side_effect=lambda _v1, _ns, _wid, d: {s["name"]: "PENDING" for s in d}),
+            patch.object(
+                watch, "load_phases", side_effect=lambda _v1, _ns, _wid, d: ({s["name"]: "PENDING" for s in d}, {})
+            ),
             patch.object(watch, "save_phases"),
             patch.object(watch, "emit_event"),
             patch.object(watch, "touch_heartbeat"),
@@ -809,7 +1161,7 @@ class TestMainControllerRetry:
             patch.object(watch.kubernetes.client, "CoreV1Api", MagicMock()),
             patch.object(watch.kubernetes, "watch", MagicMock(Watch=mock_watch_cls)),
             patch.object(scheduling, "load_manifest", side_effect=_load_manifest_mock),
-            patch.object(watch, "load_phases", return_value=dict(persisted)),
+            patch.object(watch, "load_phases", return_value=(dict(persisted), {})),
             patch.object(watch, "save_phases"),
             patch.object(watch, "emit_event"),
             patch.object(watch, "touch_heartbeat"),
@@ -865,7 +1217,9 @@ class TestWatchTimeout:
             patch.object(watch.kubernetes.client, "CoreV1Api", MagicMock()),
             patch.object(watch.kubernetes, "watch", MagicMock(Watch=mock_watch_cls)),
             patch.object(scheduling, "load_manifest", return_value={"metadata": {"name": "a-js"}, "spec": {}}),
-            patch.object(watch, "load_phases", side_effect=lambda _v1, _ns, _wid, d: {s["name"]: "PENDING" for s in d}),
+            patch.object(
+                watch, "load_phases", side_effect=lambda _v1, _ns, _wid, d: ({s["name"]: "PENDING" for s in d}, {})
+            ),
             patch.object(watch, "save_phases"),
             patch.object(watch, "emit_event"),
             patch.object(watch, "touch_heartbeat"),
@@ -931,7 +1285,9 @@ class TestTransientSubmitRetry:
             patch.object(watch.kubernetes.client, "CoreV1Api", MagicMock()),
             patch.object(watch.kubernetes, "watch", MagicMock(Watch=mock_watch_cls)),
             patch.object(scheduling, "load_manifest", return_value={"metadata": {"name": "a-js"}, "spec": {}}),
-            patch.object(watch, "load_phases", side_effect=lambda _v1, _ns, _wid, d: {s["name"]: "PENDING" for s in d}),
+            patch.object(
+                watch, "load_phases", side_effect=lambda _v1, _ns, _wid, d: ({s["name"]: "PENDING" for s in d}, {})
+            ),
             patch.object(watch, "save_phases"),
             patch.object(watch, "emit_event"),
             patch.object(watch, "touch_heartbeat"),

@@ -6,7 +6,18 @@ import re
 import pytest
 
 import seekr_chain
+from seekr_chain import remote_fs
 from seekr_chain._testing import assert_nested_match, assert_patterns_match
+
+# The controller's status.json timestamps come from timeutil.now_iso(), which
+# renders UTC time with a trailing "Z".
+ISO_TS = r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,6})?Z"
+
+
+def _read_status_json(s3_path, s3_client):
+    bucket, key = remote_fs.parse_uri(remote_fs.join(s3_path, "status.json"))
+    body = s3_client.get_object(Bucket=bucket, Key=key)["Body"].read()
+    return json.loads(body)
 
 
 def _is_worker_node(node):
@@ -703,7 +714,7 @@ class TestDAGJob:
 
         assert_nested_match(logs, expected)
 
-    def test_step_fail(self):
+    def test_step_fail(self, s3_client):
         """When a dependency step fails, its downstream steps must not run."""
         config = seekr_chain.WorkflowConfig.model_validate(
             {
@@ -737,6 +748,21 @@ class TestDAGJob:
         assert "step=a" in logs
         # B was skipped because A failed — no logs
         assert "step=b" not in logs
+
+        status_doc = _read_status_json(job._job_info["s3_path"], s3_client)
+        assert_nested_match(
+            status_doc,
+            {
+                "schema_version": 1,
+                "id": re.escape(job.id),
+                "status": "FAILED",
+                "steps": [
+                    {"name": "a", "phase": "FAILED", "dt_start": ISO_TS, "dt_end": ISO_TS},
+                    {"name": "b", "phase": "SKIPPED", "dt_start": None, "dt_end": None},
+                ],
+                "captured_at": ISO_TS,
+            },
+        )
 
 
 class TestVolumes:

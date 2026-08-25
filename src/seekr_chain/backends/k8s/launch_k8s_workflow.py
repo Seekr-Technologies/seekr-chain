@@ -28,7 +28,7 @@ from seekr_chain.user_config import config as _user_config
 
 logger = logging.getLogger(__name__)
 
-_DEFAULT_CONTROLLER_IMAGE = "ghcr.io/seekr-technologies/seekr-chain-controller:1.0.0@sha256:7a8700bebddfaecef8174e98ef3b408295fee29e005adb28192771ac901ee6d3"
+_DEFAULT_CONTROLLER_IMAGE = "ghcr.io/seekr-technologies/seekr-chain-controller:1.1.0@sha256:de8163cc3652deea9a194fd09bf0d2c167ff1cbe4b51bb424c419adda7b8e97b"
 _CONTROLLER_IMAGE = _user_config.controller_image or _DEFAULT_CONTROLLER_IMAGE
 
 
@@ -318,6 +318,15 @@ def _build_controller_jobset(
     # Add SEEKRCHAIN_DATASTORE_ROOT so the controller can call get_job_info if needed
     if datastore_root:
         controller_env.append({"name": "SEEKRCHAIN_DATASTORE_ROOT", "value": datastore_root})
+
+    # The controller ships status.json to S3 itself via s5cmd, so it needs the
+    # same S3 credentials as the init container plus the destination path.
+    # AWS_ACCESS_KEY_ID/SECRET already arrive via workflow_secrets; append only
+    # creds not already present (endpoint/region when unset) so the JobSet API
+    # doesn't reject duplicate env entries.
+    existing = {e["name"] for e in controller_env}
+    controller_env += [e for e in init_env if e["name"] not in existing]
+    controller_env.append({"name": "SEEKR_CHAIN_REMOTE_STATUS_PATH", "value": job_info["remote_status_path"]})
 
     init_containers = [
         {

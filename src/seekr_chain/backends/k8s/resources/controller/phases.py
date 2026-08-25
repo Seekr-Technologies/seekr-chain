@@ -18,15 +18,20 @@ def load_phases(
     namespace: str,
     workflow_id: str,
     dag: list[dict],
-) -> dict[str, str]:
-    """Load phase state from ConfigMap if it exists; otherwise return all-PENDING.
+) -> tuple[dict[str, str], dict[str, dict]]:
+    """Load phase and timing state from ConfigMap if it exists; otherwise
+    return all-PENDING phases and no timings.
 
     Only terminal states are restored — RUNNING steps are reset to PENDING so
     they will be re-submitted (the 409 Conflict guard in submit_ready_steps
-    handles the case where the JobSet already exists).
+    handles the case where the JobSet already exists). Timings follow the
+    same rule: a step's timings are restored only if its phase is restored
+    (i.e. terminal), so a RUNNING step reset to PENDING also loses its
+    timings and gets re-stamped on re-run.
     """
     phases: dict[str, str] = {s["name"]: "PENDING" for s in dag}
     cm_name = f"{workflow_id}-phases"
+    timings: dict[str, dict] = {}
     try:
         cm = k8s_v1.read_namespaced_config_map(name=cm_name, namespace=namespace)
         raw = (cm.data or {}).get("phases")
@@ -39,10 +44,15 @@ def load_phases(
                 f"[controller] restored phases from ConfigMap: {[n for n, p in phases.items() if p != 'PENDING']}",
                 flush=True,
             )
+        raw_timings = (cm.data or {}).get("timings")
+        if raw_timings:
+            for name, t in json.loads(raw_timings).items():
+                if name in phases and phases[name] in TERMINAL_PHASES:
+                    timings[name] = t
     except kubernetes.client.exceptions.ApiException as e:
         if e.status != 404:
             print(f"[controller] warning: could not read phases ConfigMap: {e}", flush=True)
-    return phases
+    return phases, timings
 
 
 def save_phases(
@@ -50,11 +60,12 @@ def save_phases(
     namespace: str,
     workflow_id: str,
     phases: dict[str, str],
+    timings: dict[str, dict],
     owner_ref: list[dict],
 ) -> None:
-    """Persist phase state to a ConfigMap. Best-effort — never raises."""
+    """Persist phase and timing state to a ConfigMap. Best-effort — never raises."""
     cm_name = f"{workflow_id}-phases"
-    data = {"phases": json.dumps(phases)}
+    data = {"phases": json.dumps(phases), "timings": json.dumps(timings)}
     try:
         try:
             k8s_v1.patch_namespaced_config_map(
