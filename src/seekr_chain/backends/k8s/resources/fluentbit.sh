@@ -12,7 +12,7 @@ FLUENTBIT_BIN="/fluent-bit/bin/fluent-bit"
 
 TIMEOUT=30
 STARTUP_TIMEOUT=1200
-SHUTDOWN_GRACE_PERIOD=5
+SHUTDOWN_GRACE_PERIOD=1
 
 #######################################
 # Required environment variables
@@ -91,7 +91,7 @@ monitor_loop() {
       fi
     fi
 
-    sleep 2
+    sleep 1
   done
 }
 
@@ -109,11 +109,20 @@ shutdown_fluentbit() {
   touch "$LOGS_FLUSHED_PATH"
 }
 
+terminate() {
+  touch "$SHUTDOWN_PATH"
+  if [ -n "${fb_pid:-}" ]; then
+    shutdown_fluentbit "$fb_pid"
+  fi
+  exit 0
+}
+
 #######################################
 # Main
 #######################################
 
 main() {
+  trap terminate INT TERM
   cat "$FLUENTBIT_CONF"
 
   wait_for_startup
