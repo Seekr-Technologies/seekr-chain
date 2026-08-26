@@ -648,13 +648,21 @@ def workflow_cancelled(phases_configmap) -> bool:
 
 
 def workflow_failed(phases_configmap) -> bool:
-    """True if any step's persisted phase is FAILED. See ``workflow_cancelled()``."""
+    """True if any non-optional step's persisted phase is FAILED. See
+    ``workflow_cancelled()``.
+
+    A step's ``optional`` flag (config.py) is persisted alongside ``phases``
+    as ``optional_steps`` by the controller (see ``phases.save_phases``) so
+    this external, ConfigMap-only read can exclude it from the rollup the
+    same way the controller's own ``apply_failure_teardown`` does.
+    """
     if phases_configmap is None:
         return False
     raw = (phases_configmap.data or {}).get("phases")
     if not raw:
         return False
-    return Status.FAILED.value in json.loads(raw).values()
+    optional_steps = set(json.loads((phases_configmap.data or {}).get("optional_steps") or "[]"))
+    return any(phase == Status.FAILED.value and name not in optional_steps for name, phase in json.loads(raw).items())
 
 
 def _skipped_step_names(phases_configmap) -> set[str]:

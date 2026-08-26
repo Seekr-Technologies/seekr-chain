@@ -94,10 +94,11 @@ def test_package_assets_writes_normalized_depends_on_to_dag_json(monkeypatch, tm
 
     dag = json.loads((staging_dir / "assets" / "dag.json").read_text())
     entries = {e["name"]: e for e in dag}
-    assert entries["a"] == {"name": "a", "depends_on": []}
+    assert entries["a"] == {"name": "a", "depends_on": [], "optional": False}
     assert entries["b"] == {
         "name": "b",
         "depends_on": [{"step": "a", "when": "ON_FAILURE", "on_exit_codes": None, "operator": "IN"}],
+        "optional": False,
     }
 
 

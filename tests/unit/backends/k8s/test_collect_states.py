@@ -863,6 +863,24 @@ class TestWorkflowFailed:
         cm = SimpleNamespace(data={"phases": '{"step-a": "SUCCEEDED", "step-b": "FAILED"}'})
         assert workflow_failed(cm) is True
 
+    def test_optional_failed_step_is_not_failed(self):
+        cm = SimpleNamespace(
+            data={
+                "phases": '{"step-a": "SUCCEEDED", "step-b": "FAILED"}',
+                "optional_steps": '["step-b"]',
+            }
+        )
+        assert workflow_failed(cm) is False
+
+    def test_non_optional_failed_step_is_still_failed_alongside_optional_steps(self):
+        cm = SimpleNamespace(
+            data={
+                "phases": '{"step-a": "FAILED", "step-b": "FAILED"}',
+                "optional_steps": '["step-b"]',
+            }
+        )
+        assert workflow_failed(cm) is True
+
 
 class TestDetail:
     def test_all_values_present(self):

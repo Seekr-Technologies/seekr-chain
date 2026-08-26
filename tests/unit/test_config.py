@@ -139,6 +139,16 @@ class TestDependsOnCondition:
             )
 
 
+class TestOptionalStep:
+    def test_defaults_to_false(self):
+        config = WorkflowConfig(name="test", steps=[_minimal_step("a")])
+        assert config.steps[0].optional is False
+
+    def test_can_be_set_true(self):
+        config = WorkflowConfig.model_validate({"name": "test", "steps": [{**_minimal_step("a"), "optional": True}]})
+        assert config.steps[0].optional is True
+
+
 class TestSecretConfig:
     def _minimal_config(self, secrets):
         return WorkflowConfig.model_validate({"name": "test", "steps": [_minimal_step("a")], "secrets": secrets})

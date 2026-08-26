@@ -198,11 +198,14 @@ def launch_local_workflow(
     step_phase: dict[str, str] = {}
     exit_codes: dict[str, int] = {}
     workflow_succeeded = True
-    # Becomes True the moment any step FAILS. From then on, a step only still
-    # runs if it's a direct ON_FAILURE/ALWAYS dependent of a FAILED step
-    # (reactive teardown) — everything else, including independent branches
-    # that would otherwise be ready, is skipped without running. A failed
-    # step always fails the workflow, no exceptions.
+    # Becomes True the moment any non-optional step FAILS. From then on, a
+    # step only still runs if it's a direct ON_FAILURE/ALWAYS dependent of a
+    # FAILED step (reactive teardown) — everything else, including
+    # independent branches that would otherwise be ready, is skipped without
+    # running. A step marked `optional` (config.py) can FAIL without
+    # triggering teardown or flipping workflow_succeeded — useful for a
+    # conditional cleanup/notification step that shouldn't itself be able to
+    # fail the workflow.
     teardown = False
 
     try:
@@ -252,8 +255,9 @@ def launch_local_workflow(
             else:
                 logger.error(f"Step '{step.name}' failed")
                 step_phase[step.name] = "FAILED"
-                workflow_succeeded = False
-                teardown = True
+                if not step.optional:
+                    workflow_succeeded = False
+                    teardown = True
     finally:
         os.unlink(args_path)
 

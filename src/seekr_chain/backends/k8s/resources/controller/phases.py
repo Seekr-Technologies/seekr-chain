@@ -93,6 +93,15 @@ def load_phases(
     return phases, timings
 
 
+def optional_step_names(dag: list[dict]) -> set[str]:
+    """Names of steps marked `optional` in the DAG — excluded from the
+    workflow-level failure rollup (see `workflow_state.workflow_failed` and
+    `apply_failure_teardown`), though a FAILED phase still shows in
+    `chain status` and still propagates to the step's own dependents.
+    """
+    return {step["name"] for step in dag if step.get("optional", False)}
+
+
 def save_phases(
     k8s_v1,
     namespace: str,
@@ -101,16 +110,23 @@ def save_phases(
     timings: dict[str, dict],
     owner_ref: list[dict],
     exit_codes: dict[str, list[int]] | None = None,
+    optional_steps: set[str] | None = None,
 ) -> None:
     """Persist phase and timing state to a ConfigMap. Best-effort — never raises.
 
     `exit_codes` is an additional key in the same ConfigMap, so a restarted
     controller doesn't need to re-list pods for steps it already resolved.
+
+    `optional_steps` is persisted the same way so `chain status` (which only
+    has the ConfigMap, not the DAG definition) can also exclude optional
+    steps from the workflow-level rollup — see `workflow_state.workflow_failed`.
     """
     cm_name = f"{workflow_id}-phases"
     data = {"phases": json.dumps(phases), "timings": json.dumps(timings)}
     if exit_codes is not None:
         data["exit_codes"] = json.dumps(exit_codes)
+    if optional_steps is not None:
+        data["optional_steps"] = json.dumps(sorted(optional_steps))
     try:
         try:
             k8s_v1.patch_namespaced_config_map(
@@ -200,20 +216,30 @@ def reactive_preserve_set(
 
 
 def apply_failure_teardown(
-    dag: list[dict], phases: dict[str, str], exit_codes: dict[str, list[int]] | None = None
+    dag: list[dict],
+    phases: dict[str, str],
+    exit_codes: dict[str, list[int]] | None = None,
+    optional_steps: set[str] | None = None,
 ) -> list[str]:
-    """A failed step always fails the workflow, no exceptions. Once any step
-    is FAILED: mark every other PENDING step SKIPPED (it will never run) and
-    return the names of every other RUNNING step, for the caller to cancel —
-    this module has no k8s client, so the actual JobSet suspend patch is the
-    caller's job (see scheduling.cancel_step_jobsets).
+    """A failed required step always fails the workflow, no exceptions. Once
+    any non-`optional` step is FAILED: mark every other PENDING step SKIPPED
+    (it will never run) and return the names of every other RUNNING step, for
+    the caller to cancel — this module has no k8s client, so the actual
+    JobSet suspend patch is the caller's job (see
+    scheduling.cancel_step_jobsets).
+
+    A step marked `optional` (see `optional_step_names`) does not itself
+    trigger teardown — its FAILED phase still stands and still gates its own
+    dependents via `dep_satisfied`, but a conditional cleanup/notification
+    step failing shouldn't tear down the rest of the workflow.
 
     Direct reactive (ON_FAILURE/ALWAYS) dependents of the failed step(s) —
     see `reactive_preserve_set` — are exempt from both: they're left PENDING
     (to be picked up by `submit_ready_steps`) or RUNNING (left alone) so the
     workflow's cleanup/notification steps actually get to run.
     """
-    if not any(phase == "FAILED" for phase in phases.values()):
+    optional_steps = optional_steps or set()
+    if not any(phase == "FAILED" for name, phase in phases.items() if name not in optional_steps):
         return []
     preserve = reactive_preserve_set(dag, phases, exit_codes)
     to_cancel = []

@@ -51,8 +51,9 @@ def _record_status_call(cluster: FakeK8sCluster, workflow_id, dag, phases, timin
     file write + S3 ship have no place in an in-memory fake, so instead
     record the workflow-level status onto cluster.trace (deduped against the
     last-recorded status), derived the same way the real status document
-    derives it."""
-    cluster.record_status(_workflow_status_from_phases(phases))
+    derives it — including excluding `optional` steps from the rollup."""
+    optional_steps = {step["name"] for step in dag if step.get("optional", False)}
+    cluster.record_status(_workflow_status_from_phases(phases, optional_steps))
 
 
 def _record_ship_call(cluster: FakeK8sCluster, argv: list[str], **kwargs) -> MagicMock:
@@ -1271,6 +1272,210 @@ class TestMainConditionalDependsOn:
             ("phases", {"a": "FAILED", "b": "CANCELED", "c": "SKIPPED", "e": "SUCCEEDED"}),
             # workflow finalizes FAILED even though e (a's ALWAYS-reactive dependent) itself succeeded.
             ("event", "WorkflowFailed", "Workflow failed — failed steps: ['a']"),
+        ]
+
+    def test_optional_step_failure_does_not_fail_workflow_or_teardown_others(self, cluster):
+        """b is a conditional ALWAYS cleanup step marked `optional`: it fails,
+        but that must not cascade into teardown of the unrelated, still-
+        running `c`, and the workflow must still finalize SUCCEEDED."""
+        dag = [
+            {"name": "a", "depends_on": []},
+            {"name": "b", "depends_on": [{"step": "a", "when": "ALWAYS"}], "optional": True},
+            {"name": "c", "depends_on": []},
+        ]
+        cluster.script_step("a", exit_code=0)
+        cluster.script_step("b", exit_code=1)
+        cluster.script_step("c", exit_code=0)
+        assert run_controller_main(cluster, dag) == 0
+        assert cluster.trace == [
+            ("status", "PENDING"),
+            ("submit", "a"),
+            ("submit", "c"),
+            ("phases", {"a": "RUNNING", "b": "PENDING", "c": "RUNNING"}),
+            ("status", "RUNNING"),
+            ("exit", "a", 0),
+            ("event", "StepSucceeded", "Step 'a' completed successfully"),
+            ("phases", {"a": "SUCCEEDED", "b": "PENDING", "c": "RUNNING"}),
+            ("submit", "b"),
+            ("phases", {"a": "SUCCEEDED", "b": "RUNNING", "c": "RUNNING"}),
+            ("exit", "c", 0),
+            ("event", "StepSucceeded", "Step 'c' completed successfully"),
+            ("phases", {"a": "SUCCEEDED", "b": "RUNNING", "c": "SUCCEEDED"}),
+            # status already reads SUCCEEDED here — b is optional and still
+            # RUNNING, but the rollup excludes it entirely, not just its
+            # eventual failure.
+            ("status", "SUCCEEDED"),
+            ("exit", "b", 1),
+            ("event", "StepFailed", "Step 'b' failed"),
+            ("phases", {"a": "SUCCEEDED", "b": "FAILED", "c": "SUCCEEDED"}),
+            ("event", "WorkflowSucceeded", "All steps completed successfully"),
+        ]
+
+    def test_optional_step_failure_still_gates_its_own_dependent(self, cluster):
+        """Even though b is `optional`, its own FAILED phase still satisfies
+        an ON_FAILURE dependent (d) exactly as any other step's failure
+        would."""
+        dag = [
+            {"name": "a", "depends_on": []},
+            {"name": "b", "depends_on": [{"step": "a", "when": "ALWAYS"}], "optional": True},
+            {"name": "d", "depends_on": [{"step": "b", "when": "ON_FAILURE"}]},
+        ]
+        cluster.script_step("a", exit_code=0)
+        cluster.script_step("b", exit_code=1)
+        cluster.script_step("d", exit_code=0)
+        assert run_controller_main(cluster, dag) == 0
+        assert cluster.trace == [
+            ("status", "PENDING"),
+            ("submit", "a"),
+            ("phases", {"a": "RUNNING", "b": "PENDING", "d": "PENDING"}),
+            ("status", "RUNNING"),
+            ("exit", "a", 0),
+            ("event", "StepSucceeded", "Step 'a' completed successfully"),
+            ("phases", {"a": "SUCCEEDED", "b": "PENDING", "d": "PENDING"}),
+            # b (optional) is excluded from the rollup entirely, so with a
+            # done and d still PENDING on b, status reads PENDING rather
+            # than RUNNING.
+            ("status", "PENDING"),
+            ("submit", "b"),
+            ("phases", {"a": "SUCCEEDED", "b": "RUNNING", "d": "PENDING"}),
+            ("exit", "b", 1),
+            ("event", "StepFailed", "Step 'b' failed"),
+            ("phases", {"a": "SUCCEEDED", "b": "FAILED", "d": "PENDING"}),
+            ("submit", "d"),
+            ("phases", {"a": "SUCCEEDED", "b": "FAILED", "d": "RUNNING"}),
+            ("status", "RUNNING"),
+            ("exit", "d", 0),
+            ("event", "StepSucceeded", "Step 'd' completed successfully"),
+            ("phases", {"a": "SUCCEEDED", "b": "FAILED", "d": "SUCCEEDED"}),
+            ("status", "SUCCEEDED"),
+            ("event", "WorkflowSucceeded", "All steps completed successfully"),
+        ]
+
+    def test_optional_step_failure_excluded_from_archived_status_json(self, cluster):
+        """capture_status=True exercises the real status.py doc-build path —
+        confirms the archived status.json's top-level "status" also excludes
+        the optional step's FAILED phase, matching the live rollup."""
+        dag = [
+            {"name": "a", "depends_on": []},
+            {"name": "b", "depends_on": [{"step": "a", "when": "ALWAYS"}], "optional": True},
+        ]
+        cluster.script_step("a", exit_code=0)
+        cluster.script_step("b", exit_code=1)
+        assert run_controller_main(cluster, dag, capture_status=True) == 0
+        assert cluster.status_doc["status"] == "SUCCEEDED"
+
+    def test_optional_step_gets_torn_down_normally_when_unrelated_step_fails(self, cluster):
+        """optional only protects the workflow from *that step's own* failure —
+        it gives no immunity from teardown when a different, non-optional step
+        fails elsewhere."""
+        dag = [
+            {"name": "a", "depends_on": []},
+            {"name": "x", "depends_on": [], "optional": True},
+        ]
+        cluster.script_step("a", exit_code=1)
+        cluster.script_step("x", never_completes=True)
+        assert run_controller_main(cluster, dag) == 0
+        assert cluster.trace == [
+            ("status", "PENDING"),
+            ("submit", "a"),
+            ("submit", "x"),
+            ("phases", {"a": "RUNNING", "x": "RUNNING"}),
+            ("status", "RUNNING"),
+            ("exit", "a", 1),
+            ("event", "StepFailed", "Step 'a' failed"),
+            ("phases", {"a": "FAILED", "x": "RUNNING"}),
+            ("status", "FAILED"),
+            ("cancel", "x"),
+            ("event", "StepCancelled", "Step 'x' was cancelled"),
+            ("phases", {"a": "FAILED", "x": "CANCELED"}),
+            ("event", "WorkflowFailed", "Workflow failed — failed steps: ['a']"),
+        ]
+
+    def test_optional_step_failure_does_not_shield_its_non_optional_dependent(self, cluster):
+        """optional does not propagate: if a non-optional step depends on a
+        failed optional step and itself fails, the workflow still fails on
+        that dependent's own failure."""
+        dag = [
+            {"name": "a", "depends_on": []},
+            {"name": "b", "depends_on": [{"step": "a", "when": "ALWAYS"}], "optional": True},
+            {"name": "c", "depends_on": [{"step": "b", "when": "ON_FAILURE"}]},
+        ]
+        cluster.script_step("a", exit_code=0)
+        cluster.script_step("b", exit_code=1)
+        cluster.script_step("c", exit_code=1)
+        assert run_controller_main(cluster, dag) == 0
+        assert cluster.trace == [
+            ("status", "PENDING"),
+            ("submit", "a"),
+            ("phases", {"a": "RUNNING", "b": "PENDING", "c": "PENDING"}),
+            ("status", "RUNNING"),
+            ("exit", "a", 0),
+            ("event", "StepSucceeded", "Step 'a' completed successfully"),
+            ("phases", {"a": "SUCCEEDED", "b": "PENDING", "c": "PENDING"}),
+            ("status", "PENDING"),
+            ("submit", "b"),
+            ("phases", {"a": "SUCCEEDED", "b": "RUNNING", "c": "PENDING"}),
+            ("exit", "b", 1),
+            ("event", "StepFailed", "Step 'b' failed"),
+            ("phases", {"a": "SUCCEEDED", "b": "FAILED", "c": "PENDING"}),
+            ("submit", "c"),
+            ("phases", {"a": "SUCCEEDED", "b": "FAILED", "c": "RUNNING"}),
+            ("status", "RUNNING"),
+            ("exit", "c", 1),
+            ("event", "StepFailed", "Step 'c' failed"),
+            ("phases", {"a": "SUCCEEDED", "b": "FAILED", "c": "FAILED"}),
+            ("status", "FAILED"),
+            ("event", "WorkflowFailed", "Workflow failed — failed steps: ['c']"),
+        ]
+
+    def test_optional_step_gated_by_exit_code_still_excluded_from_rollup_on_own_failure(self, cluster):
+        """optional combines with on_exit_codes gating: b only runs because a's
+        exit code matched the gate, and b's own subsequent failure is still
+        excluded from the workflow rollup."""
+        dag = [
+            {"name": "a", "depends_on": []},
+            {
+                "name": "b",
+                "depends_on": [{"step": "a", "when": "ON_FAILURE", "on_exit_codes": [42]}],
+                "optional": True,
+            },
+        ]
+        cluster.script_step("a", exit_code=1, pods=[{"role": "worker", "exit_code": 42}])
+        cluster.script_step("b", exit_code=1)
+        assert run_controller_main(cluster, dag) == 0
+        assert cluster.trace == [
+            ("status", "PENDING"),
+            ("submit", "a"),
+            ("phases", {"a": "RUNNING", "b": "PENDING"}),
+            ("status", "RUNNING"),
+            ("exit", "a", 1),
+            ("event", "StepFailed", "Step 'a' failed"),
+            ("phases", {"a": "FAILED", "b": "PENDING"}),
+            ("status", "FAILED"),
+            ("submit", "b"),
+            ("phases", {"a": "FAILED", "b": "RUNNING"}),
+            ("exit", "b", 1),
+            ("event", "StepFailed", "Step 'b' failed"),
+            ("phases", {"a": "FAILED", "b": "FAILED"}),
+            ("event", "WorkflowFailed", "Workflow failed — failed steps: ['a']"),
+        ]
+
+    def test_standalone_optional_step_failure_alone_does_not_fail_workflow(self, cluster):
+        """A single optional step with no dependents and no dependencies:
+        its failure alone must not fail the workflow."""
+        dag = [
+            {"name": "a", "depends_on": [], "optional": True},
+        ]
+        cluster.script_step("a", exit_code=1)
+        assert run_controller_main(cluster, dag) == 0
+        assert cluster.trace == [
+            ("status", "UNKNOWN"),
+            ("submit", "a"),
+            ("phases", {"a": "RUNNING"}),
+            ("exit", "a", 1),
+            ("event", "StepFailed", "Step 'a' failed"),
+            ("phases", {"a": "FAILED"}),
+            ("event", "WorkflowSucceeded", "All steps completed successfully"),
         ]
 
     def test_exit_codes_of_a_gated_step_are_persisted_to_configmap(self, cluster):

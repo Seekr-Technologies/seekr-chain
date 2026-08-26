@@ -454,10 +454,17 @@ class SingleRoleStepConfig(RoleSpecConfig):
     ----------
     depends_on : Steps that must complete before this one starts
     failure_policy : Failure handling policy
+    optional : If True, this step's own failure is excluded from the
+        workflow-level success/failure rollup — useful for a conditional
+        (``ON_FAILURE``/``ALWAYS``) cleanup or notification step that
+        shouldn't itself be able to fail the workflow. It still shows as
+        FAILED in ``chain status`` and still propagates to its own
+        dependents.
     """
 
     depends_on: Optional[list[DependsOnEntry]] = Field(default=None, validate_default=True)
     failure_policy: FailurePolicy | None = None
+    optional: bool = False
 
     @field_validator("depends_on", mode="after")
     @classmethod
@@ -483,6 +490,12 @@ class MultiRoleStepConfig(BaseModel):
     success_policy : When to consider this step successful
     failure_policy : Failure handling policy
     roles : List of roles to run in parallel
+    optional : If True, this step's own failure is excluded from the
+        workflow-level success/failure rollup — useful for a conditional
+        (``ON_FAILURE``/``ALWAYS``) cleanup or notification step that
+        shouldn't itself be able to fail the workflow. It still shows as
+        FAILED in ``chain status`` and still propagates to its own
+        dependents.
     """
 
     class SuccessPolicy(BaseModel):
@@ -501,6 +514,7 @@ class MultiRoleStepConfig(BaseModel):
     depends_on: Optional[list[DependsOnEntry]] = Field(default=None, validate_default=True)
     success_policy: Optional[SuccessPolicy] = None
     failure_policy: FailurePolicy | None = None
+    optional: bool = False
     roles: list[RoleSpecConfig]
 
     @field_validator("name")

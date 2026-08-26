@@ -455,6 +455,52 @@ printf 'SEEKR_CHAIN_ARGS=%s\\n' "$SEEKR_CHAIN_ARGS"
         assert cleanup_marker.exists(), "ON_FAILURE dependent should still run"
         assert not b_marker.exists(), "independent step B should be skipped once A failed"
 
+    def test_optional_step_failure_does_not_fail_workflow_or_teardown_others(self, tmp_path):
+        """b is an ALWAYS cleanup step marked `optional`: it fails, but that
+        must not flip workflow_succeeded or skip the unrelated step c."""
+        c_marker = tmp_path / "c_ran.txt"
+        config = WorkflowConfig.model_validate(
+            {
+                "name": "test",
+                "steps": [
+                    {"name": "a", "image": "ubuntu:24.04", "script": "exit 0"},
+                    {
+                        "name": "b",
+                        "image": "ubuntu:24.04",
+                        "script": "exit 1",
+                        "depends_on": [{"step": "a", "when": "ALWAYS"}],
+                        "optional": True,
+                    },
+                    {"name": "c", "image": "ubuntu:24.04", "script": f"touch {c_marker}"},
+                ],
+            }
+        )
+        wf = launch_local_workflow(config)
+        assert wf.get_status() == Status.SUCCEEDED
+        assert c_marker.exists(), "unrelated step c should still run despite optional b failing"
+
+    def test_optional_step_failure_still_gates_its_own_dependent(self, tmp_path):
+        """Even though b is `optional`, its own failure still satisfies an
+        ON_FAILURE dependent (d) exactly as any other step's failure would."""
+        d_marker = tmp_path / "d_ran.txt"
+        config = WorkflowConfig.model_validate(
+            {
+                "name": "test",
+                "steps": [
+                    {"name": "b", "image": "ubuntu:24.04", "script": "exit 1", "optional": True},
+                    {
+                        "name": "d",
+                        "image": "ubuntu:24.04",
+                        "script": f"touch {d_marker}",
+                        "depends_on": [{"step": "b", "when": "ON_FAILURE"}],
+                    },
+                ],
+            }
+        )
+        wf = launch_local_workflow(config)
+        assert wf.get_status() == Status.SUCCEEDED
+        assert d_marker.exists(), "ON_FAILURE dependent should still run when optional b fails"
+
     def test_code_path_sets_workdir(self, tmp_path):
         """config.code.path is used as the working directory for script execution."""
         out = tmp_path / "cwd.txt"

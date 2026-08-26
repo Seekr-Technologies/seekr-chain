@@ -229,6 +229,7 @@ def _package_assets(
             {
                 "name": step_config.name,
                 "depends_on": [cond.model_dump() for cond in step_config.depends_on],
+                "optional": step_config.optional,
             }
         )
 
