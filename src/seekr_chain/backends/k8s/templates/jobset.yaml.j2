@@ -134,25 +134,33 @@ spec:
               - name: AWS_ACCESS_KEY_ID
                 valueFrom:
                   secretKeyRef:
-                    name: {{ workflow_name }}
+                    name: {{ s3_secret_name }}
                     key: AWS_ACCESS_KEY_ID
               - name: AWS_SECRET_ACCESS_KEY
                 valueFrom:
                   secretKeyRef:
-                    name: {{ workflow_name }}
+                    name: {{ s3_secret_name }}
                     key: AWS_SECRET_ACCESS_KEY
               - name: AWS_REGION
+                {% if datastore_region %}
+                value: {{ datastore_region | tojson }}
+                {% else %}
                 valueFrom:
                   secretKeyRef:
-                    name: {{ workflow_name }}
+                    name: {{ s3_secret_name }}
                     key: AWS_REGION
                     optional: true
+                {% endif %}
               - name: S3_ENDPOINT_URL
+                {% if datastore_endpoint_url %}
+                value: {{ datastore_endpoint_url | tojson }}
+                {% else %}
                 valueFrom:
                   secretKeyRef:
-                    name: {{ workflow_name }}
+                    name: {{ s3_secret_name }}
                     key: S3_ENDPOINT_URL
                     optional: true
+                {% endif %}
               - name: NODE_RANK
                 valueFrom:
                   fieldRef:
@@ -210,6 +218,14 @@ spec:
                     {% endif %}
                 {% endif %}
               {% endfor %}
+              {% if datastore_endpoint_url and 'S3_ENDPOINT_URL' not in role.env | map(attribute='name') | list %}
+              - name: S3_ENDPOINT_URL
+                value: {{ datastore_endpoint_url | tojson }}
+              {% endif %}
+              {% if datastore_region and 'AWS_REGION' not in role.env | map(attribute='name') | list %}
+              - name: AWS_REGION
+                value: {{ datastore_region | tojson }}
+              {% endif %}
               volumeMounts:
               - name: workspace
                 mountPath: /seekr-chain
@@ -259,12 +275,12 @@ spec:
               - name: AWS_ACCESS_KEY_ID
                 valueFrom:
                   secretKeyRef:
-                    name: {{ workflow_name }}
+                    name: {{ s3_secret_name }}
                     key: AWS_ACCESS_KEY_ID
               - name: AWS_SECRET_ACCESS_KEY
                 valueFrom:
                   secretKeyRef:
-                    name: {{ workflow_name }}
+                    name: {{ s3_secret_name }}
                     key: AWS_SECRET_ACCESS_KEY
               - name: RESTART_ATTEMPT
                 valueFrom:
@@ -283,11 +299,15 @@ spec:
               - name: SEEKR_CHAIN_LOGS
                 value: /seekr-chain/logs.txt
               - name: FB_S3_ENDPOINT
+                {% if datastore_endpoint_url %}
+                value: {{ datastore_endpoint_url | tojson }}
+                {% else %}
                 valueFrom:
                   secretKeyRef:
-                    name: {{ workflow_name }}
+                    name: {{ s3_secret_name }}
                     key: FB_S3_ENDPOINT
                     optional: true
+                {% endif %}
               - name: FB_UPLOAD_TIMEOUT
                 value: {{ role.log_sidecar_upload_timeout | tojson }}
               - name: NODE_RANK

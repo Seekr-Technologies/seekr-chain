@@ -89,3 +89,15 @@ secrets:
 - Secret store references are never copied into the workflow-scoped entry.
 - Secrets are injected as environment variables in every step container.
 - On launch, seekr-chain also deletes any workflow-scoped secrets it created more than **7 days** ago.
+- If `datastore_kubernetes_secret` is set, seekr-chain skips reading and uploading your local AWS credentials; every S3-credential env var on step pods instead references the named Kubernetes Secret, which must live in the workflow namespace and contain `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` (optionally `S3_ENDPOINT_URL`, `AWS_REGION`, `FB_S3_ENDPOINT`). seekr-chain validates the secret's existence and keys at submit time on a best-effort basis — a permission error reading Secrets is downgraded to a warning. The workflow-scoped secret is still created if inline or environment secrets are also defined.
+
+## Custom datastore endpoint and region
+
+Two non-secret config options point the datastore at a custom S3 endpoint and region:
+
+- `datastore_endpoint_url` (env `SEEKRCHAIN_DATASTORE_ENDPOINT_URL`) — the S3 endpoint URL.
+- `datastore_region` (env `SEEKRCHAIN_DATASTORE_REGION`) — the S3 region.
+
+When set, they configure the local boto3 client (`endpoint_url` / `region_name`) and are injected into pods as plain environment values: `S3_ENDPOINT_URL` and `AWS_REGION` on the init, main/step, and controller containers (consumed by s5cmd), plus `FB_S3_ENDPOINT` on the fluent-bit log sidecar. These plain values **override** the same-named optional keys that would otherwise come from a `datastore_kubernetes_secret` — explicit config wins. When unset, pods fall back to those optional Secret keys exactly as before.
+
+They pair naturally with `datastore_kubernetes_secret`: keep credentials (`AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY`) in the Secret and set the non-secret endpoint and region through these options. This is the recommended setup for S3-compatible stores such as OCI Object Storage, whose endpoint looks like `https://<ns>.compat.objectstorage.<region>.oraclecloud.com`; a region is often required for SigV4 signing even against S3-compatible endpoints.

@@ -10,6 +10,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from seekr_chain import remote_fs
+from seekr_chain.user_config import UserConfig
 
 
 @pytest.fixture(autouse=True)
@@ -82,7 +83,7 @@ class TestS3ClientCaching:
     def test_client_constructed_once_and_reused(self, monkeypatch):
         made = []
 
-        def fake_boto3_client(service):
+        def fake_boto3_client(service, **kwargs):
             made.append(service)
             return MagicMock()
 
@@ -92,6 +93,46 @@ class TestS3ClientCaching:
         c2 = remote_fs._get_s3_client()
         assert c1 is c2
         assert made == ["s3"]
+
+
+class TestS3ClientEndpointAndRegion:
+    """`_get_s3_client` wires datastore_endpoint_url/region into boto3.client."""
+
+    def test_passes_configured_endpoint_and_region_to_boto3(self, monkeypatch):
+        captured = {}
+
+        def fake_boto3_client(service, **kwargs):
+            captured.update(service=service, **kwargs)
+            return MagicMock()
+
+        monkeypatch.setattr("boto3.client", fake_boto3_client)
+        monkeypatch.setattr(
+            remote_fs,
+            "config",
+            UserConfig(datastore_endpoint_url="https://s3.example.com", datastore_region="us-chicago-1"),
+        )
+
+        remote_fs._get_s3_client()
+
+        assert captured == {
+            "service": "s3",
+            "endpoint_url": "https://s3.example.com",
+            "region_name": "us-chicago-1",
+        }
+
+    def test_passes_none_when_endpoint_and_region_unset(self, monkeypatch):
+        captured = {}
+
+        def fake_boto3_client(service, **kwargs):
+            captured.update(service=service, **kwargs)
+            return MagicMock()
+
+        monkeypatch.setattr("boto3.client", fake_boto3_client)
+        monkeypatch.setattr(remote_fs, "config", UserConfig())
+
+        remote_fs._get_s3_client()
+
+        assert captured == {"service": "s3", "endpoint_url": None, "region_name": None}
 
 
 class TestOciClientCaching:

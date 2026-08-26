@@ -2,10 +2,11 @@
 
 import yaml
 
-from seekr_chain.backends.k8s import render
+from seekr_chain.backends.k8s import jobset, render
 from seekr_chain.backends.k8s.job_info import get_job_info
 from seekr_chain.backends.k8s.jobset import _DEFAULT_INIT_IMAGE, build_jobset_context
 from seekr_chain.config import WorkflowConfig
+from seekr_chain.user_config import UserConfig
 
 DATASTORE_ROOT = "s3://test-bucket/seekr-chain/"
 
@@ -1328,3 +1329,177 @@ class TestAffinityRendering:
         jobs_by_name = {job["name"]: job for job in manifest["spec"]["replicatedJobs"]}
         assert "podFailurePolicy" in jobs_by_name["trainer"]["template"]["spec"]
         assert "podFailurePolicy" not in jobs_by_name["evaluator"]["template"]["spec"]
+
+
+class TestS3SecretNameRendering:
+    """`s3_secret_name` controls which Secret S3-credential secretKeyRefs point at."""
+
+    def _cred_ref_names(self, manifest):
+        pod_spec = manifest["spec"]["replicatedJobs"][0]["template"]["spec"]["template"]["spec"]
+        init_container = pod_spec["initContainers"][0]
+        log_sidecar = next(c for c in pod_spec["containers"] if c["name"] == "log-sidecar")
+        init_env = {e["name"]: e for e in init_container["env"]}
+        sidecar_env = {e["name"]: e for e in log_sidecar["env"]}
+        return init_env, sidecar_env
+
+    def test_defaults_cred_refs_to_workflow_name_when_s3_secret_name_omitted(self, tmp_path):
+        """Regression: omitting s3_secret_name must keep pointing creds at the per-workflow Secret."""
+        config = _minimal_config()
+        job_info = _fake_job_info()
+
+        _, context = build_jobset_context(
+            workflow_config=config,
+            step_index=0,
+            job_info=job_info,
+            workflow_name="ab1234",
+            workflow_secrets=[],
+            interactive=False,
+            assets_path=tmp_path / "assets",
+        )
+
+        manifest = yaml.safe_load(render.render("jobset.yaml.j2", context))
+        init_env, sidecar_env = self._cred_ref_names(manifest)
+
+        assert init_env["AWS_ACCESS_KEY_ID"]["valueFrom"]["secretKeyRef"]["name"] == "ab1234"
+        assert sidecar_env["AWS_ACCESS_KEY_ID"]["valueFrom"]["secretKeyRef"]["name"] == "ab1234"
+        assert sidecar_env["AWS_SECRET_ACCESS_KEY"]["valueFrom"]["secretKeyRef"]["name"] == "ab1234"
+
+    def test_points_cred_refs_at_external_secret_when_configured(self, tmp_path):
+        config = _minimal_config()
+        job_info = _fake_job_info()
+
+        _, context = build_jobset_context(
+            workflow_config=config,
+            step_index=0,
+            job_info=job_info,
+            workflow_name="ab1234",
+            workflow_secrets=[],
+            interactive=False,
+            assets_path=tmp_path / "assets",
+            s3_secret_name="external-creds",
+        )
+
+        manifest = yaml.safe_load(render.render("jobset.yaml.j2", context))
+        init_env, sidecar_env = self._cred_ref_names(manifest)
+
+        assert init_env["AWS_ACCESS_KEY_ID"]["valueFrom"]["secretKeyRef"]["name"] == "external-creds"
+        assert sidecar_env["AWS_ACCESS_KEY_ID"]["valueFrom"]["secretKeyRef"]["name"] == "external-creds"
+        assert sidecar_env["AWS_SECRET_ACCESS_KEY"]["valueFrom"]["secretKeyRef"]["name"] == "external-creds"
+
+    def test_workflow_id_env_var_stays_workflow_name_even_with_external_secret(self, tmp_path):
+        """SEEKR_CHAIN_WORKFLOW_ID is an identifier, not a credential ref — must not be redirected."""
+        config = _minimal_config()
+        job_info = _fake_job_info()
+
+        _, context = build_jobset_context(
+            workflow_config=config,
+            step_index=0,
+            job_info=job_info,
+            workflow_name="ab1234",
+            workflow_secrets=[],
+            interactive=False,
+            assets_path=tmp_path / "assets",
+            s3_secret_name="external-creds",
+        )
+
+        manifest = yaml.safe_load(render.render("jobset.yaml.j2", context))
+        _, sidecar_env = self._cred_ref_names(manifest)
+
+        assert sidecar_env["SEEKR_CHAIN_WORKFLOW_ID"]["value"] == "ab1234"
+
+
+class TestDatastoreEndpointAndRegionRendering:
+    """`datastore_endpoint_url`/`datastore_region` inject plain S3 connection
+    values into pods, overriding the optional secretKeyRef when set."""
+
+    def _envs(self, config, tmp_path):
+        job_info = _fake_job_info()
+        _, context = build_jobset_context(
+            workflow_config=config,
+            step_index=0,
+            job_info=job_info,
+            workflow_name="ab1234",
+            workflow_secrets=[],
+            interactive=False,
+            assets_path=tmp_path / "assets",
+        )
+        manifest = yaml.safe_load(render.render("jobset.yaml.j2", context))
+        pod_spec = manifest["spec"]["replicatedJobs"][0]["template"]["spec"]["template"]["spec"]
+        init_container = pod_spec["initContainers"][0]
+        main = next(c for c in pod_spec["containers"] if c["name"] == "main")
+        log_sidecar = next(c for c in pod_spec["containers"] if c["name"] == "log-sidecar")
+        return (
+            {e["name"]: e for e in init_container["env"]},
+            {e["name"]: e for e in main["env"]},
+            {e["name"]: e for e in log_sidecar["env"]},
+            main["env"],
+        )
+
+    def test_injects_plain_values_when_endpoint_and_region_set(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(
+            jobset,
+            "_user_config",
+            UserConfig(datastore_endpoint_url="https://s3.example.com", datastore_region="us-chicago-1"),
+        )
+        init_env, main_env, sidecar_env, _ = self._envs(_minimal_config(), tmp_path)
+
+        assert init_env["S3_ENDPOINT_URL"] == {"name": "S3_ENDPOINT_URL", "value": "https://s3.example.com"}
+        assert init_env["AWS_REGION"] == {"name": "AWS_REGION", "value": "us-chicago-1"}
+        assert sidecar_env["FB_S3_ENDPOINT"] == {"name": "FB_S3_ENDPOINT", "value": "https://s3.example.com"}
+        assert main_env["S3_ENDPOINT_URL"] == {"name": "S3_ENDPOINT_URL", "value": "https://s3.example.com"}
+        assert main_env["AWS_REGION"] == {"name": "AWS_REGION", "value": "us-chicago-1"}
+
+    def test_log_sidecar_has_no_aws_region(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(
+            jobset,
+            "_user_config",
+            UserConfig(datastore_endpoint_url="https://s3.example.com", datastore_region="us-chicago-1"),
+        )
+        _, _, sidecar_env, _ = self._envs(_minimal_config(), tmp_path)
+
+        assert "AWS_REGION" not in sidecar_env
+
+    def test_falls_back_to_optional_secret_refs_when_unset(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(jobset, "_user_config", UserConfig())
+        init_env, main_env, sidecar_env, _ = self._envs(_minimal_config(), tmp_path)
+
+        assert init_env["S3_ENDPOINT_URL"] == {
+            "name": "S3_ENDPOINT_URL",
+            "valueFrom": {"secretKeyRef": {"name": "ab1234", "key": "S3_ENDPOINT_URL", "optional": True}},
+        }
+        assert init_env["AWS_REGION"] == {
+            "name": "AWS_REGION",
+            "valueFrom": {"secretKeyRef": {"name": "ab1234", "key": "AWS_REGION", "optional": True}},
+        }
+        assert sidecar_env["FB_S3_ENDPOINT"] == {
+            "name": "FB_S3_ENDPOINT",
+            "valueFrom": {"secretKeyRef": {"name": "ab1234", "key": "FB_S3_ENDPOINT", "optional": True}},
+        }
+        assert "S3_ENDPOINT_URL" not in main_env
+        assert "AWS_REGION" not in main_env
+
+    def test_user_step_env_suppresses_config_injection_in_main(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(
+            jobset,
+            "_user_config",
+            UserConfig(datastore_endpoint_url="https://s3.example.com", datastore_region="us-chicago-1"),
+        )
+        config = _minimal_config(
+            steps=[
+                {
+                    "name": "train",
+                    "image": "pytorch:2.0",
+                    "script": "echo hello",
+                    "resources": {
+                        "cpus_per_node": "4",
+                        "mem_per_node": "8Gi",
+                        "ephemeral_storage_per_node": "10Gi",
+                    },
+                    "env": {"S3_ENDPOINT_URL": "user-endpoint"},
+                }
+            ]
+        )
+        _, _, _, main_env_list = self._envs(config, tmp_path)
+
+        s3_entries = [e for e in main_env_list if e["name"] == "S3_ENDPOINT_URL"]
+        assert s3_entries == [{"name": "S3_ENDPOINT_URL", "value": "user-endpoint"}]

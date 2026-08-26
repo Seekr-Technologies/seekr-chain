@@ -54,9 +54,11 @@ def test_package_assets_passes_interactive_through(monkeypatch, tmp_path):
         workflow_name="wf-1",
         workflow_secrets=[],
         interactive=True,
+        s3_secret_name="external-creds",
     )
 
     assert captured["interactive"] is True
+    assert captured["s3_secret_name"] == "external-creds"
 
 
 def test_package_assets_includes_materialized_nix_workspace_for_builds(monkeypatch, tmp_path):
@@ -254,7 +256,7 @@ class TestControllerJobsetStatusSyncSidecar:
     is involved, and the controller container needs S3 credentials plus the
     destination path wired into its env."""
 
-    def _build(self, workflow_secrets=None):
+    def _build(self, workflow_secrets=None, s3_secret_name="wf-abc"):
         config = WorkflowConfig(
             name="t",
             steps=[{"name": "a", "image": "ubuntu", "script": "echo hi"}],
@@ -273,6 +275,7 @@ class TestControllerJobsetStatusSyncSidecar:
             datastore_root="s3://bucket/",
             interactive=False,
             service_account="sa",
+            s3_secret_name=s3_secret_name,
         )
 
     def test_controller_container_env_carries_s3_creds_and_remote_status_path(self):
@@ -299,3 +302,88 @@ class TestControllerJobsetStatusSyncSidecar:
         names = [e["name"] for e in controller["env"]]
 
         assert sorted(names) == sorted(set(names))
+
+    def test_init_container_cred_refs_point_at_workflow_id_by_default(self):
+        """Regression: default (local) mode keeps init-container S3 cred refs on the workflow's own Secret."""
+        jobset = self._build(s3_secret_name="wf-abc")
+        init_container = jobset["spec"]["replicatedJobs"][0]["template"]["spec"]["template"]["spec"]["initContainers"][
+            0
+        ]
+        secret_names = {e["valueFrom"]["secretKeyRef"]["name"] for e in init_container["env"]}
+
+        assert secret_names == {"wf-abc"}
+
+    def test_init_container_cred_refs_point_at_external_secret_when_configured(self):
+        jobset = self._build(s3_secret_name="external-creds")
+        init_container = jobset["spec"]["replicatedJobs"][0]["template"]["spec"]["template"]["spec"]["initContainers"][
+            0
+        ]
+        secret_names = {e["valueFrom"]["secretKeyRef"]["name"] for e in init_container["env"]}
+
+        assert secret_names == {"external-creds"}
+
+
+class TestControllerInitEnvDatastoreEndpointAndRegion:
+    """`datastore_endpoint_url`/`datastore_region` inject plain values into the
+    controller init container, overriding the optional secretKeyRef when set;
+    the S3 credential refs stay secretKeyRef either way."""
+
+    def _init_env(self, s3_secret_name="wf-abc"):
+        config = WorkflowConfig(
+            name="t",
+            steps=[{"name": "a", "image": "ubuntu", "script": "echo hi"}],
+        )
+        job_info = {
+            "id": "wf-abc",
+            "s3_path": "s3://bucket/jobs/wf/abc",
+            "remote_assets_path": "s3://bucket/jobs/wf/abc/assets.tar.gz",
+            "remote_status_path": "s3://bucket/jobs/wf/abc/status.json",
+        }
+        jobset = lkw_module._build_controller_jobset(
+            workflow_id="wf-abc",
+            config=config,
+            job_info=job_info,
+            workflow_secrets=[],
+            datastore_root="s3://bucket/",
+            interactive=False,
+            service_account="sa",
+            s3_secret_name=s3_secret_name,
+        )
+        init_container = jobset["spec"]["replicatedJobs"][0]["template"]["spec"]["template"]["spec"]["initContainers"][
+            0
+        ]
+        return {e["name"]: e for e in init_container["env"]}
+
+    def test_injects_plain_endpoint_and_region_when_set(self, monkeypatch):
+        monkeypatch.setattr(
+            lkw_module,
+            "_user_config",
+            UserConfig(datastore_endpoint_url="https://s3.example.com", datastore_region="us-chicago-1"),
+        )
+        env = self._init_env()
+
+        assert env["S3_ENDPOINT_URL"] == {"name": "S3_ENDPOINT_URL", "value": "https://s3.example.com"}
+        assert env["AWS_REGION"] == {"name": "AWS_REGION", "value": "us-chicago-1"}
+        assert env["AWS_ACCESS_KEY_ID"]["valueFrom"]["secretKeyRef"] == {"name": "wf-abc", "key": "AWS_ACCESS_KEY_ID"}
+        assert env["AWS_SECRET_ACCESS_KEY"]["valueFrom"]["secretKeyRef"] == {
+            "name": "wf-abc",
+            "key": "AWS_SECRET_ACCESS_KEY",
+        }
+
+    def test_falls_back_to_optional_secret_refs_when_unset(self, monkeypatch):
+        monkeypatch.setattr(lkw_module, "_user_config", UserConfig())
+        env = self._init_env()
+
+        assert env["S3_ENDPOINT_URL"] == {
+            "name": "S3_ENDPOINT_URL",
+            "valueFrom": {"secretKeyRef": {"name": "wf-abc", "key": "S3_ENDPOINT_URL", "optional": True}},
+        }
+        assert env["AWS_REGION"] == {
+            "name": "AWS_REGION",
+            "valueFrom": {"secretKeyRef": {"name": "wf-abc", "key": "AWS_REGION", "optional": True}},
+        }
+        assert env["AWS_ACCESS_KEY_ID"]["valueFrom"]["secretKeyRef"] == {"name": "wf-abc", "key": "AWS_ACCESS_KEY_ID"}
+        assert env["AWS_SECRET_ACCESS_KEY"]["valueFrom"]["secretKeyRef"] == {
+            "name": "wf-abc",
+            "key": "AWS_SECRET_ACCESS_KEY",
+        }

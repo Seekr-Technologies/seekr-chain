@@ -10,6 +10,7 @@ from seekr_chain.backends.k8s.launch_k8s_workflow import (
     _create_secrets,
     _create_workflow_secrets,
     _resolve_env_secrets,
+    _validate_external_s3_secret,
 )
 from seekr_chain.config import WorkflowConfig
 
@@ -107,19 +108,13 @@ class TestResolveEnvSecrets:
         assert "FROM_CLUSTER" not in result
 
 
-FAKE_S3_CREDS = {
-    "aws_access_key_id": "auto-key",
-    "aws_secret_access_key": "auto-secret",
-}
-
-
 class TestCreateWorkflowSecrets:
     """_create_workflow_secrets must never emit duplicate env var names."""
 
     def test_normal_path_injects_s3_creds(self):
-        """When the user has no AWS keys in secrets, both s3 creds are injected."""
+        """When the user has no AWS keys in secrets, both s3 creds are injected, pointing at the per-workflow secret."""
         config = _config_with_secrets(None)
-        result = _create_workflow_secrets(config, "wf-abc", FAKE_S3_CREDS)
+        result = _create_workflow_secrets(config, "wf-abc", "wf-abc")
         names = [e["name"] for e in result]
         assert "AWS_ACCESS_KEY_ID" in names
         assert "AWS_SECRET_ACCESS_KEY" in names
@@ -127,22 +122,22 @@ class TestCreateWorkflowSecrets:
         assert names.count("AWS_SECRET_ACCESS_KEY") == 1
 
     def test_user_inline_secret_wins_over_s3_creds(self):
-        """User-defined inline secret takes precedence; s3_creds entry is suppressed."""
+        """User-defined inline secret takes precedence; s3_secret_name entry is suppressed."""
         config = _config_with_secrets({"AWS_ACCESS_KEY_ID": "user-key"})
-        result = _create_workflow_secrets(config, "wf-abc", FAKE_S3_CREDS)
+        result = _create_workflow_secrets(config, "wf-abc", "wf-abc")
         names = [e["name"] for e in result]
         # Exactly one entry for the key — no duplicate
         assert names.count("AWS_ACCESS_KEY_ID") == 1
         # The entry must reference the per-workflow secret (user value), not overwrite it
         entry = next(e for e in result if e["name"] == "AWS_ACCESS_KEY_ID")
         assert entry["valueFrom"]["secretKeyRef"]["name"] == "wf-abc"
-        # s3_creds secret for the other key is still injected
+        # s3_secret_name entry for the other key is still injected
         assert "AWS_SECRET_ACCESS_KEY" in names
 
     def test_user_secret_ref_wins_over_s3_creds(self):
-        """SecretRefSource entry takes precedence; s3_creds entry is suppressed."""
+        """SecretRefSource entry takes precedence; s3_secret_name entry is suppressed."""
         config = _config_with_secrets({"AWS_ACCESS_KEY_ID": {"secretRef": {"name": "my-vault", "key": "key-id"}}})
-        result = _create_workflow_secrets(config, "wf-abc", FAKE_S3_CREDS)
+        result = _create_workflow_secrets(config, "wf-abc", "wf-abc")
         names = [e["name"] for e in result]
         assert names.count("AWS_ACCESS_KEY_ID") == 1
         # Must point at the external secret, not the per-workflow one
@@ -150,24 +145,79 @@ class TestCreateWorkflowSecrets:
         assert entry["valueFrom"]["secretKeyRef"]["name"] == "my-vault"
 
     def test_both_aws_keys_user_defined_no_s3_creds_injected(self):
-        """If user defines both AWS keys, neither s3_creds entry appears."""
+        """If user defines both AWS keys, neither auto-injected entry appears."""
         config = _config_with_secrets(
             {
                 "AWS_ACCESS_KEY_ID": "user-key",
                 "AWS_SECRET_ACCESS_KEY": "user-secret",
             }
         )
-        result = _create_workflow_secrets(config, "wf-abc", FAKE_S3_CREDS)
+        result = _create_workflow_secrets(config, "wf-abc", "wf-abc")
         names = [e["name"] for e in result]
         assert names.count("AWS_ACCESS_KEY_ID") == 1
         assert names.count("AWS_SECRET_ACCESS_KEY") == 1
 
     def test_warning_logged_when_skipping(self):
-        """A warning is emitted for each s3_creds key suppressed by user config."""
+        """A warning is emitted for each auto-injected cred key suppressed by user config."""
         config = _config_with_secrets({"AWS_ACCESS_KEY_ID": "user-key"})
         with patch("seekr_chain.backends.k8s.launch_k8s_workflow.logger") as mock_logger:
-            _create_workflow_secrets(config, "wf-abc", FAKE_S3_CREDS)
+            _create_workflow_secrets(config, "wf-abc", "wf-abc")
         assert mock_logger.warning.called
+
+    def test_local_mode_points_both_cred_refs_at_workflow_secret(self):
+        """When s3_secret_name == workflow_name (local/default mode), both AWS keys point at it."""
+        config = _config_with_secrets(None)
+        result = _create_workflow_secrets(config, "wf-abc", "wf-abc")
+        by_name = {e["name"]: e for e in result}
+        assert by_name["AWS_ACCESS_KEY_ID"]["valueFrom"]["secretKeyRef"]["name"] == "wf-abc"
+        assert by_name["AWS_SECRET_ACCESS_KEY"]["valueFrom"]["secretKeyRef"]["name"] == "wf-abc"
+
+    def test_external_mode_points_cred_refs_at_external_secret_but_not_user_inline_secret(self):
+        """In external mode, only the AWS cred refs redirect — a user inline secret still lives
+        in the per-workflow Secret."""
+        config = _config_with_secrets({"MY_TOKEN": "user-value"})
+        result = _create_workflow_secrets(config, "wf-abc", "external-creds")
+        by_name = {e["name"]: e for e in result}
+
+        assert by_name["AWS_ACCESS_KEY_ID"]["valueFrom"]["secretKeyRef"]["name"] == "external-creds"
+        assert by_name["AWS_SECRET_ACCESS_KEY"]["valueFrom"]["secretKeyRef"]["name"] == "external-creds"
+        assert by_name["MY_TOKEN"]["valueFrom"]["secretKeyRef"]["name"] == "wf-abc"
+
+
+class TestValidateExternalS3Secret:
+    def test_raises_runtime_error_when_secret_not_found(self):
+        mock_v1 = MagicMock()
+        mock_v1.read_namespaced_secret.side_effect = kubernetes.client.exceptions.ApiException(
+            status=404, reason="Not Found"
+        )
+        with patch("seekr_chain.backends.k8s.launch_k8s_workflow.kube", core_v1=mock_v1):
+            with pytest.raises(RuntimeError, match="external-creds"):
+                _validate_external_s3_secret("external-creds", "my-namespace")
+
+    def test_raises_runtime_error_listing_missing_key(self):
+        secret = MagicMock(data={"AWS_ACCESS_KEY_ID": "base64val"})
+        mock_v1 = MagicMock()
+        mock_v1.read_namespaced_secret.return_value = secret
+        with patch("seekr_chain.backends.k8s.launch_k8s_workflow.kube", core_v1=mock_v1):
+            with pytest.raises(RuntimeError, match="AWS_SECRET_ACCESS_KEY"):
+                _validate_external_s3_secret("external-creds", "my-namespace")
+
+    def test_does_not_raise_when_both_required_keys_present(self):
+        secret = MagicMock(data={"AWS_ACCESS_KEY_ID": "base64val", "AWS_SECRET_ACCESS_KEY": "base64val"})
+        mock_v1 = MagicMock()
+        mock_v1.read_namespaced_secret.return_value = secret
+        with patch("seekr_chain.backends.k8s.launch_k8s_workflow.kube", core_v1=mock_v1):
+            _validate_external_s3_secret("external-creds", "my-namespace")
+
+    def test_logs_warning_and_does_not_raise_on_forbidden(self, caplog):
+        mock_v1 = MagicMock()
+        mock_v1.read_namespaced_secret.side_effect = kubernetes.client.exceptions.ApiException(
+            status=403, reason="Forbidden"
+        )
+        with patch("seekr_chain.backends.k8s.launch_k8s_workflow.kube", core_v1=mock_v1):
+            with caplog.at_level("WARNING"):
+                _validate_external_s3_secret("external-creds", "my-namespace")
+        assert "external-creds" in caplog.text
 
 
 class TestCreateSecretsCleanup:
@@ -219,3 +269,19 @@ class TestCreateSecretsCleanup:
 
         mock_v1.delete_namespaced_secret.assert_called_once_with(name="stale-wf", namespace=config.namespace)
         assert not mock_logger.warning.called
+
+
+class TestCreateSecretsExternalMode:
+    def test_creates_per_workflow_secret_for_user_inline_secret_when_s3_creds_empty(self):
+        """External mode passes s3_creds={} — the per-workflow Secret must still be created
+        for any user inline/env secret."""
+        config = _config_with_secrets({"MY_TOKEN": "user-value"})
+        mock_v1 = MagicMock()
+        mock_v1.list_namespaced_secret.return_value = MagicMock(items=[])
+
+        with patch("seekr_chain.backends.k8s.launch_k8s_workflow.kube", core_v1=mock_v1):
+            _create_secrets("wf-1", {}, config)
+
+        mock_v1.create_namespaced_secret.assert_called_once()
+        _, kwargs = mock_v1.create_namespaced_secret.call_args
+        assert kwargs["body"].string_data == {"MY_TOKEN": "user-value"}

@@ -35,6 +35,9 @@ _ENV_VAR_MAP: dict[str, str] = {
     "SEEKRCHAIN_CONTROLLER_IMAGE": "controller_image",
     "SEEKRCHAIN_SERVICE_ACCOUNT": "service_account",
     "SEEKRCHAIN_STEP_SERVICE_ACCOUNT": "step_service_account",
+    "SEEKRCHAIN_DATASTORE_KUBERNETES_SECRET": "datastore_kubernetes_secret",
+    "SEEKRCHAIN_DATASTORE_ENDPOINT_URL": "datastore_endpoint_url",
+    "SEEKRCHAIN_DATASTORE_REGION": "datastore_region",
     "SEEKRCHAIN_NIX_STORE": "nix_store",
     "SEEKRCHAIN_NIX_RUNNER_IMAGE": "nix_runner_image",
     "SEEKRCHAIN_NIX_STORE_VOLUME_KIND": "nix_store_volume_kind",
@@ -62,6 +65,22 @@ class UserConfig:
     step_service_account :
         ServiceAccount name for step pods. When unset, omits
         ``serviceAccountName`` so Kubernetes uses the namespace default.
+    datastore_kubernetes_secret :
+        Name of a pre-existing Kubernetes Secret (in the workflow namespace)
+        holding the datastore's S3 credentials. When set, seekr-chain does not
+        read or upload local AWS credentials per workflow; instead every
+        S3-credential env var on the pods references this Secret, which must
+        contain ``AWS_ACCESS_KEY_ID`` and ``AWS_SECRET_ACCESS_KEY`` (and
+        optionally ``S3_ENDPOINT_URL``/``AWS_REGION``/``FB_S3_ENDPOINT``).
+    datastore_endpoint_url :
+        Custom S3 endpoint URL for the datastore, e.g. OCI Object Storage
+        (``https://....oraclecloud.com``). Configures the local boto3 client
+        and, on the k8s backend, is injected as a plain
+        ``S3_ENDPOINT_URL``/``FB_S3_ENDPOINT`` env into pods — overriding those
+        keys from ``datastore_kubernetes_secret`` when both are set.
+    datastore_region :
+        S3 region; configures the local boto3 client and is injected as plain
+        ``AWS_REGION`` into pods.
     nix_store :
         Default URI for the nix binary cache (e.g. ``s3://bucket``); any
         nix store type works. Used when a step's ``nix.store`` is not
@@ -104,6 +123,9 @@ class UserConfig:
     controller_image: str | None = None
     service_account: str | None = None
     step_service_account: str | None = None
+    datastore_kubernetes_secret: str | None = None
+    datastore_endpoint_url: str | None = None
+    datastore_region: str | None = None
     nix_store: str | None = None
     nix_runner_image: str | None = None
     nix_store_volume_kind: str | None = None
@@ -159,6 +181,9 @@ def _load_config() -> UserConfig:
         controller_image=values.get("controller_image"),
         service_account=values.get("service_account"),
         step_service_account=values.get("step_service_account"),
+        datastore_kubernetes_secret=values.get("datastore_kubernetes_secret"),
+        datastore_endpoint_url=values.get("datastore_endpoint_url"),
+        datastore_region=values.get("datastore_region"),
         nix_store=values.get("nix_store"),
         nix_runner_image=values.get("nix_runner_image"),
         nix_store_volume_kind=values.get("nix_store_volume_kind"),

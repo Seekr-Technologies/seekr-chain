@@ -173,3 +173,93 @@ class TestStepServiceAccountConfig:
         with no_dotenv(), no_toml_files():
             cfg = _load_config()
         assert cfg.step_service_account is None
+
+
+class TestDatastoreKubernetesSecretConfig:
+    def test_env_var(self, monkeypatch):
+        monkeypatch.setenv("SEEKRCHAIN_DATASTORE_KUBERNETES_SECRET", "oci-storage-creds")
+        with no_dotenv(), no_toml_files():
+            cfg = _load_config()
+        assert cfg.datastore_kubernetes_secret == "oci-storage-creds"
+
+    def test_dotenv_file(self, monkeypatch, tmp_path):
+        monkeypatch.delenv("SEEKRCHAIN_DATASTORE_KUBERNETES_SECRET", raising=False)
+        dotenv_file = tmp_path / ".env"
+        dotenv_file.write_text("SEEKRCHAIN_DATASTORE_KUBERNETES_SECRET=oci-storage-creds\n")
+        with patch("seekr_chain.user_config.dotenv.find_dotenv", return_value=str(dotenv_file)), no_toml_files():
+            cfg = _load_config()
+        assert cfg.datastore_kubernetes_secret == "oci-storage-creds"
+
+    def test_local_seekrchain_toml(self, monkeypatch, tmp_path):
+        monkeypatch.delenv("SEEKRCHAIN_DATASTORE_KUBERNETES_SECRET", raising=False)
+        toml_file = tmp_path / ".seekrchain.toml"
+        toml_file.write_text('datastore_kubernetes_secret = "oci-storage-creds"\n')
+        with no_dotenv(), patch("seekr_chain.user_config._find_file_walking_up", return_value=toml_file):
+            cfg = _load_config()
+        assert cfg.datastore_kubernetes_secret == "oci-storage-creds"
+
+    def test_returns_none_when_nothing_set(self, monkeypatch):
+        monkeypatch.delenv("SEEKRCHAIN_DATASTORE_KUBERNETES_SECRET", raising=False)
+        with no_dotenv(), no_toml_files():
+            cfg = _load_config()
+        assert cfg.datastore_kubernetes_secret is None
+
+
+class TestDatastoreEndpointUrlConfig:
+    def test_env_var(self, monkeypatch):
+        monkeypatch.setenv("SEEKRCHAIN_DATASTORE_ENDPOINT_URL", "https://s3.example.com")
+        with no_dotenv(), no_toml_files():
+            cfg = _load_config()
+        assert cfg.datastore_endpoint_url == "https://s3.example.com"
+
+    def test_dotenv_file(self, monkeypatch, tmp_path):
+        monkeypatch.delenv("SEEKRCHAIN_DATASTORE_ENDPOINT_URL", raising=False)
+        dotenv_file = tmp_path / ".env"
+        dotenv_file.write_text("SEEKRCHAIN_DATASTORE_ENDPOINT_URL=https://s3.example.com\n")
+        with patch("seekr_chain.user_config.dotenv.find_dotenv", return_value=str(dotenv_file)), no_toml_files():
+            cfg = _load_config()
+        assert cfg.datastore_endpoint_url == "https://s3.example.com"
+
+    def test_local_seekrchain_toml(self, monkeypatch, tmp_path):
+        monkeypatch.delenv("SEEKRCHAIN_DATASTORE_ENDPOINT_URL", raising=False)
+        toml_file = tmp_path / ".seekrchain.toml"
+        toml_file.write_text('datastore_endpoint_url = "https://s3.example.com"\n')
+        with no_dotenv(), patch("seekr_chain.user_config._find_file_walking_up", return_value=toml_file):
+            cfg = _load_config()
+        assert cfg.datastore_endpoint_url == "https://s3.example.com"
+
+    def test_returns_none_when_nothing_set(self, monkeypatch):
+        monkeypatch.delenv("SEEKRCHAIN_DATASTORE_ENDPOINT_URL", raising=False)
+        with no_dotenv(), no_toml_files():
+            cfg = _load_config()
+        assert cfg.datastore_endpoint_url is None
+
+
+class TestDatastoreRegionConfig:
+    def test_env_var(self, monkeypatch):
+        monkeypatch.setenv("SEEKRCHAIN_DATASTORE_REGION", "us-chicago-1")
+        with no_dotenv(), no_toml_files():
+            cfg = _load_config()
+        assert cfg.datastore_region == "us-chicago-1"
+
+    def test_dotenv_file(self, monkeypatch, tmp_path):
+        monkeypatch.delenv("SEEKRCHAIN_DATASTORE_REGION", raising=False)
+        dotenv_file = tmp_path / ".env"
+        dotenv_file.write_text("SEEKRCHAIN_DATASTORE_REGION=us-chicago-1\n")
+        with patch("seekr_chain.user_config.dotenv.find_dotenv", return_value=str(dotenv_file)), no_toml_files():
+            cfg = _load_config()
+        assert cfg.datastore_region == "us-chicago-1"
+
+    def test_local_seekrchain_toml(self, monkeypatch, tmp_path):
+        monkeypatch.delenv("SEEKRCHAIN_DATASTORE_REGION", raising=False)
+        toml_file = tmp_path / ".seekrchain.toml"
+        toml_file.write_text('datastore_region = "us-chicago-1"\n')
+        with no_dotenv(), patch("seekr_chain.user_config._find_file_walking_up", return_value=toml_file):
+            cfg = _load_config()
+        assert cfg.datastore_region == "us-chicago-1"
+
+    def test_returns_none_when_nothing_set(self, monkeypatch):
+        monkeypatch.delenv("SEEKRCHAIN_DATASTORE_REGION", raising=False)
+        with no_dotenv(), no_toml_files():
+            cfg = _load_config()
+        assert cfg.datastore_region is None
