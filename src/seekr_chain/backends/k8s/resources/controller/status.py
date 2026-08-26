@@ -44,9 +44,20 @@ _shipper: threading.Thread | None = None
 
 
 def _workflow_status_from_phases(phases: dict[str, str]) -> str:
-    """Roll per-step phases up into a single workflow status, via the shared
-    aggregate() precedence table (see status_model.py)."""
-    return aggregate([Status(p) for p in phases.values()]).value
+    """Roll per-step phases up into a single workflow status.
+
+    CANCELED wins over FAILED even though aggregate()'s general precedence
+    (status_model.py) puts FAILED first -- a user's cancellation is the
+    deciding action, matching workflow_state.controller_jobset_status_and_completion()'s
+    workflow_cancelled()-before-workflow_failed() check. Falls back to
+    aggregate() for everything else.
+    """
+    statuses = [Status(p) for p in phases.values()]
+    if Status.CANCELED in statuses:
+        return Status.CANCELED.value
+    if Status.FAILED in statuses:
+        return Status.FAILED.value
+    return aggregate(statuses).value
 
 
 def _build_status(

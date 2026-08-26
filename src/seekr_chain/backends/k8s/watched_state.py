@@ -588,7 +588,7 @@ def controller_status_watcher(
 ) -> ReconnectingWatcher:
     """Build a ``ReconnectingWatcher`` that maintains a live ``Status``
     for ``K8sWorkflow.watch_controller_status()`` by watching the controller
-    JobSet and its phases ConfigMap (for CANCELLED-vs-FAILED disambiguation).
+    JobSet and its phases ConfigMap (for CANCELED-vs-FAILED disambiguation).
 
     Deliberately lighter than ``workflow_state_watcher()``:
     ``watch_controller_status()`` (used by ``wait()``, which may be watching

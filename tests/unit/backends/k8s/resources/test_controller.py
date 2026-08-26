@@ -176,7 +176,7 @@ class TestDeriveStatus:
     @pytest.mark.parametrize(
         "phases, expected",
         [
-            ({"a": "CANCELED", "b": "FAILED"}, "FAILED"),
+            ({"a": "CANCELED", "b": "FAILED"}, "CANCELED"),
             ({"a": "CANCELED", "b": "SUCCEEDED"}, "CANCELED"),
             ({"a": "FAILED", "b": "SUCCEEDED"}, "FAILED"),
             ({"a": "SUCCEEDED", "b": "SKIPPED"}, "SUCCEEDED"),

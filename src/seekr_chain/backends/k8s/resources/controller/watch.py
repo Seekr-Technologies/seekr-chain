@@ -286,7 +286,7 @@ def main() -> int:
             "WorkflowCancelled",
             f"Workflow cancelled — cancelled steps: {cancelled}",
         )
-        print(f"[controller] workflow CANCELLED — cancelled steps: {cancelled}", flush=True)
+        print(f"[controller] workflow CANCELED — cancelled steps: {cancelled}", flush=True)
         flush_status(workflow_id, dag, phases, timings)
         return 0
 
