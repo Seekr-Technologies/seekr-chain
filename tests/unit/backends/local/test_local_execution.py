@@ -10,7 +10,7 @@ from seekr_chain.backends.local.local_workflow import (
     launch_local_workflow,
 )
 from seekr_chain.config import MultiRoleStepConfig, RoleSpecConfig, WorkflowConfig
-from seekr_chain.status import WorkflowStatus
+from seekr_chain.status_model import Status
 
 # ---------------------------------------------------------------------------
 # LocalWorkflow class
@@ -20,11 +20,11 @@ from seekr_chain.status import WorkflowStatus
 class TestLocalWorkflow:
     def test_succeeded_status(self):
         wf = LocalWorkflow(name="my-wf", succeeded=True)
-        assert wf.get_status() == WorkflowStatus.SUCCEEDED
+        assert wf.get_status() == Status.SUCCEEDED
 
     def test_failed_status(self):
         wf = LocalWorkflow(name="my-wf", succeeded=False)
-        assert wf.get_status() == WorkflowStatus.FAILED
+        assert wf.get_status() == Status.FAILED
 
     def test_id_and_name(self):
         wf = LocalWorkflow(name="my-wf", succeeded=True)
@@ -84,7 +84,7 @@ class TestValidation:
         )
         # Should not raise — multi-node is coerced to 1 with a warning.
         wf = launch_local_workflow(config)
-        assert wf.get_status() == WorkflowStatus.SUCCEEDED
+        assert wf.get_status() == Status.SUCCEEDED
         # config is not mutated; the override happens internally.
         assert config.steps[0].resources.num_nodes == 2
 
@@ -103,7 +103,7 @@ class TestStepExecution:
             }
         )
         wf = launch_local_workflow(config)
-        assert wf.get_status() == WorkflowStatus.SUCCEEDED
+        assert wf.get_status() == Status.SUCCEEDED
 
     def test_single_step_failure(self):
         config = WorkflowConfig.model_validate(
@@ -113,7 +113,7 @@ class TestStepExecution:
             }
         )
         wf = launch_local_workflow(config)
-        assert wf.get_status() == WorkflowStatus.FAILED
+        assert wf.get_status() == Status.FAILED
 
     def test_dag_order(self, tmp_path):
         """Steps with depends_on execute in the right order."""
@@ -137,7 +137,7 @@ class TestStepExecution:
             }
         )
         wf = launch_local_workflow(config)
-        assert wf.get_status() == WorkflowStatus.SUCCEEDED
+        assert wf.get_status() == Status.SUCCEEDED
         lines = order_file.read_text().splitlines()
         assert lines == ["first", "second"]
 
@@ -159,7 +159,7 @@ class TestStepExecution:
             }
         )
         wf = launch_local_workflow(config)
-        assert wf.get_status() == WorkflowStatus.FAILED
+        assert wf.get_status() == Status.FAILED
         assert not marker.exists(), "dependent step should not have run"
 
     def test_after_script_always_runs(self, tmp_path):
@@ -179,7 +179,7 @@ class TestStepExecution:
             }
         )
         wf = launch_local_workflow(config)
-        assert wf.get_status() == WorkflowStatus.FAILED
+        assert wf.get_status() == Status.FAILED
         assert marker.exists(), "after_script should have created the marker file"
 
     def test_env_vars_injected(self, tmp_path):
@@ -298,7 +298,7 @@ printf 'SEEKR_CHAIN_ARGS=%s\\n' "$SEEKR_CHAIN_ARGS"
             }
         )
         wf = launch_local_workflow(config)
-        assert wf.get_status() == WorkflowStatus.FAILED
+        assert wf.get_status() == Status.FAILED
         assert not marker.exists(), "script should not have run after before_script failed"
 
     def test_independent_steps_both_run_when_one_fails(self, tmp_path):
@@ -314,7 +314,7 @@ printf 'SEEKR_CHAIN_ARGS=%s\\n' "$SEEKR_CHAIN_ARGS"
             }
         )
         wf = launch_local_workflow(config)
-        assert wf.get_status() == WorkflowStatus.FAILED
+        assert wf.get_status() == Status.FAILED
         assert marker.exists(), "independent step B should have run despite A failing"
 
     def test_config_as_dict(self):
@@ -324,7 +324,7 @@ printf 'SEEKR_CHAIN_ARGS=%s\\n' "$SEEKR_CHAIN_ARGS"
             "steps": [{"name": "s", "image": "ubuntu:24.04", "script": "exit 0"}],
         }
         wf = launch_local_workflow(config_dict)
-        assert wf.get_status() == WorkflowStatus.SUCCEEDED
+        assert wf.get_status() == Status.SUCCEEDED
 
     def test_code_path_sets_workdir(self, tmp_path):
         """config.code.path is used as the working directory for script execution."""

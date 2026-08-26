@@ -37,8 +37,8 @@ from typing import Optional
 from rich.text import Text
 
 from seekr_chain.backends.k8s.watched_state import WatchDisconnection
-from seekr_chain.backends.k8s.workflow_state import StepState, WorkflowState
-from seekr_chain.status import PodStatus
+from seekr_chain.backends.k8s.workflow_state import Detail, StepState, WorkflowState
+from seekr_chain.status_model import Status
 from seekr_chain.utils import format_duration
 
 # ---------------------------------------------------------------------------
@@ -61,9 +61,10 @@ _STATUS_STYLES: dict[str, str] = {
     "SUCCEEDED": "green",
     "RUNNING": "cyan",
     "FAILED": "bold red",
-    "TERMINATED": "bold red",
+    "CANCELED": "bold red",
     "ERROR": "bold red",
     "PENDING": "yellow",
+    "STARTING": "yellow",
     "UNKNOWN": "yellow",
     "INIT:WAITING": "yellow",
     "INIT:RUNNING": "cyan",
@@ -79,6 +80,12 @@ def _get_status_style(status_value: str) -> str:
     return _STATUS_STYLES.get(status_value, "")
 
 
+def _status_label(status: Status, detail: Optional[Detail]) -> str:
+    """The displayed status text: the fine-grained ``detail`` when present
+    (PULL:ERROR, INIT:WAITING, ...), else the coarse ``status``."""
+    return detail.value if detail is not None else status.value
+
+
 # Body indent is sized so the STATUS column on a child row aligns with
 # the STATUS column under the ``[HH:MM:SS] `` header prefix (both 13 chars).
 _BODY_INDENT = " " * 11
@@ -89,7 +96,7 @@ _BODY_INDENT = " " * 11
 # ---------------------------------------------------------------------------
 
 
-def format_count(statuses: list[PodStatus], total: Optional[int] = None) -> str:
+def format_count(statuses: list[Status], total: Optional[int] = None) -> str:
     """Format a list of statuses as ``N+M/T`` (done + running / total) or ``N/T``.
 
     Pass ``total`` to override the denominator (e.g. when not all steps have
@@ -172,7 +179,7 @@ def _step_row(step_state, prefix: str, all_pods: list[tuple]) -> _StatusRow:
     pod_id = all_pods[0][1].name if len(all_pods) == 1 else ""
     return _StatusRow(
         prefix=prefix,
-        status=step_state.pod.status.value,
+        status=_status_label(step_state.pod.status, step_state.pod.detail),
         time_str=_step_time(step_state),
         count_str=count_str,
         name=_STEP_NAME_INDENT + (step_state.name or ""),
@@ -197,7 +204,7 @@ def _pod_rows(step_state, step_pipe: str) -> list[_StatusRow]:
         rows.append(
             _StatusRow(
                 prefix=pod_prefix,
-                status=pod_state.status.value,
+                status=_status_label(pod_state.status, pod_state.detail),
                 time_str=format_duration(pod_state.dt_start, pod_state.dt_end),
                 count_str="",
                 name=_POD_NAME_INDENT + pod_name,

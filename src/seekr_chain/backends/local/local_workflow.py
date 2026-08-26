@@ -19,7 +19,7 @@ import tempfile
 
 from seekr_chain.config import MultiRoleStepConfig, SingleRoleStepConfig, WorkflowConfig
 from seekr_chain.dag import topological_sort
-from seekr_chain.status import WorkflowStatus
+from seekr_chain.status_model import Status
 from seekr_chain.workflow import Workflow
 
 logger = logging.getLogger(__name__)
@@ -40,8 +40,8 @@ class LocalWorkflow(Workflow):
     def name(self) -> str:
         return self._name
 
-    def get_status(self) -> WorkflowStatus:
-        return WorkflowStatus.SUCCEEDED if self._succeeded else WorkflowStatus.FAILED
+    def get_status(self) -> Status:
+        return Status.SUCCEEDED if self._succeeded else Status.FAILED
 
     def get_detailed_state(self):
         return None

@@ -7,7 +7,8 @@ PULL:ERROR pod status rather than silently hanging in PENDING.
 import time
 
 import seekr_chain
-from seekr_chain.status import PodStatus
+from seekr_chain.backends.k8s.workflow_state import Detail
+from seekr_chain.status_model import Status
 
 
 class TestImagePullError:
@@ -48,7 +49,7 @@ class TestImagePullError:
                 for step_state in state.steps:
                     for role_state in step_state.roles:
                         for pod_state in role_state.pods:
-                            if pod_state.status == PodStatus.PULL_ERROR:
+                            if pod_state.status == Status.STARTING and pod_state.detail == Detail.PULL_ERROR:
                                 pull_error_seen = True
 
                 if pull_error_seen:

@@ -12,7 +12,7 @@ from dataclasses import asdict
 from types import SimpleNamespace
 
 from seekr_chain.backends.k8s.workflow_state import build_workflow_state
-from seekr_chain.status import PodStatus, WorkflowStatus
+from seekr_chain.status_model import Status
 
 
 def _phases_configmap(phases: dict):
@@ -68,7 +68,7 @@ def test_build_workflow_state_with_no_job_is_unknown():
     assert _state_dict(state) == {
         "id": "wf-1",
         "name": None,
-        "status": WorkflowStatus.UNKNOWN,
+        "status": Status.UNKNOWN,
         "dt_start": None,
         "dt_end": None,
         "total_steps": None,
@@ -86,7 +86,7 @@ def test_build_workflow_state_reads_job_metadata():
     assert _state_dict(state) == {
         "id": "wf-1",
         "name": "my-job",
-        "status": WorkflowStatus.RUNNING,
+        "status": Status.RUNNING,
         "dt_start": None,
         "dt_end": None,
         "total_steps": 2,
@@ -124,7 +124,7 @@ def test_build_workflow_state_step_with_no_pods_still_appears():
     assert len(state.steps) == 1
     assert state.steps[0].name == "step-a"
     assert state.steps[0].roles == []
-    assert state.steps[0].pod.status == PodStatus.PENDING
+    assert state.steps[0].pod.status == Status.PENDING
 
 
 def test_build_workflow_state_appends_bare_row_for_skipped_step_with_no_jobset():
@@ -139,7 +139,7 @@ def test_build_workflow_state_appends_bare_row_for_skipped_step_with_no_jobset()
     assert set(steps_by_name) == {"step-a", "step-b"}
     skipped = steps_by_name["step-b"]
     assert skipped.roles == []
-    assert skipped.pod.status == PodStatus.SKIPPED
+    assert skipped.pod.status == Status.SKIPPED
     assert skipped.dt_start is None
     assert skipped.dt_end is None
 
