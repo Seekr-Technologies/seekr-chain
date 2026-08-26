@@ -10,14 +10,17 @@ def topological_sort(steps):
     and no references to non-existent steps, so neither is checked here.
 
     Ties (steps with no mutual dependency) are resolved in config order.
+    Steps must be validated Pydantic step models (`step.depends_on` already
+    normalized to `list[DependsOnCondition]` by config.py's field validator).
     """
     step_map = {step.name: step for step in steps}
-    in_degree = {step.name: len(step.depends_on or []) for step in steps}
+    deps_by_step = {step.name: step.depends_on for step in steps}
+    in_degree = {name: len(deps) for name, deps in deps_by_step.items()}
     dependents: dict[str, list] = {step.name: [] for step in steps}
 
-    for step in steps:
-        for dep in step.depends_on or []:
-            dependents[dep].append(step.name)
+    for name, deps in deps_by_step.items():
+        for cond in deps:
+            dependents[cond.step].append(name)
 
     queue = deque(name for name, deg in in_degree.items() if deg == 0)
     result = []

@@ -17,12 +17,38 @@ import socket
 import subprocess
 import tempfile
 
-from seekr_chain.config import MultiRoleStepConfig, SingleRoleStepConfig, WorkflowConfig
+from seekr_chain.config import DependsOnCondition, MultiRoleStepConfig, SingleRoleStepConfig, WorkflowConfig
 from seekr_chain.dag import topological_sort
 from seekr_chain.status_model import Status
 from seekr_chain.workflow import Workflow
 
 logger = logging.getLogger(__name__)
+
+
+# Phases meaning a dependency did not succeed — a valid ON_FAILURE/ALWAYS
+# trigger regardless of *why* it didn't succeed. Mirrors the k8s controller's
+# `_NOT_SUCCEEDED_PHASES` (see resources/controller/phases.py) minus CANCELLED
+# — local mode has no external cancellation.
+_NOT_SUCCEEDED_PHASES = ("FAILED", "SKIPPED")
+
+
+def _dep_satisfied(phase: str, cond: DependsOnCondition, exit_codes: dict[str, int]) -> bool:
+    """True if `cond` is satisfied given the dependency's terminal phase.
+
+    Mirrors the k8s controller's `dep_satisfied` (see
+    resources/controller/phases.py).
+    """
+    if cond.when == "ALWAYS":
+        return True
+    if cond.when == "ON_SUCCESS":
+        return phase == "SUCCEEDED"
+    # ON_FAILURE
+    if phase not in _NOT_SUCCEEDED_PHASES:
+        return False
+    if cond.on_exit_codes is None:
+        return True
+    matched = exit_codes.get(cond.step) in cond.on_exit_codes
+    return matched if cond.operator == "IN" else not matched
 
 
 class LocalWorkflow(Workflow):
@@ -76,8 +102,8 @@ def _run_script(shell: str, script_content: str, cwd: str, env: dict, step_name:
         os.unlink(script_path)
 
 
-def _run_step(step: SingleRoleStepConfig, workdir: str, env: dict) -> bool:
-    """Execute a single step. Returns True if the main script succeeded."""
+def _run_step(step: SingleRoleStepConfig, workdir: str, env: dict) -> int:
+    """Execute a single step. Returns the main script's exit code."""
     logger.info(f"--- Step: {step.name} ---")
 
     before_rc = 0
@@ -93,7 +119,7 @@ def _run_step(step: SingleRoleStepConfig, workdir: str, env: dict) -> bool:
     if step.after_script:
         _run_script(step.shell, step.after_script, workdir, env, step.name, "after_script")
 
-    return main_rc == 0
+    return main_rc
 
 
 def launch_local_workflow(
@@ -167,17 +193,41 @@ def launch_local_workflow(
         "SEEKR_CHAIN_ARGS": args_path,
     }
 
-    # Track which steps failed so dependents can be skipped.
-    failed_steps: set[str] = set()
+    # Terminal phase ("SUCCEEDED"/"FAILED"/"SKIPPED") of each step run so far,
+    # and the main script's exit code (for depends_on.on_exit_codes gating).
+    step_phase: dict[str, str] = {}
+    exit_codes: dict[str, int] = {}
     workflow_succeeded = True
+    # Becomes True the moment any step FAILS. From then on, a step only still
+    # runs if it's a direct ON_FAILURE/ALWAYS dependent of a FAILED step
+    # (reactive teardown) — everything else, including independent branches
+    # that would otherwise be ready, is skipped without running. A failed
+    # step always fails the workflow, no exceptions.
+    teardown = False
 
     try:
         for step in ordered_steps:
-            # Skip steps whose dependencies failed.
-            blocked_by = {dep for dep in (step.depends_on or []) if dep in failed_steps}
-            if blocked_by:
-                logger.warning(f"Skipping step '{step.name}' because dependencies failed: {blocked_by}")
-                failed_steps.add(step.name)
+            deps = step.depends_on
+
+            if teardown:
+                reactive = any(
+                    cond.when in ("ON_FAILURE", "ALWAYS")
+                    and step_phase.get(cond.step) == "FAILED"
+                    and _dep_satisfied(step_phase[cond.step], cond, exit_codes)
+                    for cond in deps
+                )
+                if not reactive:
+                    logger.warning(f"Skipping step '{step.name}': workflow already failed")
+                    step_phase[step.name] = "SKIPPED"
+                    continue
+            elif not all(_dep_satisfied(step_phase[cond.step], cond, exit_codes) for cond in deps):
+                # A dead end: this step's trigger condition (e.g. an
+                # ON_FAILURE edge whose target succeeded) can never fire —
+                # not itself a failure. The reactive-only dead-end validator
+                # (config.py's check_depends_on) guarantees no other step
+                # depends on it, so SKIPPED never needs to propagate further.
+                logger.warning(f"Skipping step '{step.name}': depends_on conditions not met")
+                step_phase[step.name] = "SKIPPED"
                 continue
 
             num_nodes = num_nodes_override.get(step.name, step.resources.num_nodes)
@@ -195,10 +245,15 @@ def launch_local_workflow(
                 **(step.env or {}),
             }
 
-            if not _run_step(step, workdir, step_env):
+            rc = _run_step(step, workdir, step_env)
+            exit_codes[step.name] = rc
+            if rc == 0:
+                step_phase[step.name] = "SUCCEEDED"
+            else:
                 logger.error(f"Step '{step.name}' failed")
-                failed_steps.add(step.name)
+                step_phase[step.name] = "FAILED"
                 workflow_succeeded = False
+                teardown = True
     finally:
         os.unlink(args_path)
 
