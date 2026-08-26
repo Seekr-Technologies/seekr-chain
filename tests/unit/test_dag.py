@@ -47,3 +47,23 @@ class TestTopologicalSort:
         assert names.index("a") < names.index("c")
         assert names.index("b") < names.index("d")
         assert names.index("c") < names.index("d")
+
+    def test_structured_depends_on_entry_orders_correctly(self):
+        """A structured (ON_FAILURE/ALWAYS) depends_on entry still gates ordering."""
+        config = WorkflowConfig.model_validate(
+            {
+                "name": "t",
+                "steps": [
+                    {"name": "a", "image": "ubuntu:24.04", "script": "echo a"},
+                    {
+                        "name": "b",
+                        "image": "ubuntu:24.04",
+                        "script": "echo b",
+                        "depends_on": [{"step": "a", "when": "ON_FAILURE"}],
+                    },
+                ],
+            }
+        )
+        ordered = topological_sort(config.steps)
+        names = [s.name for s in ordered]
+        assert names.index("a") < names.index("b")

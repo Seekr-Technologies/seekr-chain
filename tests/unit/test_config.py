@@ -5,7 +5,7 @@ import datetime
 import pytest
 from pydantic import ValidationError
 
-from seekr_chain.config import EnvSource, SecretRefSource, WorkflowConfig
+from seekr_chain.config import DependsOnCondition, EnvSource, SecretRefSource, WorkflowConfig
 
 
 def _minimal_step(name, depends_on=None):
@@ -24,7 +24,7 @@ class TestDependsOnValidation:
                 _minimal_step("b", depends_on=["a"]),
             ],
         )
-        assert config.steps[1].depends_on == ["a"]
+        assert config.steps[1].depends_on == [DependsOnCondition(step="a")]
 
     def test_invalid_depends_on_raises(self):
         with pytest.raises(ValidationError, match="non-existent steps"):
@@ -53,6 +53,90 @@ class TestDependsOnValidation:
             steps=[_minimal_step("a"), _minimal_step("b")],
         )
         assert len(config.steps) == 2
+        assert config.steps[0].depends_on == []
+
+
+class TestDependsOnCondition:
+    def test_bare_string_still_validates(self):
+        config = WorkflowConfig(
+            name="test",
+            steps=[_minimal_step("a"), _minimal_step("b", depends_on=["a"])],
+        )
+        assert config.steps[1].depends_on == [DependsOnCondition(step="a")]
+
+    def test_structured_entry_validates(self):
+        config = WorkflowConfig.model_validate(
+            {
+                "name": "test",
+                "steps": [
+                    _minimal_step("a"),
+                    {**_minimal_step("b"), "depends_on": [{"step": "a", "when": "ON_FAILURE"}]},
+                ],
+            }
+        )
+        cond = config.steps[1].depends_on[0]
+        assert (cond.step, cond.when) == ("a", "ON_FAILURE")
+
+    def test_structured_entry_invalid_step_reference_raises(self):
+        with pytest.raises(ValidationError, match="non-existent steps"):
+            WorkflowConfig.model_validate(
+                {
+                    "name": "test",
+                    "steps": [
+                        _minimal_step("a"),
+                        {**_minimal_step("b"), "depends_on": [{"step": "missing", "when": "ALWAYS"}]},
+                    ],
+                }
+            )
+
+    def test_on_exit_codes_requires_on_failure(self):
+        with pytest.raises(ValidationError, match="requires `when == ON_FAILURE`"):
+            WorkflowConfig.model_validate(
+                {
+                    "name": "test",
+                    "steps": [
+                        _minimal_step("a"),
+                        {
+                            **_minimal_step("b"),
+                            "depends_on": [{"step": "a", "when": "ALWAYS", "on_exit_codes": [1]}],
+                        },
+                    ],
+                }
+            )
+
+    def test_operator_without_on_exit_codes_rejected(self):
+        with pytest.raises(ValidationError, match="requires `on_exit_codes` to be set"):
+            WorkflowConfig.model_validate(
+                {
+                    "name": "test",
+                    "steps": [
+                        _minimal_step("a"),
+                        {
+                            **_minimal_step("b"),
+                            "depends_on": [{"step": "a", "when": "ON_FAILURE", "operator": "NOT_IN"}],
+                        },
+                    ],
+                }
+            )
+
+    def test_reactive_only_step_cannot_be_depended_on(self):
+        with pytest.raises(ValidationError, match="reactive-only"):
+            WorkflowConfig.model_validate(
+                {
+                    "name": "test",
+                    "steps": [
+                        _minimal_step("a"),
+                        {
+                            **_minimal_step("cleanup"),
+                            "depends_on": [{"step": "a", "when": "ON_FAILURE"}],
+                        },
+                        {
+                            **_minimal_step("c"),
+                            "depends_on": ["cleanup"],
+                        },
+                    ],
+                }
+            )
 
 
 class TestSecretConfig:

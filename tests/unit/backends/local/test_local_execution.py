@@ -301,8 +301,10 @@ printf 'SEEKR_CHAIN_ARGS=%s\\n' "$SEEKR_CHAIN_ARGS"
         assert wf.get_status() == Status.FAILED
         assert not marker.exists(), "script should not have run after before_script failed"
 
-    def test_independent_steps_both_run_when_one_fails(self, tmp_path):
-        """Two independent steps: if A fails, B (no dependency on A) still runs."""
+    def test_independent_step_is_skipped_once_another_step_fails(self, tmp_path):
+        """Two independent steps: if A fails, B (no dependency on A) is skipped
+        rather than run — a failed step always fails the workflow and tears
+        down every other non-reactive step."""
         marker = tmp_path / "b_ran.txt"
         config = WorkflowConfig.model_validate(
             {
@@ -315,7 +317,7 @@ printf 'SEEKR_CHAIN_ARGS=%s\\n' "$SEEKR_CHAIN_ARGS"
         )
         wf = launch_local_workflow(config)
         assert wf.get_status() == Status.FAILED
-        assert marker.exists(), "independent step B should have run despite A failing"
+        assert not marker.exists(), "independent step B should be skipped once A failed"
 
     def test_config_as_dict(self):
         """launch_local_workflow accepts a raw dict and validates it internally."""
@@ -325,6 +327,133 @@ printf 'SEEKR_CHAIN_ARGS=%s\\n' "$SEEKR_CHAIN_ARGS"
         }
         wf = launch_local_workflow(config_dict)
         assert wf.get_status() == Status.SUCCEEDED
+
+    def test_on_failure_dependent_runs_when_required_step_fails(self, tmp_path):
+        """B depends_on A with when=ON_FAILURE: B must run when A fails."""
+        marker = tmp_path / "b_ran.txt"
+        config = WorkflowConfig.model_validate(
+            {
+                "name": "test",
+                "steps": [
+                    {"name": "a", "image": "ubuntu:24.04", "script": "exit 1"},
+                    {
+                        "name": "b",
+                        "image": "ubuntu:24.04",
+                        "script": f"touch {marker}",
+                        "depends_on": [{"step": "a", "when": "ON_FAILURE"}],
+                    },
+                ],
+            }
+        )
+        wf = launch_local_workflow(config)
+        assert wf.get_status() == Status.FAILED
+        assert marker.exists(), "ON_FAILURE dependent should have run when A failed"
+
+    def test_on_failure_dependent_skipped_when_required_step_succeeds(self, tmp_path):
+        marker = tmp_path / "b_ran.txt"
+        config = WorkflowConfig.model_validate(
+            {
+                "name": "test",
+                "steps": [
+                    {"name": "a", "image": "ubuntu:24.04", "script": "exit 0"},
+                    {
+                        "name": "b",
+                        "image": "ubuntu:24.04",
+                        "script": f"touch {marker}",
+                        "depends_on": [{"step": "a", "when": "ON_FAILURE"}],
+                    },
+                ],
+            }
+        )
+        wf = launch_local_workflow(config)
+        assert wf.get_status() == Status.SUCCEEDED
+        assert not marker.exists(), "ON_FAILURE dependent should not run when A succeeded"
+
+    def test_always_dependent_runs_regardless_of_outcome(self, tmp_path):
+        """C depends_on A with when=ALWAYS: C must run whether A succeeds or fails."""
+        marker = tmp_path / "c_ran.txt"
+        config = WorkflowConfig.model_validate(
+            {
+                "name": "test",
+                "steps": [
+                    {"name": "a", "image": "ubuntu:24.04", "script": "exit 1"},
+                    {
+                        "name": "c",
+                        "image": "ubuntu:24.04",
+                        "script": f"touch {marker}",
+                        "depends_on": [{"step": "a", "when": "ALWAYS"}],
+                    },
+                ],
+            }
+        )
+        wf = launch_local_workflow(config)
+        assert wf.get_status() == Status.FAILED
+        assert marker.exists(), "ALWAYS dependent should have run regardless of A's outcome"
+
+    def test_on_failure_gated_by_exit_code_match(self, tmp_path):
+        marker = tmp_path / "b_ran.txt"
+        config = WorkflowConfig.model_validate(
+            {
+                "name": "test",
+                "steps": [
+                    {"name": "a", "image": "ubuntu:24.04", "script": "exit 42"},
+                    {
+                        "name": "b",
+                        "image": "ubuntu:24.04",
+                        "script": f"touch {marker}",
+                        "depends_on": [{"step": "a", "when": "ON_FAILURE", "on_exit_codes": [42]}],
+                    },
+                ],
+            }
+        )
+        wf = launch_local_workflow(config)
+        assert wf.get_status() == Status.FAILED
+        assert marker.exists(), "on_exit_codes=[42] should match A's actual exit code 42"
+
+    def test_on_failure_gated_by_exit_code_mismatch(self, tmp_path):
+        marker = tmp_path / "b_ran.txt"
+        config = WorkflowConfig.model_validate(
+            {
+                "name": "test",
+                "steps": [
+                    {"name": "a", "image": "ubuntu:24.04", "script": "exit 1"},
+                    {
+                        "name": "b",
+                        "image": "ubuntu:24.04",
+                        "script": f"touch {marker}",
+                        "depends_on": [{"step": "a", "when": "ON_FAILURE", "on_exit_codes": [42]}],
+                    },
+                ],
+            }
+        )
+        wf = launch_local_workflow(config)
+        assert wf.get_status() == Status.FAILED
+        assert not marker.exists(), "on_exit_codes=[42] should not match A's actual exit code 1"
+
+    def test_reactive_dependent_runs_while_independent_branch_is_skipped(self, tmp_path):
+        """A fails; its ON_FAILURE dependent still runs (reactive teardown
+        exemption) while an unrelated independent step is skipped."""
+        cleanup_marker = tmp_path / "cleanup_ran.txt"
+        b_marker = tmp_path / "b_ran.txt"
+        config = WorkflowConfig.model_validate(
+            {
+                "name": "test",
+                "steps": [
+                    {"name": "a", "image": "ubuntu:24.04", "script": "exit 1"},
+                    {
+                        "name": "cleanup",
+                        "image": "ubuntu:24.04",
+                        "script": f"touch {cleanup_marker}",
+                        "depends_on": [{"step": "a", "when": "ON_FAILURE"}],
+                    },
+                    {"name": "b", "image": "ubuntu:24.04", "script": f"touch {b_marker}"},
+                ],
+            }
+        )
+        wf = launch_local_workflow(config)
+        assert wf.get_status() == Status.FAILED
+        assert cleanup_marker.exists(), "ON_FAILURE dependent should still run"
+        assert not b_marker.exists(), "independent step B should be skipped once A failed"
 
     def test_code_path_sets_workdir(self, tmp_path):
         """config.code.path is used as the working directory for script execution."""

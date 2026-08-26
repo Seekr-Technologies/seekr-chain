@@ -8,6 +8,7 @@ normal (non-sleeping) job and attach() had nothing to attach to.
 from __future__ import annotations
 
 import importlib
+import json
 import shutil
 import tarfile
 from pathlib import Path
@@ -57,6 +58,47 @@ def test_package_assets_passes_interactive_through(monkeypatch, tmp_path):
     )
 
     assert captured["interactive"] is True
+
+
+def test_package_assets_writes_normalized_depends_on_to_dag_json(monkeypatch, tmp_path):
+    monkeypatch.setattr(lkw_module, "create_jobset_manifest", lambda **kwargs: ("js-name", "yaml: {}"))
+    monkeypatch.setattr(lkw_module.remote_fs, "upload", lambda *a, **k: None)
+
+    staging_dir = tmp_path / "staging"
+    (staging_dir / "assets").mkdir(parents=True)
+
+    config = WorkflowConfig.model_validate(
+        {
+            "name": "t",
+            "steps": [
+                {"name": "a", "image": "ubuntu", "script": "echo a"},
+                {
+                    "name": "b",
+                    "image": "ubuntu",
+                    "script": "echo b",
+                    "depends_on": [{"step": "a", "when": "ON_FAILURE"}],
+                },
+            ],
+        }
+    )
+
+    lkw_module._package_assets(
+        config=config,
+        args=None,
+        job_info={"remote_assets_path": "s3://bucket/assets.tar.gz"},
+        staging_dir=staging_dir,
+        workflow_name="wf-1",
+        workflow_secrets=[],
+        interactive=False,
+    )
+
+    dag = json.loads((staging_dir / "assets" / "dag.json").read_text())
+    entries = {e["name"]: e for e in dag}
+    assert entries["a"] == {"name": "a", "depends_on": []}
+    assert entries["b"] == {
+        "name": "b",
+        "depends_on": [{"step": "a", "when": "ON_FAILURE", "on_exit_codes": None, "operator": "IN"}],
+    }
 
 
 def test_package_assets_includes_materialized_nix_workspace_for_builds(monkeypatch, tmp_path):
