@@ -268,6 +268,53 @@ class FailurePolicy(BaseModel):
     rules: list[FailureRule] = []
 
 
+class DependsOnCondition(BaseModel):
+    """A conditional dependency edge — gates a step on another step's outcome.
+
+    Reuses ``FailureRule``'s ``on_exit_codes``/``operator`` shape so users only
+    need to learn one exit-code-gating vocabulary.
+
+    Parameters
+    ----------
+    step : Name of the step this condition depends on.
+    when : ``ON_SUCCESS`` (default) requires ``step`` to succeed. ``ON_FAILURE``
+        requires ``step`` to fail (or be cancelled). ``ALWAYS`` is satisfied
+        once ``step`` reaches any terminal state, regardless of outcome.
+    on_exit_codes : Exit codes to match against, gating ``ON_FAILURE`` further.
+        Optional; `None` means any failure matches. Requires ``when ==
+        ON_FAILURE``.
+    operator : Whether `on_exit_codes` is an inclusion or exclusion list.
+    """
+
+    step: str
+    when: Literal["ON_SUCCESS", "ON_FAILURE", "ALWAYS"] = "ON_SUCCESS"
+    on_exit_codes: list[int] | None = None
+    operator: Literal["IN", "NOT_IN"] = "IN"
+
+    @pydantic.model_validator(mode="after")
+    def check_on_exit_codes(self) -> Self:
+        if self.on_exit_codes is not None:
+            if self.when != "ON_FAILURE":
+                raise ValueError("`depends_on.on_exit_codes` requires `when == ON_FAILURE`")
+            if not self.on_exit_codes:
+                raise ValueError("`depends_on.on_exit_codes` must be non-empty")
+        elif self.operator != "IN":
+            raise ValueError("`depends_on.operator` requires `on_exit_codes` to be set")
+        return self
+
+
+DependsOnEntry = str | DependsOnCondition
+
+
+def _normalize_depends_on_entries(entries: list[DependsOnEntry] | None) -> list[DependsOnCondition]:
+    """Coerce a step's `depends_on` list into `DependsOnCondition` objects.
+
+    A bare string is today's success-required semantics, unchanged:
+    equivalent to `DependsOnCondition(step=name)` (`when="ON_SUCCESS"`).
+    """
+    return [DependsOnCondition(step=entry) if isinstance(entry, str) else entry for entry in (entries or [])]
+
+
 class NixConfig(BaseModel):
     """Use a nix closure as the runtime instead of a Docker image.
 
@@ -380,13 +427,18 @@ class RoleSpecConfig(BaseModel):
     script: str
     after_script: str | None = None
     resources: ResourceConfig = ResourceConfig()
-    depends_on: Optional[list[str]] = None
+    depends_on: Optional[list[DependsOnEntry]] = Field(default=None, validate_default=True)
     env: Optional[dict[str, str]] = None
 
     @field_validator("name")
     @classmethod
     def _check_name(cls, v: str) -> str:
         return _validate_rfc1123_name(v)
+
+    @field_validator("depends_on", mode="after")
+    @classmethod
+    def _normalize_depends_on(cls, v):
+        return _normalize_depends_on_entries(v)
 
     @pydantic.model_validator(mode="after")
     def _check_image_xor_nix(self) -> Self:
@@ -402,10 +454,22 @@ class SingleRoleStepConfig(RoleSpecConfig):
     ----------
     depends_on : Steps that must complete before this one starts
     failure_policy : Failure handling policy
+    optional : If True, this step's own failure is excluded from the
+        workflow-level success/failure rollup — useful for a conditional
+        (``ON_FAILURE``/``ALWAYS``) cleanup or notification step that
+        shouldn't itself be able to fail the workflow. It still shows as
+        FAILED in ``chain status`` and still propagates to its own
+        dependents.
     """
 
-    depends_on: Optional[list[str]] = None
+    depends_on: Optional[list[DependsOnEntry]] = Field(default=None, validate_default=True)
     failure_policy: FailurePolicy | None = None
+    optional: bool = False
+
+    @field_validator("depends_on", mode="after")
+    @classmethod
+    def _normalize_depends_on(cls, v):
+        return _normalize_depends_on_entries(v)
 
     @pydantic.model_validator(mode="after")
     def check_failure_policy(self) -> Self:
@@ -426,6 +490,12 @@ class MultiRoleStepConfig(BaseModel):
     success_policy : When to consider this step successful
     failure_policy : Failure handling policy
     roles : List of roles to run in parallel
+    optional : If True, this step's own failure is excluded from the
+        workflow-level success/failure rollup — useful for a conditional
+        (``ON_FAILURE``/``ALWAYS``) cleanup or notification step that
+        shouldn't itself be able to fail the workflow. It still shows as
+        FAILED in ``chain status`` and still propagates to its own
+        dependents.
     """
 
     class SuccessPolicy(BaseModel):
@@ -441,15 +511,21 @@ class MultiRoleStepConfig(BaseModel):
         target_roles: Optional[list[str]] = None
 
     name: str
-    depends_on: Optional[list[str]] = None
+    depends_on: Optional[list[DependsOnEntry]] = Field(default=None, validate_default=True)
     success_policy: Optional[SuccessPolicy] = None
     failure_policy: FailurePolicy | None = None
+    optional: bool = False
     roles: list[RoleSpecConfig]
 
     @field_validator("name")
     @classmethod
     def _check_name(cls, v: str) -> str:
         return _validate_rfc1123_name(v)
+
+    @field_validator("depends_on", mode="after")
+    @classmethod
+    def _normalize_depends_on(cls, v):
+        return _normalize_depends_on_entries(v)
 
     @pydantic.model_validator(mode="after")
     def check_failure_policy(self) -> Self:
@@ -579,9 +655,28 @@ class WorkflowConfig(BaseModel):
     @pydantic.model_validator(mode="after")
     def check_depends_on(self) -> Self:
         step_names = {step.name for step in self.steps}
+        deps_by_step = {step.name: step.depends_on for step in self.steps}
         for step in self.steps:
-            if step.depends_on:
-                invalid = set(step.depends_on) - step_names
+            deps = deps_by_step[step.name]
+            if deps:
+                invalid = {cond.step for cond in deps} - step_names
                 if invalid:
                     raise ValueError(f"Step '{step.name}' has depends_on references to non-existent steps: {invalid}")
+
+        # A step whose depends_on entries are all ON_FAILURE/ALWAYS (no
+        # ON_SUCCESS/plain-string entry) is "reactive-only" — it only ever
+        # runs as a one-hop reaction to some other step's outcome, and must
+        # itself be a dead end so a workflow failure's teardown never has to
+        # wait more than one hop for reactive steps to finish.
+        reactive_only = {
+            name for name, deps in deps_by_step.items() if deps and all(cond.when != "ON_SUCCESS" for cond in deps)
+        }
+        for step in self.steps:
+            referenced = {cond.step for cond in deps_by_step[step.name]} & reactive_only
+            if referenced:
+                raise ValueError(
+                    f"Step '{step.name}' depends on {sorted(referenced)}, which "
+                    "is reactive-only (all depends_on entries are ON_FAILURE/ALWAYS) "
+                    "and therefore cannot be depended on by any other step."
+                )
         return self

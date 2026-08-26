@@ -9,8 +9,18 @@ import kubernetes
 import kubernetes.watch
 
 from .events import emit_event, touch_heartbeat
-from .phases import TERMINAL_PHASES, cascade_fail, load_phases, save_phases
-from .scheduling import submit_ready_steps
+from .phases import (
+    TERMINAL_PHASES,
+    apply_failure_teardown,
+    capture_exit_codes,
+    load_exit_codes,
+    load_phases,
+    optional_step_names,
+    save_phases,
+    skip_dead_ends,
+    steps_needing_exit_codes,
+)
+from .scheduling import cancel_step_jobsets, submit_ready_steps
 from .status import flush_status, write_status
 from .status_model import Status
 from .timeutil import now_iso
@@ -92,6 +102,11 @@ def main() -> int:
 
     print(f"[controller] loaded DAG with {len(dag)} steps: {[s['name'] for s in dag]}", flush=True)
 
+    # Precompute once: steps whose exit code some depends_on.on_exit_codes gates on.
+    needs_exit_codes = steps_needing_exit_codes(dag)
+    # Precompute once: steps excluded from the workflow-level failure rollup.
+    optional_steps = optional_step_names(dag)
+
     # ownerReference so JobSets and the phases ConfigMap are cascade-deleted when
     # this controller JobSet is deleted.
     owner_ref = [
@@ -108,6 +123,7 @@ def main() -> int:
     # Restore persisted phase and timing state so a restarted controller pod
     # resumes correctly.
     phases, timings = load_phases(k8s_v1, namespace, workflow_id, dag)
+    exit_codes = load_exit_codes(k8s_v1, namespace, workflow_id)
 
     # Timings are persisted alongside phases in the ConfigMap and restored
     # (terminal-only) on restart. They remain a best-effort outcome detail,
@@ -119,10 +135,10 @@ def main() -> int:
     js_to_step: dict[str, str] = {}
 
     # Submit all initially-ready steps before opening the watch.
-    submit_ready_steps(dag, phases, js_names, js_to_step, assets_path, namespace, owner_ref, k8s_custom)
+    submit_ready_steps(dag, phases, js_names, js_to_step, assets_path, namespace, owner_ref, k8s_custom, exit_codes)
     _stamp_starts(dag, phases, timings)
     _stamp_ends(phases, timings)
-    save_phases(k8s_v1, namespace, workflow_id, phases, timings, owner_ref)
+    save_phases(k8s_v1, namespace, workflow_id, phases, timings, owner_ref, exit_codes, optional_steps)
     write_status(workflow_id, dag, phases, timings)
 
     if all(p in TERMINAL_PHASES for p in phases.values()):
@@ -145,13 +161,18 @@ def main() -> int:
             touch_heartbeat()
 
             # Retry any steps that failed to submit on a previous iteration
-            # (retriable API errors leave them PENDING).  Also cascade-fail
-            # dependents of any step marked FAILED by a permanent submit error.
-            submit_ready_steps(dag, phases, js_names, js_to_step, assets_path, namespace, owner_ref, k8s_custom)
-            cascade_fail(dag, phases)
+            # (retriable API errors leave them PENDING). Also apply failure
+            # teardown for any step marked FAILED by a permanent submit error.
+            submit_ready_steps(
+                dag, phases, js_names, js_to_step, assets_path, namespace, owner_ref, k8s_custom, exit_codes
+            )
+            skip_dead_ends(dag, phases, exit_codes)
+            to_cancel = apply_failure_teardown(dag, phases, exit_codes, optional_steps)
+            if to_cancel:
+                cancel_step_jobsets(to_cancel, js_names, namespace, k8s_custom)
             _stamp_starts(dag, phases, timings)
             _stamp_ends(phases, timings)
-            save_phases(k8s_v1, namespace, workflow_id, phases, timings, owner_ref)
+            save_phases(k8s_v1, namespace, workflow_id, phases, timings, owner_ref, exit_codes, optional_steps)
             write_status(workflow_id, dag, phases, timings)
 
             if all(p in TERMINAL_PHASES for p in phases.values()):
@@ -231,15 +252,27 @@ def main() -> int:
                     else:
                         continue
 
-                    cascade_fail(dag, phases)
+                    if terminal in ("Completed", "Failed") and step_name in needs_exit_codes:
+                        exit_codes[step_name] = capture_exit_codes(k8s_v1, namespace, workflow_id, step_name)
+                        print(
+                            f"[controller] step={step_name!r} exit_codes={exit_codes[step_name]}",
+                            flush=True,
+                        )
+
+                    skip_dead_ends(dag, phases, exit_codes)
+                    to_cancel = apply_failure_teardown(dag, phases, exit_codes, optional_steps)
+                    if to_cancel:
+                        cancel_step_jobsets(to_cancel, js_names, namespace, k8s_custom)
                     _stamp_ends(phases, timings)
-                    save_phases(k8s_v1, namespace, workflow_id, phases, timings, owner_ref)
+                    save_phases(k8s_v1, namespace, workflow_id, phases, timings, owner_ref, exit_codes, optional_steps)
                     write_status(workflow_id, dag, phases, timings)
 
                     # Submit any steps now unblocked by this completion.
-                    submit_ready_steps(dag, phases, js_names, js_to_step, assets_path, namespace, owner_ref, k8s_custom)
+                    submit_ready_steps(
+                        dag, phases, js_names, js_to_step, assets_path, namespace, owner_ref, k8s_custom, exit_codes
+                    )
                     _stamp_starts(dag, phases, timings)
-                    save_phases(k8s_v1, namespace, workflow_id, phases, timings, owner_ref)
+                    save_phases(k8s_v1, namespace, workflow_id, phases, timings, owner_ref, exit_codes, optional_steps)
                     write_status(workflow_id, dag, phases, timings)
 
                     if all(p in TERMINAL_PHASES for p in phases.values()):
@@ -261,7 +294,9 @@ def main() -> int:
                 print(f"[controller] watch: error ({e}), reconnecting in {_WATCH_RECONNECT_DELAY}s", flush=True)
                 time.sleep(_WATCH_RECONNECT_DELAY)
 
-    failed = [n for n, p in phases.items() if p == Status.FAILED.value]
+    # Only a non-optional FAILED step fails the workflow — see
+    # apply_failure_teardown()'s docstring on `optional_steps`.
+    failed = [n for n, p in phases.items() if p == Status.FAILED.value and n not in optional_steps]
     if failed:
         emit_event(
             k8s_v1,

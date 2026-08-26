@@ -228,7 +228,8 @@ def _package_assets(
         dag_entries.append(
             {
                 "name": step_config.name,
-                "depends_on": step_config.depends_on or [],
+                "depends_on": [cond.model_dump() for cond in step_config.depends_on],
+                "optional": step_config.optional,
             }
         )
 
