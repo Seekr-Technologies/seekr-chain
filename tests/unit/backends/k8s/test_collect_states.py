@@ -11,10 +11,10 @@ import pytest
 from kubernetes.client.rest import ApiException
 
 from seekr_chain.backends.k8s.workflow_state import (
+    Detail,
     _collect_container_states,
     _collect_pod_state,
     _group_jobsets_by_step,
-    _resolve_status,
     _trim_pull_message,
     controller_jobset_status_and_completion,
     get_workflow_job_status,
@@ -24,7 +24,7 @@ from seekr_chain.backends.k8s.workflow_state import (
     workflow_cancelled,
     workflow_failed,
 )
-from seekr_chain.status import ContainerStatus, PodStatus, WorkflowStatus
+from seekr_chain.status_model import Status
 
 UTC = datetime.timezone.utc
 
@@ -89,24 +89,26 @@ def _pod(phase="Running", init_containers=None, containers=None, labels=None, st
 class TestCollectContainerStatesMain:
     def test_waiting_no_reason(self):
         states = _collect_container_states([_container(state=_waiting())], is_init=False)
-        assert states[0].status == ContainerStatus.WAITING
+        assert states[0].status == Status.STARTING
+        assert states[0].detail is None
 
     @pytest.mark.parametrize("reason", ["ImagePullBackOff", "ErrImagePull", "InvalidImageName", "ErrImageNeverPull"])
     def test_pull_error_reasons(self, reason):
         states = _collect_container_states([_container(state=_waiting(reason=reason))], is_init=False)
-        assert states[0].status == ContainerStatus.PULL_ERROR
+        assert states[0].status == Status.STARTING
+        assert states[0].detail == Detail.PULL_ERROR
 
     def test_running(self):
         states = _collect_container_states([_container(state=_running())], is_init=False)
-        assert states[0].status == ContainerStatus.RUNNING
+        assert states[0].status == Status.RUNNING
 
     def test_terminated_success(self):
         states = _collect_container_states([_container(state=_terminated(exit_code=0))], is_init=False)
-        assert states[0].status == ContainerStatus.SUCCEEDED
+        assert states[0].status == Status.SUCCEEDED
 
     def test_terminated_failure(self):
         states = _collect_container_states([_container(state=_terminated(exit_code=1))], is_init=False)
-        assert states[0].status == ContainerStatus.FAILED
+        assert states[0].status == Status.FAILED
 
     def test_empty_list(self):
         assert _collect_container_states([], is_init=False) == []
@@ -120,7 +122,7 @@ class TestCollectContainerStatesMain:
         # than crashing chain status.
         bad = SimpleNamespace(name="c", state=SimpleNamespace(waiting=None, terminated=None, running=None))
         states = _collect_container_states([bad], is_init=False)
-        assert states[0].status == ContainerStatus.UNKNOWN
+        assert states[0].status == Status.UNKNOWN
 
 
 # ---------------------------------------------------------------------------
@@ -131,24 +133,28 @@ class TestCollectContainerStatesMain:
 class TestCollectContainerStatesInit:
     def test_waiting_no_reason(self):
         states = _collect_container_states([_container(state=_waiting())], is_init=True)
-        assert states[0].status == ContainerStatus.INIT_WAITING
+        assert states[0].status == Status.STARTING
+        assert states[0].detail == Detail.INIT_WAITING
 
     @pytest.mark.parametrize("reason", ["ImagePullBackOff", "ErrImagePull", "InvalidImageName", "ErrImageNeverPull"])
     def test_pull_error_reasons(self, reason):
         states = _collect_container_states([_container(state=_waiting(reason=reason))], is_init=True)
-        assert states[0].status == ContainerStatus.PULL_ERROR
+        assert states[0].status == Status.STARTING
+        assert states[0].detail == Detail.PULL_ERROR
 
     def test_running(self):
         states = _collect_container_states([_container(state=_running())], is_init=True)
-        assert states[0].status == ContainerStatus.INIT_RUNNING
+        assert states[0].status == Status.STARTING
+        assert states[0].detail == Detail.INIT_RUNNING
 
     def test_terminated_success(self):
         states = _collect_container_states([_container(state=_terminated(exit_code=0))], is_init=True)
-        assert states[0].status == ContainerStatus.SUCCEEDED
+        assert states[0].status == Status.SUCCEEDED
 
     def test_terminated_failure(self):
         states = _collect_container_states([_container(state=_terminated(exit_code=1))], is_init=True)
-        assert states[0].status == ContainerStatus.INIT_ERROR
+        assert states[0].status == Status.STARTING
+        assert states[0].detail == Detail.INIT_ERROR
 
 
 # ---------------------------------------------------------------------------
@@ -161,17 +167,17 @@ class TestCollectPodState:
 
     def test_phase_succeeded(self):
         pod = _pod(phase="Succeeded", containers=[_container(state=_terminated(exit_code=0))])
-        assert _collect_pod_state(pod).status == PodStatus.SUCCEEDED
+        assert _collect_pod_state(pod).status == Status.SUCCEEDED
 
     def test_phase_failed(self):
         pod = _pod(phase="Failed", containers=[_container(state=_terminated(exit_code=1))])
-        assert _collect_pod_state(pod).status == PodStatus.FAILED
+        assert _collect_pod_state(pod).status == Status.FAILED
 
     # --- main container running ---
 
     def test_running_main_container(self):
         pod = _pod(containers=[_container(state=_running())])
-        assert _collect_pod_state(pod).status == PodStatus.RUNNING
+        assert _collect_pod_state(pod).status == Status.RUNNING
 
     def test_running_wins_over_pending_init(self):
         """If main container is running, pod is RUNNING even if init containers still show waiting."""
@@ -179,7 +185,7 @@ class TestCollectPodState:
             init_containers=[_container("i", state=_terminated(exit_code=0))],
             containers=[_container("c", state=_running())],
         )
-        assert _collect_pod_state(pod).status == PodStatus.RUNNING
+        assert _collect_pod_state(pod).status == Status.RUNNING
 
     def test_pull_error_wins_over_running_sidecar(self):
         """PULL:ERROR on one container takes priority even when a sidecar is running."""
@@ -189,7 +195,9 @@ class TestCollectPodState:
                 _container("sidecar", state=_running()),
             ],
         )
-        assert _collect_pod_state(pod).status == PodStatus.PULL_ERROR
+        state = _collect_pod_state(pod)
+        assert state.status == Status.STARTING
+        assert state.detail == Detail.PULL_ERROR
 
     # --- init container states ---
 
@@ -198,7 +206,9 @@ class TestCollectPodState:
             init_containers=[_container("i", state=_running())],
             containers=[_container("c", state=_waiting())],
         )
-        assert _collect_pod_state(pod).status == PodStatus.INIT_RUNNING
+        state = _collect_pod_state(pod)
+        assert state.status == Status.STARTING
+        assert state.detail == Detail.INIT_RUNNING
 
     def test_chain_nix_init_running_reports_pulling_closure(self):
         """When the running init container is `chain-nix-init`, the pod surfaces
@@ -209,7 +219,9 @@ class TestCollectPodState:
             init_containers=[_container("chain-nix-init", state=_running())],
             containers=[_container("c", state=_waiting())],
         )
-        assert _collect_pod_state(pod).status == PodStatus.PULLING_CLOSURE
+        state = _collect_pod_state(pod)
+        assert state.status == Status.STARTING
+        assert state.detail == Detail.PULLING_CLOSURE
 
     def test_chain_nix_init_alongside_generic_init(self):
         """chain-nix-init still wins the PULLING_CLOSURE label even when it's
@@ -222,7 +234,9 @@ class TestCollectPodState:
             ],
             containers=[_container("c", state=_waiting())],
         )
-        assert _collect_pod_state(pod).status == PodStatus.PULLING_CLOSURE
+        state = _collect_pod_state(pod)
+        assert state.status == Status.STARTING
+        assert state.detail == Detail.PULLING_CLOSURE
 
     def test_chain_nix_init_terminated_does_not_report_pulling_closure(self):
         """Once chain-nix-init has finished, we're back to the normal
@@ -232,21 +246,27 @@ class TestCollectPodState:
             init_containers=[_container("chain-nix-init", state=_terminated(exit_code=0))],
             containers=[_container("c", state=_waiting())],
         )
-        assert _collect_pod_state(pod).status == PodStatus.PULLING
+        state = _collect_pod_state(pod)
+        assert state.status == Status.STARTING
+        assert state.detail == Detail.PULLING
 
     def test_init_error(self):
         pod = _pod(
             init_containers=[_container("i", state=_terminated(exit_code=1))],
             containers=[_container("c", state=_waiting())],
         )
-        assert _collect_pod_state(pod).status == PodStatus.INIT_ERROR
+        state = _collect_pod_state(pod)
+        assert state.status == Status.STARTING
+        assert state.detail == Detail.INIT_ERROR
 
     def test_init_pull_error(self):
         pod = _pod(
             init_containers=[_container("i", state=_waiting(reason="ImagePullBackOff"))],
             containers=[_container("c", state=_waiting())],
         )
-        assert _collect_pod_state(pod).status == PodStatus.PULL_ERROR
+        state = _collect_pod_state(pod)
+        assert state.status == Status.STARTING
+        assert state.detail == Detail.PULL_ERROR
 
     def test_init_waiting_not_started(self):
         """Init containers scheduled but in waiting state with no pull error → INIT:WAITING."""
@@ -254,7 +274,9 @@ class TestCollectPodState:
             init_containers=[_container("i", state=_waiting())],
             containers=[_container("c", state=_waiting())],
         )
-        assert _collect_pod_state(pod).status == PodStatus.INIT_WAITING
+        state = _collect_pod_state(pod)
+        assert state.status == Status.STARTING
+        assert state.detail == Detail.INIT_WAITING
 
     # --- after init: pulling main image ---
 
@@ -264,7 +286,9 @@ class TestCollectPodState:
             init_containers=[_container("i", state=_terminated(exit_code=0))],
             containers=[_container("c", state=_waiting())],
         )
-        assert _collect_pod_state(pod).status == PodStatus.PULLING
+        state = _collect_pod_state(pod)
+        assert state.status == Status.STARTING
+        assert state.detail == Detail.PULLING
 
     def test_pull_error_after_init(self):
         """All init containers done, main container pull failing → PULL:ERROR."""
@@ -272,27 +296,37 @@ class TestCollectPodState:
             init_containers=[_container("i", state=_terminated(exit_code=0))],
             containers=[_container("c", state=_waiting(reason="ImagePullBackOff"))],
         )
-        assert _collect_pod_state(pod).status == PodStatus.PULL_ERROR
+        state = _collect_pod_state(pod)
+        assert state.status == Status.STARTING
+        assert state.detail == Detail.PULL_ERROR
 
     def test_pull_error_main_no_init(self):
         """No init containers, main container pull failing → PULL:ERROR."""
         pod = _pod(containers=[_container("c", state=_waiting(reason="ErrImagePull"))])
-        assert _collect_pod_state(pod).status == PodStatus.PULL_ERROR
+        state = _collect_pod_state(pod)
+        assert state.status == Status.STARTING
+        assert state.detail == Detail.PULL_ERROR
 
     def test_pulling_no_init(self):
         """No init containers, main container waiting (no error) → PULLING."""
         pod = _pod(containers=[_container("c", state=_waiting())])
-        assert _collect_pod_state(pod).status == PodStatus.PULLING
+        state = _collect_pod_state(pod)
+        assert state.status == Status.STARTING
+        assert state.detail == Detail.PULLING
 
     # --- no containers yet (pod not scheduled) ---
 
     def test_pending_no_containers(self):
         pod = _pod(init_containers=None, containers=None)
-        assert _collect_pod_state(pod).status == PodStatus.PENDING
+        state = _collect_pod_state(pod)
+        assert state.status == Status.PENDING
+        assert state.detail is None
 
     def test_pending_empty_containers(self):
         pod = _pod(init_containers=[], containers=[])
-        assert _collect_pod_state(pod).status == PodStatus.PENDING
+        state = _collect_pod_state(pod)
+        assert state.status == Status.PENDING
+        assert state.detail is None
 
     # --- metadata is plumbed through ---
 
@@ -319,7 +353,9 @@ class TestCollectPodState:
             ],
             containers=[_container("c", state=_waiting())],
         )
-        assert _collect_pod_state(pod).status == PodStatus.INIT_RUNNING
+        state = _collect_pod_state(pod)
+        assert state.status == Status.STARTING
+        assert state.detail == Detail.INIT_RUNNING
 
     def test_pull_error_priority_over_init_waiting(self):
         """PULL:ERROR takes priority over other init container states."""
@@ -330,7 +366,9 @@ class TestCollectPodState:
             ],
             containers=[_container("c", state=_waiting())],
         )
-        assert _collect_pod_state(pod).status == PodStatus.PULL_ERROR
+        state = _collect_pod_state(pod)
+        assert state.status == Status.STARTING
+        assert state.detail == Detail.PULL_ERROR
 
 
 # ---------------------------------------------------------------------------
@@ -381,7 +419,7 @@ class TestContainerStateAnnotations:
             [_container(state=_terminated(exit_code=137, reason="OOMKilled"))], is_init=False
         )
         assert states[0].reason == "OOMKilled"
-        assert states[0].status == ContainerStatus.FAILED
+        assert states[0].status == Status.FAILED
 
     def test_non_oom_terminated_reason_not_populated(self):
         states = _collect_container_states([_container(state=_terminated(exit_code=1, reason="Error"))], is_init=False)
@@ -399,7 +437,8 @@ class TestContainerStateAnnotations:
             [_container(state=_terminated(exit_code=137, reason="OOMKilled"))], is_init=True
         )
         assert states[0].reason == "OOMKilled"
-        assert states[0].status == ContainerStatus.INIT_ERROR
+        assert states[0].status == Status.STARTING
+        assert states[0].detail == Detail.INIT_ERROR
 
     def test_pull_error_message_trimmed(self):
         """ImagePullBackOff messages have kubelet boilerplate stripped."""
@@ -525,7 +564,8 @@ class TestCollectPodStateTimeSemantics:
             containers=[_container("c", state=_waiting())],
         )
         state = _collect_pod_state(pod)
-        assert state.status == PodStatus.PULLING
+        assert state.status == Status.STARTING
+        assert state.detail == Detail.PULLING
         assert state.dt_end is None  # would equal self._ts(INIT_END) without the fix
 
     def test_pulling_pod_dt_start_is_pod_start_time(self):
@@ -545,7 +585,8 @@ class TestCollectPodStateTimeSemantics:
             containers=[_container("c", state=_waiting())],
         )
         state = _collect_pod_state(pod)
-        assert state.status == PodStatus.INIT_RUNNING
+        assert state.status == Status.STARTING
+        assert state.detail == Detail.INIT_RUNNING
         assert state.dt_end is None
         assert state.dt_start == self._ts(self.POD_START)
 
@@ -558,7 +599,7 @@ class TestCollectPodStateTimeSemantics:
             containers=[_container("c", state=_running(started_at=self.MAIN_START))],
         )
         state = _collect_pod_state(pod)
-        assert state.status == PodStatus.RUNNING
+        assert state.status == Status.RUNNING
         assert state.dt_start == self._ts(self.MAIN_START)
         assert state.dt_end is None  # main still running
 
@@ -587,7 +628,7 @@ class TestCollectPodStateTimeSemantics:
             ],
         )
         state = _collect_pod_state(pod)
-        assert state.status == PodStatus.SUCCEEDED
+        assert state.status == Status.SUCCEEDED
         assert state.dt_start == self._ts(self.MAIN_START)
         assert state.dt_end == self._ts(self.MAIN_END)
 
@@ -602,62 +643,11 @@ class TestCollectPodStateTimeSemantics:
             containers=[_container("c", state=_waiting())],
         )
         state = _collect_pod_state(pod)
-        assert state.status == PodStatus.FAILED
+        assert state.status == Status.FAILED
         # main never ran, so dt_start stays at pod.start_time
         assert state.dt_start == self._ts(self.POD_START)
         # dt_end falls back to init's finish time
         assert state.dt_end == self._ts(self.INIT_END)
-
-
-# ---------------------------------------------------------------------------
-# _resolve_status
-# ---------------------------------------------------------------------------
-
-
-class TestResolveStatus:
-    """``_resolve_status`` applies (container_status → pod_status) rules in
-    order. Two-tuple = match if ANY container has the status. Three-tuple
-    with ``"all"`` = match only if ALL containers have the status."""
-
-    def test_any_match_returns_first_hit(self):
-        result = _resolve_status(
-            [ContainerStatus.RUNNING, ContainerStatus.WAITING],
-            [
-                (ContainerStatus.RUNNING, PodStatus.RUNNING),
-                (ContainerStatus.SUCCEEDED, PodStatus.SUCCEEDED),
-            ],
-        )
-        assert result == PodStatus.RUNNING
-
-    def test_rules_evaluated_in_order(self):
-        """First matching rule wins, even when later rules would also match."""
-        result = _resolve_status(
-            [ContainerStatus.FAILED, ContainerStatus.SUCCEEDED],
-            [
-                (ContainerStatus.FAILED, PodStatus.FAILED),
-                (ContainerStatus.SUCCEEDED, PodStatus.SUCCEEDED),
-            ],
-        )
-        assert result == PodStatus.FAILED
-
-    def test_no_match_returns_none(self):
-        result = _resolve_status(
-            [ContainerStatus.WAITING],
-            [(ContainerStatus.RUNNING, PodStatus.RUNNING)],
-        )
-        assert result is None
-
-    def test_empty_statuses_returns_none(self):
-        result = _resolve_status([], [(ContainerStatus.RUNNING, PodStatus.RUNNING)])
-        assert result is None
-
-    def test_all_match_requires_every_container(self):
-        """The ``"all"`` form: rule matches only when EVERY container has the status."""
-        all_succeeded = [ContainerStatus.SUCCEEDED, ContainerStatus.SUCCEEDED]
-        mixed = [ContainerStatus.SUCCEEDED, ContainerStatus.WAITING]
-        rule = [(ContainerStatus.SUCCEEDED, PodStatus.PULLING, "all")]
-        assert _resolve_status(all_succeeded, rule) == PodStatus.PULLING
-        assert _resolve_status(mixed, rule) is None
 
 
 # ---------------------------------------------------------------------------
@@ -721,7 +711,7 @@ class TestGetWorkflowJobStatus:
         """After ttlSecondsAfterFinished deletes the JobSet, status should be UNKNOWN."""
         api = _FakeCustomStatusApi(exc=ApiException(status=404))
         status, dt = get_workflow_job_status(api, _FakeV1NoConfigMap(), "ns", "wf-abc")
-        assert status == WorkflowStatus.UNKNOWN
+        assert status == Status.UNKNOWN
         assert dt is None
 
     def test_non_404_api_exception_raises(self):
@@ -733,7 +723,7 @@ class TestGetWorkflowJobStatus:
         jobset = {"status": {"replicatedJobsStatus": [{"active": 1}]}}
         api = _FakeCustomStatusApi(response=jobset)
         status, dt = get_workflow_job_status(api, _FakeV1NoConfigMap(), "ns", "wf-abc")
-        assert status == WorkflowStatus.RUNNING
+        assert status == Status.RUNNING
         assert dt is None
 
     def test_failed_terminal_state_is_error_regardless_of_phases(self):
@@ -742,27 +732,27 @@ class TestGetWorkflowJobStatus:
         jobset = {"status": {"terminalState": "Failed"}}
         api = _FakeCustomStatusApi(response=jobset)
         status, _ = get_workflow_job_status(api, _FakeV1NoConfigMap(), "ns", "wf-abc")
-        assert status == WorkflowStatus.ERROR
+        assert status == Status.ERROR
 
     def test_completed_job_reads_phases_configmap_to_detect_cancellation(self):
         jobset = {"status": {"terminalState": "Completed"}}
         api = _FakeCustomStatusApi(response=jobset)
-        cm = SimpleNamespace(data={"phases": '{"step-a": "CANCELLED"}'})
+        cm = SimpleNamespace(data={"phases": '{"step-a": "CANCELED"}'})
         status, _ = get_workflow_job_status(api, _FakeV1WithConfigMap(cm), "ns", "wf-abc")
-        assert status == WorkflowStatus.TERMINATED
+        assert status == Status.CANCELED
 
     def test_completed_job_reads_phases_configmap_to_detect_failure(self):
         jobset = {"status": {"terminalState": "Completed"}}
         api = _FakeCustomStatusApi(response=jobset)
         cm = SimpleNamespace(data={"phases": '{"step-a": "FAILED"}'})
         status, _ = get_workflow_job_status(api, _FakeV1WithConfigMap(cm), "ns", "wf-abc")
-        assert status == WorkflowStatus.FAILED
+        assert status == Status.FAILED
 
     def test_completed_job_without_configmap_is_succeeded(self):
         jobset = {"status": {"terminalState": "Completed"}}
         api = _FakeCustomStatusApi(response=jobset)
         status, _ = get_workflow_job_status(api, _FakeV1NoConfigMap(), "ns", "wf-abc")
-        assert status == WorkflowStatus.SUCCEEDED
+        assert status == Status.SUCCEEDED
 
 
 # ---------------------------------------------------------------------------
@@ -774,36 +764,42 @@ class TestControllerJobsetStatusAndCompletion:
     def test_failed_terminal_state_is_error(self):
         jobset = {"status": {"terminalState": "Failed"}}
         status, _ = controller_jobset_status_and_completion(jobset)
-        assert status == WorkflowStatus.ERROR
+        assert status == Status.ERROR
 
     def test_failed_terminal_state_is_error_even_with_cancelled_phase(self):
         jobset = {"status": {"terminalState": "Failed"}}
-        cm = SimpleNamespace(data={"phases": '{"step-a": "CANCELLED"}'})
+        cm = SimpleNamespace(data={"phases": '{"step-a": "CANCELED"}'})
         status, _ = controller_jobset_status_and_completion(jobset, cm)
-        assert status == WorkflowStatus.ERROR
+        assert status == Status.ERROR
 
     def test_completed_without_configmap_is_succeeded(self):
         jobset = {"status": {"terminalState": "Completed"}}
         status, _ = controller_jobset_status_and_completion(jobset)
-        assert status == WorkflowStatus.SUCCEEDED
+        assert status == Status.SUCCEEDED
 
     def test_completed_with_cancelled_phase_is_terminated(self):
         jobset = {"status": {"terminalState": "Completed"}}
-        cm = SimpleNamespace(data={"phases": '{"step-a": "CANCELLED"}'})
+        cm = SimpleNamespace(data={"phases": '{"step-a": "CANCELED"}'})
         status, _ = controller_jobset_status_and_completion(jobset, cm)
-        assert status == WorkflowStatus.TERMINATED
+        assert status == Status.CANCELED
 
     def test_completed_with_failed_phase_is_failed(self):
         jobset = {"status": {"terminalState": "Completed"}}
         cm = SimpleNamespace(data={"phases": '{"step-a": "FAILED"}'})
         status, _ = controller_jobset_status_and_completion(jobset, cm)
-        assert status == WorkflowStatus.FAILED
+        assert status == Status.FAILED
 
-    def test_completed_prefers_cancelled_over_failed(self):
+    def test_completed_prefers_canceled_over_failed(self):
+        """A user-initiated cancellation is checked before a failure, so a
+        workflow with both a FAILED and a CANCELED step reports CANCELED
+        — the cancellation was the deciding action, regardless of what else
+        happened. This is controller_jobset_status_and_completion()'s own
+        precedence (workflow_cancelled() before workflow_failed()), not
+        aggregate()'s general child-status priority."""
         jobset = {"status": {"terminalState": "Completed"}}
-        cm = SimpleNamespace(data={"phases": '{"step-a": "FAILED", "step-b": "CANCELLED"}'})
+        cm = SimpleNamespace(data={"phases": '{"step-a": "FAILED", "step-b": "CANCELED"}'})
         status, _ = controller_jobset_status_and_completion(jobset, cm)
-        assert status == WorkflowStatus.TERMINATED
+        assert status == Status.CANCELED
 
 
 # ---------------------------------------------------------------------------
@@ -848,7 +844,7 @@ class TestWorkflowCancelled:
         assert workflow_cancelled(cm) is False
 
     def test_any_cancelled_step_is_cancelled(self):
-        cm = SimpleNamespace(data={"phases": '{"step-a": "SUCCEEDED", "step-b": "CANCELLED"}'})
+        cm = SimpleNamespace(data={"phases": '{"step-a": "SUCCEEDED", "step-b": "CANCELED"}'})
         assert workflow_cancelled(cm) is True
 
 
@@ -860,9 +856,22 @@ class TestWorkflowFailed:
         assert workflow_failed(SimpleNamespace(data={})) is False
 
     def test_no_failed_step_is_not_failed(self):
-        cm = SimpleNamespace(data={"phases": '{"step-a": "SUCCEEDED", "step-b": "CANCELLED"}'})
+        cm = SimpleNamespace(data={"phases": '{"step-a": "SUCCEEDED", "step-b": "CANCELED"}'})
         assert workflow_failed(cm) is False
 
     def test_any_failed_step_is_failed(self):
         cm = SimpleNamespace(data={"phases": '{"step-a": "SUCCEEDED", "step-b": "FAILED"}'})
         assert workflow_failed(cm) is True
+
+
+class TestDetail:
+    def test_all_values_present(self):
+        values = {d.value for d in Detail}
+        assert values == {
+            "INIT:WAITING",
+            "INIT:RUNNING",
+            "INIT:ERROR",
+            "PULL:ERROR",
+            "PULL:CLOSURE",
+            "PULLING",
+        }

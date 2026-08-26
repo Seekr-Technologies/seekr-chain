@@ -5,7 +5,7 @@ import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import overload
 
-from seekr_chain.status import WorkflowStatus
+from seekr_chain.status_model import Status
 from seekr_chain.workflow import Workflow
 
 logger = logging.getLogger(__name__)
@@ -27,7 +27,7 @@ def _heartbeat_loop(stop_event: threading.Event, statuses: list, total: int, pol
         logger.info(f"{done}/{total} workflows complete")
 
 
-def _watch_to_completion(job: Workflow) -> WorkflowStatus:
+def _watch_to_completion(job: Workflow) -> Status:
     """Watch a single job via watch_controller_status() and return its final status."""
     for status in job.watch_controller_status():
         if status.is_finished():
@@ -40,12 +40,12 @@ def _watch_to_completion(job: Workflow) -> WorkflowStatus:
 
 
 @overload
-def wait(jobs: Workflow, poll_interval: int) -> WorkflowStatus: ...
+def wait(jobs: Workflow, poll_interval: int) -> Status: ...
 @overload
-def wait(jobs: list[Workflow], poll_interval: int) -> list[WorkflowStatus]: ...
+def wait(jobs: list[Workflow], poll_interval: int) -> list[Status]: ...
 
 
-def wait(jobs: Workflow | list[Workflow], poll_interval: int = 10) -> WorkflowStatus | list[WorkflowStatus]:
+def wait(jobs: Workflow | list[Workflow], poll_interval: int = 10) -> Status | list[Status]:
     """Wait for one or more jobs to finish.
 
     Uses watch_controller_status() on each job for event-driven detection (no fixed poll
@@ -60,7 +60,7 @@ def wait(jobs: Workflow | list[Workflow], poll_interval: int = 10) -> WorkflowSt
         is_list = False
         jobs = [jobs]
 
-    statuses: list[WorkflowStatus | None] = [None] * len(jobs)
+    statuses: list[Status | None] = [None] * len(jobs)
     executor = ThreadPoolExecutor(max_workers=max(1, len(jobs)))
     futures = {executor.submit(_watch_to_completion, job): i for i, job in enumerate(jobs)}
 

@@ -4,13 +4,15 @@ import json
 
 import kubernetes
 
-# Phases that stop a step from being retried or re-evaluated further. CANCELLED
+from .status_model import Status
+
+# Phases that stop a step from being retried or re-evaluated further. CANCELED
 # covers a JobSet suspended via `chain cancel` (spec.suspend=true) rather than
 # one that reached a terminal status — see the watch loop in main(). SKIPPED
 # covers a step pre-empted by a non-succeeding dependency: it never ran, so it
-# is distinct from FAILED (ran and failed) and CANCELLED (user cancelled it
+# is distinct from FAILED (ran and failed) and CANCELED (user cancelled it
 # directly) — see cascade_fail().
-TERMINAL_PHASES = ("SUCCEEDED", "FAILED", "CANCELLED", "SKIPPED")
+TERMINAL_PHASES = tuple(s.value for s in Status if s.is_terminal())
 
 
 def load_phases(
@@ -29,7 +31,7 @@ def load_phases(
     (i.e. terminal), so a RUNNING step reset to PENDING also loses its
     timings and gets re-stamped on re-run.
     """
-    phases: dict[str, str] = {s["name"]: "PENDING" for s in dag}
+    phases: dict[str, str] = {s["name"]: Status.PENDING.value for s in dag}
     cm_name = f"{workflow_id}-phases"
     timings: dict[str, dict] = {}
     try:
@@ -41,7 +43,8 @@ def load_phases(
                 if name in phases and phase in TERMINAL_PHASES:
                     phases[name] = phase
             print(
-                f"[controller] restored phases from ConfigMap: {[n for n, p in phases.items() if p != 'PENDING']}",
+                f"[controller] restored phases from ConfigMap: "
+                f"{[n for n, p in phases.items() if p != Status.PENDING.value]}",
                 flush=True,
             )
         raw_timings = (cm.data or {}).get("timings")
@@ -95,7 +98,7 @@ def save_phases(
 def cascade_fail(dag: list[dict], phases: dict[str, str]) -> None:
     """Mark PENDING steps whose dependencies (transitively) include a step that
     did not succeed as SKIPPED — the dependent never ran, it was pre-empted.
-    This is distinct from FAILED (the step itself ran and failed) and CANCELLED
+    This is distinct from FAILED (the step itself ran and failed) and CANCELED
     (the user cancelled that step directly). SKIPPED is itself a cascade
     trigger, so a chain of pre-empted steps fully propagates within the
     fixpoint loop below."""
@@ -105,9 +108,9 @@ def cascade_fail(dag: list[dict], phases: dict[str, str]) -> None:
         for step in dag:
             name = step["name"]
             deps = step.get("depends_on") or []
-            if phases[name] != "PENDING":
+            if phases[name] != Status.PENDING.value:
                 continue
-            if any(phases[d] in ("FAILED", "CANCELLED", "SKIPPED") for d in deps):
-                phases[name] = "SKIPPED"
+            if any(Status(phases[d]).is_failed() or phases[d] == Status.SKIPPED.value for d in deps):
+                phases[name] = Status.SKIPPED.value
                 print(f"[controller] step={name!r} SKIPPED (upstream did not succeed)", flush=True)
                 changed = True

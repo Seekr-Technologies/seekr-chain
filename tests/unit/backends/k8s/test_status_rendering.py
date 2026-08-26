@@ -30,12 +30,13 @@ from seekr_chain.backends.k8s.render_status import (
 from seekr_chain.backends.k8s.watched_state import WatchDisconnection
 from seekr_chain.backends.k8s.workflow_state import (
     ContainerState,
+    Detail,
     PodState,
     RoleState,
     StepState,
     WorkflowState,
 )
-from seekr_chain.status import ContainerStatus, PodStatus, WorkflowStatus
+from seekr_chain.status_model import Status
 
 UTC = datetime.timezone.utc
 
@@ -47,7 +48,8 @@ UTC = datetime.timezone.utc
 
 def _make_pod_state(
     name="p",
-    status=PodStatus.RUNNING,
+    status=Status.RUNNING,
+    detail=None,
     dt_start=None,
     dt_end=None,
     job_index=0,
@@ -58,6 +60,7 @@ def _make_pod_state(
         dt_start=dt_start,
         dt_end=dt_end,
         status=status,
+        detail=detail,
         init_containers=init_containers or [],
         containers=containers or [],
         name=name,
@@ -93,7 +96,7 @@ def _make_ws(
     *,
     id="test-wf",
     name=None,
-    status=WorkflowStatus.RUNNING,
+    status=Status.RUNNING,
     dt_start=None,
     dt_end=None,
     total_steps=None,
@@ -126,26 +129,26 @@ class TestFormatCount:
         assert format_count([]) == "0/0"
 
     def test_all_pending(self):
-        assert format_count([PodStatus.PENDING, PodStatus.PENDING]) == "0/2"
+        assert format_count([Status.PENDING, Status.PENDING]) == "0/2"
 
     def test_all_succeeded(self):
-        assert format_count([PodStatus.SUCCEEDED, PodStatus.SUCCEEDED]) == "2/2"
+        assert format_count([Status.SUCCEEDED, Status.SUCCEEDED]) == "2/2"
 
     def test_mixed_running_uses_done_plus_running(self):
-        statuses = [PodStatus.SUCCEEDED, PodStatus.RUNNING, PodStatus.PENDING]
+        statuses = [Status.SUCCEEDED, Status.RUNNING, Status.PENDING]
         assert format_count(statuses) == "1+1/3"
 
     def test_running_only(self):
-        assert format_count([PodStatus.RUNNING, PodStatus.RUNNING]) == "0+2/2"
+        assert format_count([Status.RUNNING, Status.RUNNING]) == "0+2/2"
 
     def test_explicit_total_overrides_length(self):
         # Used by the workflow header when the true step count is known from config.
-        assert format_count([PodStatus.SUCCEEDED], total=3) == "1/3"
-        assert format_count([PodStatus.SUCCEEDED, PodStatus.RUNNING], total=5) == "1+1/5"
+        assert format_count([Status.SUCCEEDED], total=3) == "1/3"
+        assert format_count([Status.SUCCEEDED, Status.RUNNING], total=5) == "1+1/5"
 
     def test_pulling_not_counted_as_running(self):
         # PULLING isn't is_running(), so it shouldn't show up in the +M count.
-        assert format_count([PodStatus.PULLING]) == "0/1"
+        assert format_count([Status.STARTING]) == "0/1"
 
 
 # ---------------------------------------------------------------------------
@@ -160,7 +163,7 @@ class TestGetStatusStyle:
             ("SUCCEEDED", "green"),
             ("RUNNING", "cyan"),
             ("FAILED", "bold red"),
-            ("TERMINATED", "bold red"),
+            ("CANCELED", "bold red"),
             ("ERROR", "bold red"),
             ("PENDING", "yellow"),
             ("UNKNOWN", "yellow"),
@@ -198,18 +201,18 @@ class TestStepTime:
             dt_end=datetime.datetime(2026, 1, 1, 12, 0, 10, tzinfo=UTC),
             name="s",
             roles=[],
-            pod=_make_pod_state(name="s", status=PodStatus.SUCCEEDED),
+            pod=_make_pod_state(name="s", status=Status.SUCCEEDED),
         )
         assert _step_time(step) == "0:10"
 
     def test_no_pod_has_dt_start_falls_back(self):
-        pod = _make_pod_state(name="p", status=PodStatus.PENDING)  # dt_start=None
+        pod = _make_pod_state(name="p", status=Status.PENDING)  # dt_start=None
         step = StepState(
             dt_start=datetime.datetime(2026, 1, 1, 12, 0, 0, tzinfo=UTC),
             dt_end=datetime.datetime(2026, 1, 1, 12, 0, 5, tzinfo=UTC),
             name="s",
-            roles=[RoleState(dt_start=None, dt_end=None, name=None, pods=[pod], status=PodStatus.PENDING)],
-            pod=_make_pod_state(name="s", status=PodStatus.PENDING),
+            roles=[RoleState(dt_start=None, dt_end=None, name=None, pods=[pod], status=Status.PENDING)],
+            pod=_make_pod_state(name="s", status=Status.PENDING),
         )
         assert _step_time(step) == "0:05"
 
@@ -218,13 +221,13 @@ class TestStepTime:
         t0 = datetime.datetime(2026, 1, 1, 12, 0, 0, tzinfo=UTC)
         pod_a = _make_pod_state(
             name="a",
-            status=PodStatus.SUCCEEDED,
+            status=Status.SUCCEEDED,
             dt_start=t0,
             dt_end=t0 + datetime.timedelta(seconds=51),
         )
         pod_b = _make_pod_state(
             name="b",
-            status=PodStatus.SUCCEEDED,
+            status=Status.SUCCEEDED,
             dt_start=t0,
             dt_end=t0 + datetime.timedelta(seconds=50),
         )
@@ -232,8 +235,8 @@ class TestStepTime:
             dt_start=t0,
             dt_end=t0,  # jobset-derived "0:00" — what we don't want
             name="step",
-            roles=[RoleState(dt_start=None, dt_end=None, name=None, pods=[pod_a, pod_b], status=PodStatus.SUCCEEDED)],
-            pod=_make_pod_state(name="step", status=PodStatus.SUCCEEDED),
+            roles=[RoleState(dt_start=None, dt_end=None, name=None, pods=[pod_a, pod_b], status=Status.SUCCEEDED)],
+            pod=_make_pod_state(name="step", status=Status.SUCCEEDED),
         )
         assert _step_time(step) == "0:51"
 
@@ -242,13 +245,13 @@ class TestStepTime:
         t0 = datetime.datetime(2026, 1, 1, 12, 0, 0, tzinfo=UTC)
         pod_early = _make_pod_state(
             name="e",
-            status=PodStatus.SUCCEEDED,
+            status=Status.SUCCEEDED,
             dt_start=t0,
             dt_end=t0 + datetime.timedelta(seconds=30),
         )
         pod_late = _make_pod_state(
             name="l",
-            status=PodStatus.SUCCEEDED,
+            status=Status.SUCCEEDED,
             dt_start=t0 + datetime.timedelta(seconds=10),
             dt_end=t0 + datetime.timedelta(seconds=80),  # duration = 70s
         )
@@ -262,10 +265,10 @@ class TestStepTime:
                     dt_end=None,
                     name=None,
                     pods=[pod_early, pod_late],
-                    status=PodStatus.SUCCEEDED,
+                    status=Status.SUCCEEDED,
                 )
             ],
-            pod=_make_pod_state(name="s", status=PodStatus.SUCCEEDED),
+            pod=_make_pod_state(name="s", status=Status.SUCCEEDED),
         )
         assert _step_time(step) == "1:10"
 
@@ -282,13 +285,13 @@ class TestStepTime:
         t0 = datetime.datetime(2026, 1, 1, 12, 0, 0, tzinfo=UTC)
         pod_done = _make_pod_state(
             name="d",
-            status=PodStatus.SUCCEEDED,
+            status=Status.SUCCEEDED,
             dt_start=t0,
             dt_end=t0 + datetime.timedelta(seconds=10),
         )
         pod_running = _make_pod_state(
             name="r",
-            status=PodStatus.RUNNING,
+            status=Status.RUNNING,
             dt_start=t0,
             dt_end=None,
         )
@@ -302,10 +305,10 @@ class TestStepTime:
                     dt_end=None,
                     name=None,
                     pods=[pod_done, pod_running],
-                    status=PodStatus.RUNNING,
+                    status=Status.RUNNING,
                 )
             ],
-            pod=_make_pod_state(name="s", status=PodStatus.RUNNING),
+            pod=_make_pod_state(name="s", status=Status.RUNNING),
         )
         # Running pod has been alive 42s; that's longer than the done pod's 10s.
         assert _step_time(step) == "0:42"
@@ -323,8 +326,8 @@ class TestCollectRows:
 
     def test_single_pod_step_collapses_pod_into_step_row(self):
         """For one-pod steps, the pod's id appears on the step row — no child pod row."""
-        pod = _make_pod_state(name="abc-step-js--0-0-xxxxx", status=PodStatus.RUNNING)
-        step = _make_step("step", [pod], status=PodStatus.RUNNING)
+        pod = _make_pod_state(name="abc-step-js--0-0-xxxxx", status=Status.RUNNING)
+        step = _make_step("step", [pod], status=Status.RUNNING)
         ws = _make_ws(steps=[step])
         rows = _collect_rows(ws)
         assert len(rows) == 1
@@ -336,10 +339,10 @@ class TestCollectRows:
 
     def test_multi_pod_step_has_step_row_plus_pod_rows(self):
         pods = [
-            _make_pod_state(name="abc-step-js--0-0-aaaaa", status=PodStatus.RUNNING, job_index=0),
-            _make_pod_state(name="abc-step-js--1-0-bbbbb", status=PodStatus.RUNNING, job_index=1),
+            _make_pod_state(name="abc-step-js--0-0-aaaaa", status=Status.RUNNING, job_index=0),
+            _make_pod_state(name="abc-step-js--1-0-bbbbb", status=Status.RUNNING, job_index=1),
         ]
-        step = _make_step("step", pods, status=PodStatus.RUNNING)
+        step = _make_step("step", pods, status=Status.RUNNING)
         ws = _make_ws(steps=[step])
         rows = _collect_rows(ws)
         assert len(rows) == 3  # step + 2 pods
@@ -353,10 +356,10 @@ class TestCollectRows:
 
     def test_multi_pod_tree_prefixes_use_branch_and_last_glyphs(self):
         pods = [
-            _make_pod_state(name="p0", status=PodStatus.RUNNING, job_index=0),
-            _make_pod_state(name="p1", status=PodStatus.RUNNING, job_index=1),
+            _make_pod_state(name="p0", status=Status.RUNNING, job_index=0),
+            _make_pod_state(name="p1", status=Status.RUNNING, job_index=1),
         ]
-        step = _make_step("step", pods, status=PodStatus.RUNNING)
+        step = _make_step("step", pods, status=Status.RUNNING)
         ws = _make_ws(steps=[step])
         rows = _collect_rows(ws)
         # Single (last) step: step prefix uses └, child branch uses spaces
@@ -367,18 +370,18 @@ class TestCollectRows:
         assert rows[2].prefix.endswith("└ ")
 
     def test_two_steps_first_uses_branch_prefix(self):
-        pods_a = [_make_pod_state(name="a-0", status=PodStatus.SUCCEEDED)]
-        pods_b = [_make_pod_state(name="b-0", status=PodStatus.RUNNING)]
-        step_a = _make_step("a", pods_a, status=PodStatus.SUCCEEDED, dt_start=datetime.datetime(2026, 1, 1, tzinfo=UTC))
-        step_b = _make_step("b", pods_b, status=PodStatus.RUNNING, dt_start=datetime.datetime(2026, 1, 2, tzinfo=UTC))
+        pods_a = [_make_pod_state(name="a-0", status=Status.SUCCEEDED)]
+        pods_b = [_make_pod_state(name="b-0", status=Status.RUNNING)]
+        step_a = _make_step("a", pods_a, status=Status.SUCCEEDED, dt_start=datetime.datetime(2026, 1, 1, tzinfo=UTC))
+        step_b = _make_step("b", pods_b, status=Status.RUNNING, dt_start=datetime.datetime(2026, 1, 2, tzinfo=UTC))
         ws = _make_ws(steps=[step_a, step_b])
         rows = _collect_rows(ws)
         assert rows[0].prefix.endswith("├ ")  # not last
         assert rows[1].prefix.endswith("└ ")  # last
 
     def test_pending_step_has_empty_time(self):
-        pod = _make_pod_state(name="p", status=PodStatus.PENDING)  # dt_start=None
-        step = _make_step("step", [pod], status=PodStatus.PENDING)  # dt_start=None
+        pod = _make_pod_state(name="p", status=Status.PENDING)  # dt_start=None
+        step = _make_step("step", [pod], status=Status.PENDING)  # dt_start=None
         ws = _make_ws(steps=[step])
         rows = _collect_rows(ws)
         assert rows[0].time_str == ""
@@ -386,14 +389,15 @@ class TestCollectRows:
     def test_annotation_row_emitted_for_pull_error_reason(self):
         bad_container = ContainerState(
             name="c",
-            status=ContainerStatus.PULL_ERROR,
+            status=Status.STARTING,
+            detail=Detail.PULL_ERROR,
             dt_start=None,
             dt_end=None,
             reason="ImagePullBackOff",
             message="not found",
         )
-        pod = _make_pod_state(name="p", status=PodStatus.PULL_ERROR, containers=[bad_container])
-        step = _make_step("step", [pod], status=PodStatus.PULL_ERROR)
+        pod = _make_pod_state(name="p", status=Status.STARTING, detail=Detail.PULL_ERROR, containers=[bad_container])
+        step = _make_step("step", [pod], status=Status.STARTING)
         ws = _make_ws(steps=[step])
         rows = _collect_rows(ws)
         # single-pod collapse: step row + annotation row (no pod row)
@@ -407,11 +411,11 @@ class TestCollectRows:
         step with no pods yet."""
         started = _make_step(
             "a",
-            [_make_pod_state(status=PodStatus.SUCCEEDED)],
-            status=PodStatus.SUCCEEDED,
+            [_make_pod_state(status=Status.SUCCEEDED)],
+            status=Status.SUCCEEDED,
             dt_start=datetime.datetime(2026, 1, 1, tzinfo=UTC),
         )
-        skipped_pod = _make_pod_state(name="b", status=PodStatus.SKIPPED)
+        skipped_pod = _make_pod_state(name="b", status=Status.SKIPPED)
         skipped = StepState(dt_start=None, dt_end=None, name="b", roles=[], pod=skipped_pod)
         ws = _make_ws(steps=[started, skipped])
         rows = _collect_rows(ws)
@@ -476,8 +480,8 @@ class TestRender:
         # One step, one running pod — exercises the single-pod-collapse path.
         t0 = datetime.datetime(2026, 1, 1, 12, 0, 0, tzinfo=UTC)
         t30 = t0 + datetime.timedelta(seconds=30)
-        pod = _make_pod_state(name=pod_name, status=PodStatus.RUNNING, dt_start=t0, dt_end=t30)
-        step = _make_step("step", [pod], status=PodStatus.RUNNING, dt_start=t0, dt_end=t30)
+        pod = _make_pod_state(name=pod_name, status=Status.RUNNING, dt_start=t0, dt_end=t30)
+        step = _make_step("step", [pod], status=Status.RUNNING, dt_start=t0, dt_end=t30)
         return _make_ws(steps=[step], id="abc", name=name, dt_start=t0, dt_end=t30)
 
     def test_returns_rich_text(self):
@@ -537,8 +541,8 @@ class TestRender:
 
 class TestFormatState:
     def test_returns_plain_string(self):
-        pod = _make_pod_state(name="abc-step-0", status=PodStatus.RUNNING)
-        step = _make_step("step", [pod], status=PodStatus.RUNNING)
+        pod = _make_pod_state(name="abc-step-0", status=Status.RUNNING)
+        step = _make_step("step", [pod], status=Status.RUNNING)
         ws = _make_ws(steps=[step])
         out = format_plain(ws)
         assert isinstance(out, str)
@@ -549,8 +553,8 @@ class TestFormatState:
         assert format_plain(ws) == ""
 
     def test_contains_tree_glyph_and_name(self):
-        pod = _make_pod_state(name="abc-step-0", status=PodStatus.RUNNING)
-        step = _make_step("step", [pod], status=PodStatus.RUNNING)
+        pod = _make_pod_state(name="abc-step-0", status=Status.RUNNING)
+        step = _make_step("step", [pod], status=Status.RUNNING)
         ws = _make_ws(steps=[step])
         out = format_plain(ws)
         assert "└" in out

@@ -397,8 +397,8 @@ class TestListWorkflows:
         assert result[0]["duration"] == "5:30"
 
     @patch("seekr_chain.backends.k8s.list_workflows.kube")
-    def test_cancelled_run_reports_terminated_not_failed(self, mock_kube):
-        """A Completed terminalState with a CANCELLED phase in the ConfigMap reports Terminated."""
+    def test_cancelled_run_reports_canceled_not_failed(self, mock_kube):
+        """A Completed terminalState with a CANCELED phase in the ConfigMap reports Canceled."""
 
         jobset = {
             "metadata": {"name": "abc123", "creationTimestamp": None, "labels": {}},
@@ -410,7 +410,7 @@ class TestListWorkflows:
         }
 
         mock_configmap = MagicMock()
-        mock_configmap.data = {"phases": '{"step-a": "CANCELLED"}'}
+        mock_configmap.data = {"phases": '{"step-a": "CANCELED"}'}
 
         mock_custom = MagicMock()
         mock_custom.list_namespaced_custom_object.return_value = {"items": [jobset]}
@@ -422,7 +422,7 @@ class TestListWorkflows:
 
         result = list_workflows()
 
-        assert result[0]["status"] == "Terminated"
+        assert result[0]["status"] == "Canceled"
 
     @patch("seekr_chain.backends.k8s.list_workflows.kube")
     def test_completed_with_failed_phase_reports_failed(self, mock_kube):
