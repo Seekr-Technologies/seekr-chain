@@ -195,9 +195,8 @@ def _validate_external_s3_secret(secret_name: str, namespace: str) -> None:
                 "credentials per workflow."
             ) from e
         logger.warning(
-            "Skipping validation of datastore_kubernetes_secret %r: unable to read secrets "
-            "in namespace %r (typically an RBAC permission issue). status=%s reason=%s",
-            secret_name,
+            "Skipping validation of the configured datastore_kubernetes_secret: unable to read "
+            "secrets in namespace %r (typically an RBAC permission issue). status=%s reason=%s",
             namespace,
             e.status,
             e.reason,

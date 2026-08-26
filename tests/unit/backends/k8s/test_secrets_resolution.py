@@ -217,7 +217,7 @@ class TestValidateExternalS3Secret:
         with patch("seekr_chain.backends.k8s.launch_k8s_workflow.kube", core_v1=mock_v1):
             with caplog.at_level("WARNING"):
                 _validate_external_s3_secret("external-creds", "my-namespace")
-        assert "external-creds" in caplog.text
+        assert "datastore_kubernetes_secret" in caplog.text
 
 
 class TestCreateSecretsCleanup:
