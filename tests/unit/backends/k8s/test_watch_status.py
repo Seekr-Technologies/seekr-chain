@@ -17,7 +17,7 @@ from kubernetes.client.rest import ApiException
 from seekr_chain.backends.k8s import watched_state as watched_state_mod
 from seekr_chain.backends.k8s.k8s_workflow import K8sWorkflow
 from seekr_chain.backends.k8s.workflow_state import get_workflow_job_status
-from seekr_chain.status import WorkflowStatus
+from seekr_chain.status_model import Status
 
 
 def _jobset(resource_version="1", active=0, terminal_state=None):
@@ -97,7 +97,7 @@ def test_watch_controller_status_ends_stream_on_deleted_event(monkeypatch):
     workflow = _make_workflow(FakeK8sCustom(jobset=jobset))
     statuses = list(workflow.watch_controller_status())
 
-    assert statuses == [WorkflowStatus.RUNNING]
+    assert statuses == [Status.RUNNING]
 
 
 def test_watch_controller_status_yields_on_change_then_stops_when_finished(monkeypatch):
@@ -112,7 +112,7 @@ def test_watch_controller_status_yields_on_change_then_stops_when_finished(monke
     workflow = _make_workflow(FakeK8sCustom(jobset=jobset_running))
     statuses = list(workflow.watch_controller_status())
 
-    assert statuses == [WorkflowStatus.RUNNING, WorkflowStatus.SUCCEEDED]
+    assert statuses == [Status.RUNNING, Status.SUCCEEDED]
 
 
 def test_get_workflow_job_status_returns_unknown_on_404():
@@ -122,7 +122,7 @@ def test_get_workflow_job_status_returns_unknown_on_404():
 
     status, completion_time = get_workflow_job_status(NotFoundK8sCustom(), FakeK8sV1(), "ns", "wf-1")
 
-    assert status == WorkflowStatus.UNKNOWN
+    assert status == Status.UNKNOWN
     assert completion_time is None
 
 

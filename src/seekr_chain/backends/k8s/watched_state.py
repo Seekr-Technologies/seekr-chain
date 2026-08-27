@@ -42,7 +42,7 @@ from seekr_chain.backends.k8s.workflow_state import (
     read_phases_configmap,
 )
 from seekr_chain.k8s_api import kube
-from seekr_chain.status import WorkflowStatus
+from seekr_chain.status_model import Status
 
 logger = logging.getLogger(__name__)
 
@@ -202,7 +202,7 @@ def _project_workflow_state(workflow_id, caches) -> WorkflowState:
     )
 
 
-def _project_controller_status(caches) -> Optional[WorkflowStatus]:
+def _project_controller_status(caches) -> Optional[Status]:
     controller_jobset = next(iter(caches["job"].values()), None)
     if controller_jobset is None:
         return None
@@ -217,7 +217,7 @@ class ReconnectingWatcher:
     Configured with a list of ``WatchSpec``s (one per resource kind) and a
     ``project`` callback that turns the current per-kind caches into
     whatever snapshot type the caller wants (a full ``WorkflowState``, or
-    just a ``WorkflowStatus``) — see ``workflow_state_watcher()`` /
+    just a ``Status``) — see ``workflow_state_watcher()`` /
     ``controller_status_watcher()`` below, the intended construction sites.
 
     Usage::
@@ -586,9 +586,9 @@ def controller_status_watcher(
     workflow_id: str,
     max_attempts: int = _WATCH_MAX_ATTEMPTS,
 ) -> ReconnectingWatcher:
-    """Build a ``ReconnectingWatcher`` that maintains a live ``WorkflowStatus``
+    """Build a ``ReconnectingWatcher`` that maintains a live ``Status``
     for ``K8sWorkflow.watch_controller_status()`` by watching the controller
-    JobSet and its phases ConfigMap (for CANCELLED-vs-FAILED disambiguation).
+    JobSet and its phases ConfigMap (for CANCELED-vs-FAILED disambiguation).
 
     Deliberately lighter than ``workflow_state_watcher()``:
     ``watch_controller_status()`` (used by ``wait()``, which may be watching

@@ -12,12 +12,13 @@ from .events import emit_event, touch_heartbeat
 from .phases import TERMINAL_PHASES, cascade_fail, load_phases, save_phases
 from .scheduling import submit_ready_steps
 from .status import flush_status, write_status
+from .status_model import Status
 from .timeutil import now_iso
 
 
 def _stamp_starts(dag: list[dict], phases: dict[str, str], timings: dict[str, dict]) -> None:
     """Record dt_start for any step that actually started running. SKIPPED (and
-    cancelled-from-pending) steps never ran, so they must not get a run
+    canceled-from-pending) steps never ran, so they must not get a run
     timestamp — checking phase != PENDING isn't enough, since those phases are
     also non-PENDING once the workflow finishes.
 
@@ -26,7 +27,11 @@ def _stamp_starts(dag: list[dict], phases: dict[str, str], timings: dict[str, di
     A future improvement is sourcing this from the pod itself."""
     for step in dag:
         name = step["name"]
-        if phases[name] in ("RUNNING", "SUCCEEDED", "FAILED") and "dt_start" not in timings.setdefault(name, {}):
+        if phases[name] in (
+            Status.RUNNING.value,
+            Status.SUCCEEDED.value,
+            Status.FAILED.value,
+        ) and "dt_start" not in timings.setdefault(name, {}):
             timings[name]["dt_start"] = now_iso()
 
 
@@ -185,7 +190,7 @@ def main() -> int:
                     suspended = obj.get("spec", {}).get("suspend", False)
 
                     if terminal == "Completed":
-                        phases[step_name] = "SUCCEEDED"
+                        phases[step_name] = Status.SUCCEEDED.value
                         print(f"[controller] step={step_name!r} SUCCEEDED", flush=True)
                         emit_event(
                             k8s_v1,
@@ -196,7 +201,7 @@ def main() -> int:
                             f"Step {step_name!r} completed successfully",
                         )
                     elif terminal == "Failed":
-                        phases[step_name] = "FAILED"
+                        phases[step_name] = Status.FAILED.value
                         print(f"[controller] step={step_name!r} FAILED", flush=True)
                         emit_event(
                             k8s_v1,
@@ -213,15 +218,15 @@ def main() -> int:
                         # a normal completion. Treat it as terminal so the DAG loop
                         # below can exit instead of waiting forever for a
                         # terminalState that will never arrive.
-                        phases[step_name] = "CANCELLED"
-                        print(f"[controller] step={step_name!r} CANCELLED", flush=True)
+                        phases[step_name] = Status.CANCELED.value
+                        print(f"[controller] step={step_name!r} CANCELED", flush=True)
                         emit_event(
                             k8s_v1,
                             namespace,
                             workflow_id,
                             job_uid,
-                            "StepCancelled",
-                            f"Step {step_name!r} was cancelled",
+                            "StepCanceled",
+                            f"Step {step_name!r} was canceled",
                         )
                     else:
                         continue
@@ -256,7 +261,7 @@ def main() -> int:
                 print(f"[controller] watch: error ({e}), reconnecting in {_WATCH_RECONNECT_DELAY}s", flush=True)
                 time.sleep(_WATCH_RECONNECT_DELAY)
 
-    failed = [n for n, p in phases.items() if p == "FAILED"]
+    failed = [n for n, p in phases.items() if p == Status.FAILED.value]
     if failed:
         emit_event(
             k8s_v1,
@@ -271,17 +276,17 @@ def main() -> int:
         flush_status(workflow_id, dag, phases, timings)
         return 0
 
-    cancelled = [n for n, p in phases.items() if p == "CANCELLED"]
-    if cancelled:
+    canceled = [n for n, p in phases.items() if p == Status.CANCELED.value]
+    if canceled:
         emit_event(
             k8s_v1,
             namespace,
             workflow_id,
             job_uid,
-            "WorkflowCancelled",
-            f"Workflow cancelled — cancelled steps: {cancelled}",
+            "WorkflowCanceled",
+            f"Workflow canceled — canceled steps: {canceled}",
         )
-        print(f"[controller] workflow CANCELLED — cancelled steps: {cancelled}", flush=True)
+        print(f"[controller] workflow CANCELED — canceled steps: {canceled}", flush=True)
         flush_status(workflow_id, dag, phases, timings)
         return 0
 

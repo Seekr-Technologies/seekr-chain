@@ -57,7 +57,7 @@ class TestKubectlPreflight:
     def test_raises_when_kubectl_missing(self):
         """attach() raises RuntimeError when kubectl is not in PATH."""
         from seekr_chain.backends.k8s.k8s_workflow import K8sWorkflow, PodState, WorkflowState
-        from seekr_chain.status import PodStatus, WorkflowStatus
+        from seekr_chain.status_model import Status
 
         # We need to mock the entire __init__ since it calls K8s APIs
         workflow = object.__new__(K8sWorkflow)
@@ -77,7 +77,7 @@ class TestKubectlPreflight:
             dt_start=None,
             dt_end=None,
             name="test-pod",
-            status=PodStatus("RUNNING"),
+            status=Status("RUNNING"),
             init_containers=[],
             containers=[],
             job_index=0,
@@ -90,7 +90,7 @@ class TestKubectlPreflight:
         empty_state = WorkflowState(
             id="test-id",
             name=None,
-            status=WorkflowStatus.RUNNING,
+            status=Status.RUNNING,
             dt_start=None,
             dt_end=None,
             total_steps=None,
@@ -107,7 +107,7 @@ class TestKubectlPreflight:
             patch.object(workflow, "get_status"),
             patch(
                 "seekr_chain.backends.k8s.k8s_workflow.get_workflow_job_status",
-                return_value=(WorkflowStatus.RUNNING, None),
+                return_value=(Status.RUNNING, None),
             ),
             patch("seekr_chain.backends.k8s.k8s_workflow.workflow_state_watcher", return_value=mock_watcher),
             patch("seekr_chain.backends.k8s.k8s_workflow.first_running_or_finished_pod", return_value=pod),

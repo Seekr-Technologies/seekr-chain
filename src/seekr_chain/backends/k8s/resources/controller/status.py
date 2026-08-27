@@ -20,7 +20,7 @@ import subprocess
 import tempfile
 import threading
 
-from .phases import TERMINAL_PHASES
+from .status_model import Status, aggregate
 from .timeutil import now_iso
 
 # Controller-local scratch file for the status doc; the controller both writes
@@ -46,19 +46,18 @@ _shipper: threading.Thread | None = None
 def _workflow_status_from_phases(phases: dict[str, str]) -> str:
     """Roll per-step phases up into a single workflow status.
 
-    Precedence mirrors the client's status derivation: a cancellation trumps a
-    failure (both are terminal, but CANCELLED reflects explicit user intent),
-    a failure trumps success, and the workflow isn't SUCCEEDED until every
-    step has reached a terminal phase.
+    CANCELED wins over FAILED even though aggregate()'s general precedence
+    (status_model.py) puts FAILED first -- a user's cancellation is the
+    deciding action, matching workflow_state.controller_jobset_status_and_completion()'s
+    workflow_canceled()-before-workflow_failed() check. Falls back to
+    aggregate() for everything else.
     """
-    values = phases.values()
-    if "CANCELLED" in values:
-        return "TERMINATED"
-    if "FAILED" in values:
-        return "FAILED"
-    if all(p in TERMINAL_PHASES for p in values):
-        return "SUCCEEDED"
-    return "RUNNING"
+    statuses = [Status(p) for p in phases.values()]
+    if Status.CANCELED in statuses:
+        return Status.CANCELED.value
+    if Status.FAILED in statuses:
+        return Status.FAILED.value
+    return aggregate(statuses).value
 
 
 def _build_status(
@@ -75,7 +74,7 @@ def _build_status(
         "steps": [
             {
                 "name": step["name"],
-                "phase": phases.get(step["name"], "PENDING"),
+                "phase": phases.get(step["name"], Status.PENDING.value),
                 "dt_start": timings.get(step["name"], {}).get("dt_start"),
                 "dt_end": timings.get(step["name"], {}).get("dt_end"),
             }

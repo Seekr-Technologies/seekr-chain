@@ -25,7 +25,7 @@ class Workflow(ABC):
     def get_status(self): ...
 
     def watch_controller_status(self) -> Generator:
-        """Yield WorkflowStatus whenever it changes; return when the job finishes.
+        """Yield Status whenever it changes; return when the job finishes.
 
         Watches only the workflow's own top-level status — not per-step/pod
         detail (see get_detailed_state() for that). Used by wait(), which
@@ -36,11 +36,11 @@ class Workflow(ABC):
         Default implementation polls get_status() every 2 s. Override in backends
         that support event-driven notification (e.g. Kubernetes Watch API).
         """
-        from seekr_chain.status import WorkflowStatus  # avoid import cycle at module level
+        from seekr_chain.status_model import Status  # avoid import cycle at module level
 
-        last: WorkflowStatus | None = None
+        last: Status | None = None
         while True:
-            status: WorkflowStatus = self.get_status()
+            status: Status = self.get_status()
             if status != last:
                 yield status
                 last = status
