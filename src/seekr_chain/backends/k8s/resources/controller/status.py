@@ -49,7 +49,7 @@ def _workflow_status_from_phases(phases: dict[str, str]) -> str:
     CANCELED wins over FAILED even though aggregate()'s general precedence
     (status_model.py) puts FAILED first -- a user's cancellation is the
     deciding action, matching workflow_state.controller_jobset_status_and_completion()'s
-    workflow_cancelled()-before-workflow_failed() check. Falls back to
+    workflow_canceled()-before-workflow_failed() check. Falls back to
     aggregate() for everything else.
     """
     statuses = [Status(p) for p in phases.values()]

@@ -502,7 +502,7 @@ def controller_jobset_status_and_completion(
         completion_time = _parse_timestamp(max(terminal_times)) if terminal_times else None
         if terminal_state == "Failed":
             return Status.ERROR, completion_time
-        if workflow_cancelled(phases_configmap):
+        if workflow_canceled(phases_configmap):
             return Status.CANCELED, completion_time
         if workflow_failed(phases_configmap):
             return Status.FAILED, completion_time
@@ -631,11 +631,11 @@ def read_phases_configmap(k8s_v1, namespace: str, workflow_id: str):
         return None
 
 
-def workflow_cancelled(phases_configmap) -> bool:
-    """True if any step's persisted phase is CANCELED (user-cancelled).
+def workflow_canceled(phases_configmap) -> bool:
+    """True if any step's persisted phase is CANCELED (user-canceled).
 
     The controller always exits 0 on ``Completed``, so JobSet's own
-    terminalState can't distinguish a cancelled run from a successful or
+    terminalState can't distinguish a canceled run from a successful or
     failed one — this falls back to the phase ConfigMap the controller
     already persists for restart-resume.
     """
@@ -648,7 +648,7 @@ def workflow_cancelled(phases_configmap) -> bool:
 
 
 def workflow_failed(phases_configmap) -> bool:
-    """True if any step's persisted phase is FAILED. See ``workflow_cancelled()``."""
+    """True if any step's persisted phase is FAILED. See ``workflow_canceled()``."""
     if phases_configmap is None:
         return False
     raw = (phases_configmap.data or {}).get("phases")
@@ -658,7 +658,7 @@ def workflow_failed(phases_configmap) -> bool:
 
 
 def _skipped_step_names(phases_configmap) -> set[str]:
-    """Names of steps whose persisted phase is SKIPPED. See ``workflow_cancelled()``."""
+    """Names of steps whose persisted phase is SKIPPED. See ``workflow_canceled()``."""
     if phases_configmap is None:
         return set()
     raw = (phases_configmap.data or {}).get("phases")

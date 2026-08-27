@@ -21,7 +21,7 @@ from seekr_chain.backends.k8s.workflow_state import (
     is_jobset_suspended,
     list_jobsets,
     read_phases_configmap,
-    workflow_cancelled,
+    workflow_canceled,
     workflow_failed,
 )
 from seekr_chain.status_model import Status
@@ -766,7 +766,7 @@ class TestControllerJobsetStatusAndCompletion:
         status, _ = controller_jobset_status_and_completion(jobset)
         assert status == Status.ERROR
 
-    def test_failed_terminal_state_is_error_even_with_cancelled_phase(self):
+    def test_failed_terminal_state_is_error_even_with_canceled_phase(self):
         jobset = {"status": {"terminalState": "Failed"}}
         cm = SimpleNamespace(data={"phases": '{"step-a": "CANCELED"}'})
         status, _ = controller_jobset_status_and_completion(jobset, cm)
@@ -777,7 +777,7 @@ class TestControllerJobsetStatusAndCompletion:
         status, _ = controller_jobset_status_and_completion(jobset)
         assert status == Status.SUCCEEDED
 
-    def test_completed_with_cancelled_phase_is_terminated(self):
+    def test_completed_with_canceled_phase_is_terminated(self):
         jobset = {"status": {"terminalState": "Completed"}}
         cm = SimpleNamespace(data={"phases": '{"step-a": "CANCELED"}'})
         status, _ = controller_jobset_status_and_completion(jobset, cm)
@@ -794,7 +794,7 @@ class TestControllerJobsetStatusAndCompletion:
         workflow with both a FAILED and a CANCELED step reports CANCELED
         — the cancellation was the deciding action, regardless of what else
         happened. This is controller_jobset_status_and_completion()'s own
-        precedence (workflow_cancelled() before workflow_failed()), not
+        precedence (workflow_canceled() before workflow_failed()), not
         aggregate()'s general child-status priority."""
         jobset = {"status": {"terminalState": "Completed"}}
         cm = SimpleNamespace(data={"phases": '{"step-a": "FAILED", "step-b": "CANCELED"}'})
@@ -803,7 +803,7 @@ class TestControllerJobsetStatusAndCompletion:
 
 
 # ---------------------------------------------------------------------------
-# read_phases_configmap / workflow_cancelled
+# read_phases_configmap / workflow_canceled
 # ---------------------------------------------------------------------------
 
 
@@ -832,20 +832,20 @@ class TestReadPhasesConfigmap:
         assert read_phases_configmap(_FakeV1WithConfigMap(cm), "ns", "wf-abc") is cm
 
 
-class TestWorkflowCancelled:
-    def test_none_configmap_is_not_cancelled(self):
-        assert workflow_cancelled(None) is False
+class TestWorkflowCanceled:
+    def test_none_configmap_is_not_canceled(self):
+        assert workflow_canceled(None) is False
 
-    def test_missing_phases_key_is_not_cancelled(self):
-        assert workflow_cancelled(SimpleNamespace(data={})) is False
+    def test_missing_phases_key_is_not_canceled(self):
+        assert workflow_canceled(SimpleNamespace(data={})) is False
 
-    def test_no_cancelled_step_is_not_cancelled(self):
+    def test_no_canceled_step_is_not_canceled(self):
         cm = SimpleNamespace(data={"phases": '{"step-a": "FAILED", "step-b": "SUCCEEDED"}'})
-        assert workflow_cancelled(cm) is False
+        assert workflow_canceled(cm) is False
 
-    def test_any_cancelled_step_is_cancelled(self):
+    def test_any_canceled_step_is_canceled(self):
         cm = SimpleNamespace(data={"phases": '{"step-a": "SUCCEEDED", "step-b": "CANCELED"}'})
-        assert workflow_cancelled(cm) is True
+        assert workflow_canceled(cm) is True
 
 
 class TestWorkflowFailed:

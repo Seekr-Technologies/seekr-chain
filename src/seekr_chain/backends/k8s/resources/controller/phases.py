@@ -10,7 +10,7 @@ from .status_model import Status
 # covers a JobSet suspended via `chain cancel` (spec.suspend=true) rather than
 # one that reached a terminal status — see the watch loop in main(). SKIPPED
 # covers a step pre-empted by a non-succeeding dependency: it never ran, so it
-# is distinct from FAILED (ran and failed) and CANCELED (user cancelled it
+# is distinct from FAILED (ran and failed) and CANCELED (user canceled it
 # directly) — see cascade_fail().
 TERMINAL_PHASES = tuple(s.value for s in Status if s.is_terminal())
 
@@ -99,7 +99,7 @@ def cascade_fail(dag: list[dict], phases: dict[str, str]) -> None:
     """Mark PENDING steps whose dependencies (transitively) include a step that
     did not succeed as SKIPPED — the dependent never ran, it was pre-empted.
     This is distinct from FAILED (the step itself ran and failed) and CANCELED
-    (the user cancelled that step directly). SKIPPED is itself a cascade
+    (the user canceled that step directly). SKIPPED is itself a cascade
     trigger, so a chain of pre-empted steps fully propagates within the
     fixpoint loop below."""
     changed = True

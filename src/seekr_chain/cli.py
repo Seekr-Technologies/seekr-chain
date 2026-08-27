@@ -239,7 +239,7 @@ def cancel(job_ids):
     for job_id in job_ids:
         workflow = seekr_chain.K8sWorkflow(id=job_id)
         workflow.cancel()
-        click.echo(f"Cancelled: {job_id}")
+        click.echo(f"Canceled: {job_id}")
 
 
 @main.command(name="install-sa")

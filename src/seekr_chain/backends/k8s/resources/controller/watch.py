@@ -18,7 +18,7 @@ from .timeutil import now_iso
 
 def _stamp_starts(dag: list[dict], phases: dict[str, str], timings: dict[str, dict]) -> None:
     """Record dt_start for any step that actually started running. SKIPPED (and
-    cancelled-from-pending) steps never ran, so they must not get a run
+    canceled-from-pending) steps never ran, so they must not get a run
     timestamp — checking phase != PENDING isn't enough, since those phases are
     also non-PENDING once the workflow finishes.
 
@@ -225,8 +225,8 @@ def main() -> int:
                             namespace,
                             workflow_id,
                             job_uid,
-                            "StepCancelled",
-                            f"Step {step_name!r} was cancelled",
+                            "StepCanceled",
+                            f"Step {step_name!r} was canceled",
                         )
                     else:
                         continue
@@ -276,17 +276,17 @@ def main() -> int:
         flush_status(workflow_id, dag, phases, timings)
         return 0
 
-    cancelled = [n for n, p in phases.items() if p == Status.CANCELED.value]
-    if cancelled:
+    canceled = [n for n, p in phases.items() if p == Status.CANCELED.value]
+    if canceled:
         emit_event(
             k8s_v1,
             namespace,
             workflow_id,
             job_uid,
-            "WorkflowCancelled",
-            f"Workflow cancelled — cancelled steps: {cancelled}",
+            "WorkflowCanceled",
+            f"Workflow canceled — canceled steps: {canceled}",
         )
-        print(f"[controller] workflow CANCELED — cancelled steps: {cancelled}", flush=True)
+        print(f"[controller] workflow CANCELED — canceled steps: {canceled}", flush=True)
         flush_status(workflow_id, dag, phases, timings)
         return 0
 

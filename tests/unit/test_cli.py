@@ -397,7 +397,7 @@ class TestListWorkflows:
         assert result[0]["duration"] == "5:30"
 
     @patch("seekr_chain.backends.k8s.list_workflows.kube")
-    def test_cancelled_run_reports_canceled_not_failed(self, mock_kube):
+    def test_canceled_run_reports_canceled_not_failed(self, mock_kube):
         """A Completed terminalState with a CANCELED phase in the ConfigMap reports Canceled."""
 
         jobset = {
@@ -719,7 +719,7 @@ class TestCancel:
         assert result.exit_code == 0, result.output
         mock_cls.assert_called_once_with(id="my-job")
         mock_workflow.cancel.assert_called_once()
-        assert "Cancelled: my-job" in result.output
+        assert "Canceled: my-job" in result.output
 
     def test_cancel_multiple(self):
         """chain cancel job-1 job-2 → .cancel() called for each, confirmation printed for each."""
@@ -734,5 +734,5 @@ class TestCancel:
         mock_cls.assert_any_call(id="job-1")
         mock_cls.assert_any_call(id="job-2")
         assert mock_workflow.cancel.call_count == 2
-        assert "Cancelled: job-1" in result.output
-        assert "Cancelled: job-2" in result.output
+        assert "Canceled: job-1" in result.output
+        assert "Canceled: job-2" in result.output

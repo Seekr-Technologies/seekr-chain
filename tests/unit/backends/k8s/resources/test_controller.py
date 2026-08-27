@@ -479,7 +479,7 @@ class TestMainDiamondDag:
 
 
 class TestMainCancellation:
-    def test_single_step_cancelled_exits(self, cluster):
+    def test_single_step_canceled_exits(self, cluster):
         """A JobSet suspended (chain cancel) with no terminalState must not hang."""
         dag = [{"name": "a", "depends_on": []}]
         cluster.script_step("a", cancel=True)
@@ -490,14 +490,14 @@ class TestMainCancellation:
             ("phases", {"a": "RUNNING"}),
             ("status", "RUNNING"),
             ("cancel", "a"),
-            ("event", "StepCancelled", "Step 'a' was cancelled"),
+            ("event", "StepCanceled", "Step 'a' was canceled"),
             ("phases", {"a": "CANCELED"}),
             ("status", "CANCELED"),
-            ("event", "WorkflowCancelled", "Workflow cancelled — cancelled steps: ['a']"),
+            ("event", "WorkflowCanceled", "Workflow canceled — canceled steps: ['a']"),
         ]
 
     def test_cascade_cancels_unsubmitted_dependent(self, cluster):
-        """a is cancelled before b's dependency is satisfied — b must never be
+        """a is canceled before b's dependency is satisfied — b must never be
         submitted and must cascade-skip instead of hanging."""
         dag = [
             {"name": "a", "depends_on": []},
@@ -511,15 +511,15 @@ class TestMainCancellation:
             ("phases", {"a": "RUNNING", "b": "PENDING"}),
             ("status", "RUNNING"),
             ("cancel", "a"),
-            ("event", "StepCancelled", "Step 'a' was cancelled"),
+            ("event", "StepCanceled", "Step 'a' was canceled"),
             ("phases", {"a": "CANCELED", "b": "SKIPPED"}),
             ("status", "CANCELED"),
-            ("event", "WorkflowCancelled", "Workflow cancelled — cancelled steps: ['a']"),
+            ("event", "WorkflowCanceled", "Workflow canceled — canceled steps: ['a']"),
         ]
         assert ("submit", "b") not in cluster.trace
 
     def test_diamond_partial_cancel_cascades_join_step(self, cluster):
-        """a → b, a → c, b+c → d. b is cancelled, c succeeds — d must
+        """a → b, a → c, b+c → d. b is canceled, c succeeds — d must
         cascade-skip rather than waiting forever for a JobSet that is never
         submitted.
 
@@ -552,13 +552,13 @@ class TestMainCancellation:
             ("phases", {"a": "SUCCEEDED", "b": "RUNNING", "c": "RUNNING", "d": "PENDING"}),
             ("status", "RUNNING"),
             ("cancel", "b"),
-            ("event", "StepCancelled", "Step 'b' was cancelled"),
+            ("event", "StepCanceled", "Step 'b' was canceled"),
             ("phases", {"a": "SUCCEEDED", "b": "CANCELED", "c": "RUNNING", "d": "SKIPPED"}),
             ("status", "CANCELED"),
             ("exit", "c", 0),
             ("event", "StepSucceeded", "Step 'c' completed successfully"),
             ("phases", {"a": "SUCCEEDED", "b": "CANCELED", "c": "SUCCEEDED", "d": "SKIPPED"}),
-            ("event", "WorkflowCancelled", "Workflow cancelled — cancelled steps: ['b']"),
+            ("event", "WorkflowCanceled", "Workflow canceled — canceled steps: ['b']"),
         ]
 
 
@@ -928,7 +928,7 @@ class TestMainStatusJson:
         assert ["s5cmd", "cp", cluster.status_path, "s3://bucket/wf-abc/status.json"] in cluster.ship_calls
 
     def test_cancellation(self, cluster):
-        """A single cancelled step ends the workflow CANCELED with the
+        """A single canceled step ends the workflow CANCELED with the
         step's phase CANCELED, and still ships the terminal status."""
         dag = [{"name": "a", "depends_on": []}]
         cluster.script_step("a", cancel=True)
