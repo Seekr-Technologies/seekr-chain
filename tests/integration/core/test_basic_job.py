@@ -361,10 +361,15 @@ class TestBasic:
         if minio_service is None:
             pytest.skip("hermetic-only: needs the MinIO datastore")
 
+        import importlib
+
         import kubernetes
 
-        import seekr_chain.backends.k8s.jobset as jobset_mod
-        import seekr_chain.backends.k8s.launch_k8s_workflow as lkw
+        # The k8s package __init__ re-exports launch_k8s_workflow as a function name,
+        # so `import ... as` binds the function, not the module. Resolve the real
+        # module objects to patch their _user_config singletons.
+        jobset_mod = importlib.import_module("seekr_chain.backends.k8s.jobset")
+        lkw = importlib.import_module("seekr_chain.backends.k8s.launch_k8s_workflow")
 
         secret = kubernetes.client.V1Secret(
             metadata=kubernetes.client.V1ObjectMeta(name="test-datastore-creds"),
