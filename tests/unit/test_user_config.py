@@ -2,7 +2,9 @@
 
 from unittest.mock import patch
 
-from seekr_chain.user_config import _load_config
+import pytest
+
+from seekr_chain.user_config import _ENV_VAR_MAP, _load_config
 from tests.unit.conftest import no_dotenv, no_toml_files
 
 
@@ -93,173 +95,24 @@ class TestLoadConfig:
         assert cfg.datastore_root is None
 
 
-class TestInitImageConfig:
-    def test_env_var(self, monkeypatch):
-        monkeypatch.setenv("SEEKRCHAIN_INIT_IMAGE", "registry.example.com/org/my-init:2.0.0")
+class TestAllConfigFields:
+    """Every SEEKRCHAIN_* env var maps to its dataclass field, defaulting to None.
+
+    Loading layers (dotenv/toml) and precedence are covered once in
+    TestLoadConfig; this suite only checks the env-var-to-field wiring and the
+    unset default for every field, so a new config field needs no new test.
+    """
+
+    @pytest.mark.parametrize("env_var,field", list(_ENV_VAR_MAP.items()))
+    def test_env_var_sets_its_field(self, monkeypatch, env_var, field):
+        monkeypatch.setenv(env_var, "test-value")
         with no_dotenv(), no_toml_files():
             cfg = _load_config()
-        assert cfg.init_image == "registry.example.com/org/my-init:2.0.0"
+        assert getattr(cfg, field) == "test-value"
 
-    def test_dotenv_file(self, monkeypatch, tmp_path):
-        monkeypatch.delenv("SEEKRCHAIN_INIT_IMAGE", raising=False)
-        dotenv_file = tmp_path / ".env"
-        dotenv_file.write_text("SEEKRCHAIN_INIT_IMAGE=registry.example.com/org/my-init:2.0.0\n")
-        with patch("seekr_chain.user_config.dotenv.find_dotenv", return_value=str(dotenv_file)), no_toml_files():
-            cfg = _load_config()
-        assert cfg.init_image == "registry.example.com/org/my-init:2.0.0"
-
-    def test_local_seekrchain_toml(self, monkeypatch, tmp_path):
-        monkeypatch.delenv("SEEKRCHAIN_INIT_IMAGE", raising=False)
-        toml_file = tmp_path / ".seekrchain.toml"
-        toml_file.write_text('init_image = "registry.example.com/org/my-init:2.0.0"\n')
-        with no_dotenv(), patch("seekr_chain.user_config._find_file_walking_up", return_value=toml_file):
-            cfg = _load_config()
-        assert cfg.init_image == "registry.example.com/org/my-init:2.0.0"
-
-    def test_returns_none_when_nothing_set(self, monkeypatch):
-        monkeypatch.delenv("SEEKRCHAIN_INIT_IMAGE", raising=False)
+    @pytest.mark.parametrize("env_var,field", list(_ENV_VAR_MAP.items()))
+    def test_field_defaults_to_none_when_unset(self, monkeypatch, env_var, field):
+        monkeypatch.delenv(env_var, raising=False)
         with no_dotenv(), no_toml_files():
             cfg = _load_config()
-        assert cfg.init_image is None
-
-
-class TestControllerImageConfig:
-    def test_env_var(self, monkeypatch):
-        monkeypatch.setenv("SEEKRCHAIN_CONTROLLER_IMAGE", "registry.example.com/org/my-controller:2.0.0")
-        with no_dotenv(), no_toml_files():
-            cfg = _load_config()
-        assert cfg.controller_image == "registry.example.com/org/my-controller:2.0.0"
-
-    def test_dotenv_file(self, monkeypatch, tmp_path):
-        monkeypatch.delenv("SEEKRCHAIN_CONTROLLER_IMAGE", raising=False)
-        dotenv_file = tmp_path / ".env"
-        dotenv_file.write_text("SEEKRCHAIN_CONTROLLER_IMAGE=registry.example.com/org/my-controller:2.0.0\n")
-        with patch("seekr_chain.user_config.dotenv.find_dotenv", return_value=str(dotenv_file)), no_toml_files():
-            cfg = _load_config()
-        assert cfg.controller_image == "registry.example.com/org/my-controller:2.0.0"
-
-    def test_local_seekrchain_toml(self, monkeypatch, tmp_path):
-        monkeypatch.delenv("SEEKRCHAIN_CONTROLLER_IMAGE", raising=False)
-        toml_file = tmp_path / ".seekrchain.toml"
-        toml_file.write_text('controller_image = "registry.example.com/org/my-controller:2.0.0"\n')
-        with no_dotenv(), patch("seekr_chain.user_config._find_file_walking_up", return_value=toml_file):
-            cfg = _load_config()
-        assert cfg.controller_image == "registry.example.com/org/my-controller:2.0.0"
-
-    def test_returns_none_when_nothing_set(self, monkeypatch):
-        monkeypatch.delenv("SEEKRCHAIN_CONTROLLER_IMAGE", raising=False)
-        with no_dotenv(), no_toml_files():
-            cfg = _load_config()
-        assert cfg.controller_image is None
-
-
-class TestStepServiceAccountConfig:
-    def test_env_var(self, monkeypatch):
-        monkeypatch.setenv("SEEKRCHAIN_STEP_SERVICE_ACCOUNT", "workflow-runner")
-        with no_dotenv(), no_toml_files():
-            cfg = _load_config()
-        assert cfg.step_service_account == "workflow-runner"
-
-    def test_local_seekrchain_toml(self, monkeypatch, tmp_path):
-        monkeypatch.delenv("SEEKRCHAIN_STEP_SERVICE_ACCOUNT", raising=False)
-        toml_file = tmp_path / ".seekrchain.toml"
-        toml_file.write_text('step_service_account = "workflow-runner"\n')
-        with no_dotenv(), patch("seekr_chain.user_config._find_file_walking_up", return_value=toml_file):
-            cfg = _load_config()
-        assert cfg.step_service_account == "workflow-runner"
-
-    def test_returns_none_when_nothing_set(self, monkeypatch):
-        monkeypatch.delenv("SEEKRCHAIN_STEP_SERVICE_ACCOUNT", raising=False)
-        with no_dotenv(), no_toml_files():
-            cfg = _load_config()
-        assert cfg.step_service_account is None
-
-
-class TestDatastoreKubernetesSecretConfig:
-    def test_env_var(self, monkeypatch):
-        monkeypatch.setenv("SEEKRCHAIN_DATASTORE_KUBERNETES_SECRET", "oci-storage-creds")
-        with no_dotenv(), no_toml_files():
-            cfg = _load_config()
-        assert cfg.datastore_kubernetes_secret == "oci-storage-creds"
-
-    def test_dotenv_file(self, monkeypatch, tmp_path):
-        monkeypatch.delenv("SEEKRCHAIN_DATASTORE_KUBERNETES_SECRET", raising=False)
-        dotenv_file = tmp_path / ".env"
-        dotenv_file.write_text("SEEKRCHAIN_DATASTORE_KUBERNETES_SECRET=oci-storage-creds\n")
-        with patch("seekr_chain.user_config.dotenv.find_dotenv", return_value=str(dotenv_file)), no_toml_files():
-            cfg = _load_config()
-        assert cfg.datastore_kubernetes_secret == "oci-storage-creds"
-
-    def test_local_seekrchain_toml(self, monkeypatch, tmp_path):
-        monkeypatch.delenv("SEEKRCHAIN_DATASTORE_KUBERNETES_SECRET", raising=False)
-        toml_file = tmp_path / ".seekrchain.toml"
-        toml_file.write_text('datastore_kubernetes_secret = "oci-storage-creds"\n')
-        with no_dotenv(), patch("seekr_chain.user_config._find_file_walking_up", return_value=toml_file):
-            cfg = _load_config()
-        assert cfg.datastore_kubernetes_secret == "oci-storage-creds"
-
-    def test_returns_none_when_nothing_set(self, monkeypatch):
-        monkeypatch.delenv("SEEKRCHAIN_DATASTORE_KUBERNETES_SECRET", raising=False)
-        with no_dotenv(), no_toml_files():
-            cfg = _load_config()
-        assert cfg.datastore_kubernetes_secret is None
-
-
-class TestDatastoreEndpointUrlConfig:
-    def test_env_var(self, monkeypatch):
-        monkeypatch.setenv("SEEKRCHAIN_DATASTORE_ENDPOINT_URL", "https://s3.example.com")
-        with no_dotenv(), no_toml_files():
-            cfg = _load_config()
-        assert cfg.datastore_endpoint_url == "https://s3.example.com"
-
-    def test_dotenv_file(self, monkeypatch, tmp_path):
-        monkeypatch.delenv("SEEKRCHAIN_DATASTORE_ENDPOINT_URL", raising=False)
-        dotenv_file = tmp_path / ".env"
-        dotenv_file.write_text("SEEKRCHAIN_DATASTORE_ENDPOINT_URL=https://s3.example.com\n")
-        with patch("seekr_chain.user_config.dotenv.find_dotenv", return_value=str(dotenv_file)), no_toml_files():
-            cfg = _load_config()
-        assert cfg.datastore_endpoint_url == "https://s3.example.com"
-
-    def test_local_seekrchain_toml(self, monkeypatch, tmp_path):
-        monkeypatch.delenv("SEEKRCHAIN_DATASTORE_ENDPOINT_URL", raising=False)
-        toml_file = tmp_path / ".seekrchain.toml"
-        toml_file.write_text('datastore_endpoint_url = "https://s3.example.com"\n')
-        with no_dotenv(), patch("seekr_chain.user_config._find_file_walking_up", return_value=toml_file):
-            cfg = _load_config()
-        assert cfg.datastore_endpoint_url == "https://s3.example.com"
-
-    def test_returns_none_when_nothing_set(self, monkeypatch):
-        monkeypatch.delenv("SEEKRCHAIN_DATASTORE_ENDPOINT_URL", raising=False)
-        with no_dotenv(), no_toml_files():
-            cfg = _load_config()
-        assert cfg.datastore_endpoint_url is None
-
-
-class TestDatastoreRegionConfig:
-    def test_env_var(self, monkeypatch):
-        monkeypatch.setenv("SEEKRCHAIN_DATASTORE_REGION", "us-chicago-1")
-        with no_dotenv(), no_toml_files():
-            cfg = _load_config()
-        assert cfg.datastore_region == "us-chicago-1"
-
-    def test_dotenv_file(self, monkeypatch, tmp_path):
-        monkeypatch.delenv("SEEKRCHAIN_DATASTORE_REGION", raising=False)
-        dotenv_file = tmp_path / ".env"
-        dotenv_file.write_text("SEEKRCHAIN_DATASTORE_REGION=us-chicago-1\n")
-        with patch("seekr_chain.user_config.dotenv.find_dotenv", return_value=str(dotenv_file)), no_toml_files():
-            cfg = _load_config()
-        assert cfg.datastore_region == "us-chicago-1"
-
-    def test_local_seekrchain_toml(self, monkeypatch, tmp_path):
-        monkeypatch.delenv("SEEKRCHAIN_DATASTORE_REGION", raising=False)
-        toml_file = tmp_path / ".seekrchain.toml"
-        toml_file.write_text('datastore_region = "us-chicago-1"\n')
-        with no_dotenv(), patch("seekr_chain.user_config._find_file_walking_up", return_value=toml_file):
-            cfg = _load_config()
-        assert cfg.datastore_region == "us-chicago-1"
-
-    def test_returns_none_when_nothing_set(self, monkeypatch):
-        monkeypatch.delenv("SEEKRCHAIN_DATASTORE_REGION", raising=False)
-        with no_dotenv(), no_toml_files():
-            cfg = _load_config()
-        assert cfg.datastore_region is None
+        assert getattr(cfg, field) is None
