@@ -2,6 +2,7 @@
 
 import json
 import re
+from dataclasses import replace
 
 import pytest
 
@@ -332,6 +333,107 @@ class TestBasic:
                             "INLINE_SECRET=inline-value",
                             "ENV_SECRET=from-env",
                             "CLUSTER_SECRET=from-cluster",
+                            "",
+                        ]
+                    },
+                }
+            }
+        }
+
+        assert_nested_match(logs, expected)
+
+    def test_external_creds_secret_with_endpoint_config_reaches_minio(self, v1_api, minio_service, monkeypatch):
+        """A named external creds Secret + plain endpoint config together let every pod
+        container reach the datastore.
+
+        Covers two features that are load-bearing in tandem:
+          1. datastore_kubernetes_secret: init container, log sidecar, controller, and
+             nix-init source S3 creds (and the optional endpoint keys) from a pre-existing
+             cluster Secret instead of a per-workflow Secret.
+          2. datastore_endpoint_url / datastore_region: pods get S3_ENDPOINT_URL / AWS_REGION
+             (+ FB_S3_ENDPOINT on the log sidecar) as plain env values.
+
+        The external Secret holds ONLY creds — no endpoint key — so the init container /
+        log sidecar / controller can only learn MinIO's address from feature 2's plain
+        injection. A regression in either feature leaves the init container's s5cmd unable
+        to reach MinIO, the job fails, and this test fails.
+        """
+        if minio_service is None:
+            pytest.skip("hermetic-only: needs the MinIO datastore")
+
+        import importlib
+
+        import kubernetes
+
+        # The k8s package __init__ re-exports launch_k8s_workflow as a function name,
+        # so `import ... as` binds the function, not the module. Resolve the real
+        # module objects to patch their _user_config singletons.
+        jobset_mod = importlib.import_module("seekr_chain.backends.k8s.jobset")
+        lkw = importlib.import_module("seekr_chain.backends.k8s.launch_k8s_workflow")
+
+        secret = kubernetes.client.V1Secret(
+            metadata=kubernetes.client.V1ObjectMeta(name="test-datastore-creds"),
+            type="Opaque",
+            string_data={
+                "AWS_ACCESS_KEY_ID": minio_service.access_key,
+                "AWS_SECRET_ACCESS_KEY": minio_service.secret_key,
+            },
+        )
+        v1_api.create_namespaced_secret(namespace="argo-workflows", body=secret)
+
+        try:
+            # The features read the config singleton bound at import time, so patch the
+            # already-imported objects rather than the environment.
+            monkeypatch.setattr(
+                lkw,
+                "_user_config",
+                replace(
+                    lkw._user_config,
+                    datastore_kubernetes_secret="test-datastore-creds",
+                    datastore_endpoint_url=minio_service.endpoint_url_pod,
+                    datastore_region="us-east-1",
+                ),
+            )
+            monkeypatch.setattr(
+                jobset_mod,
+                "_user_config",
+                replace(
+                    jobset_mod._user_config,
+                    datastore_endpoint_url=minio_service.endpoint_url_pod,
+                    datastore_region="us-east-1",
+                ),
+            )
+
+            config = seekr_chain.WorkflowConfig.model_validate(
+                {
+                    "name": "test-external-creds",
+                    "namespace": "argo-workflows",
+                    "ttl": "1:00:00",
+                    "steps": [
+                        {
+                            "name": "step",
+                            "image": "python:3.12-alpine",
+                            "script": "echo external-secret-ok",
+                        }
+                    ],
+                }
+            )
+
+            job = seekr_chain.launch_k8s_workflow(config)
+            job.follow()
+            seekr_chain.wait(job, poll_interval=1)
+
+            logs = job.get_logs().to_dict()
+
+        finally:
+            v1_api.delete_namespaced_secret(name="test-datastore-creds", namespace="argo-workflows")
+
+        expected = {
+            "step=step": {
+                "role=main": {
+                    "index=0": {
+                        "attempt=0": [
+                            "external-secret-ok",
                             "",
                         ]
                     },

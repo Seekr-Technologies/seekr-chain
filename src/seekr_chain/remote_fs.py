@@ -21,6 +21,7 @@ from boto3.s3.transfer import S3Transfer, TransferConfig
 from botocore.exceptions import ClientError
 
 from seekr_chain import utils
+from seekr_chain.user_config import config
 
 _s3_client = None
 _oci_client = None
@@ -150,7 +151,11 @@ def _get_s3_client():
     if _s3_client is None:
         import boto3
 
-        _s3_client = boto3.client("s3")
+        _s3_client = boto3.client(
+            "s3",
+            endpoint_url=config.datastore_endpoint_url,
+            region_name=config.datastore_region,
+        )
     return _s3_client
 
 

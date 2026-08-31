@@ -31,6 +31,10 @@ logger = logging.getLogger(__name__)
 _DEFAULT_CONTROLLER_IMAGE = "ghcr.io/seekr-technologies/seekr-chain-controller:1.1.0@sha256:de8163cc3652deea9a194fd09bf0d2c167ff1cbe4b51bb424c419adda7b8e97b"
 _CONTROLLER_IMAGE = _user_config.controller_image or _DEFAULT_CONTROLLER_IMAGE
 
+# S3 credential env keys always injected into main + controller containers,
+# whether creds are uploaded per-workflow or referenced from an external Secret.
+_S3_CRED_ENV_KEYS = ("AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY")
+
 
 def _resolve_env_secrets(config: WorkflowConfig) -> dict[str, str]:
     """Resolve EnvSource secret values against the local environment and any .env file."""
@@ -123,7 +127,7 @@ def _create_secrets(workflow_name: str, s3_creds: dict, config: WorkflowConfig):
                 logger.debug(f"Failed to delete {sec.metadata.name}: {e}")
 
 
-def _create_workflow_secrets(config: WorkflowConfig, workflow_name: str, s3_creds: dict) -> list[dict]:
+def _create_workflow_secrets(config: WorkflowConfig, workflow_name: str, s3_secret_name: str) -> list[dict]:
     """Build the list of secretKeyRef env-var stanzas for pods."""
     out = []
 
@@ -136,18 +140,18 @@ def _create_workflow_secrets(config: WorkflowConfig, workflow_name: str, s3_cred
             # Inline strings and EnvSource values are stored in the per-workflow K8s Secret.
             out.append({"name": key, "valueFrom": {"secretKeyRef": {"name": workflow_name, "key": key}}})
 
-    # S3 credentials are stored in the per-workflow K8s Secret.
+    # S3 credentials reference s3_secret_name — either the per-workflow Secret
+    # (default) or a pre-existing external Secret (datastore_kubernetes_secret).
     # Skip any key the user has already defined — explicit config always wins.
     existing_keys = {entry["name"] for entry in out}
-    for cred_key in (s3_creds or {}).keys():
-        env_key = cred_key.upper()
+    for env_key in _S3_CRED_ENV_KEYS:
         if env_key in existing_keys:
             logger.warning(
                 "Skipping automatic injection of an S3 credential: "
                 "a secret with that name is already defined in your workflow config."
             )
             continue
-        out.append({"name": env_key, "valueFrom": {"secretKeyRef": {"name": workflow_name, "key": env_key}}})
+        out.append({"name": env_key, "valueFrom": {"secretKeyRef": {"name": s3_secret_name, "key": env_key}}})
 
     return out
 
@@ -172,6 +176,41 @@ def _get_s3_creds() -> dict:
     return creds_dict
 
 
+def _validate_external_s3_secret(secret_name: str, namespace: str) -> None:
+    """Pre-flight check for a user-provided external S3-credentials Secret.
+
+    A missing Secret (404) or one lacking the required keys is a hard error —
+    the job would fail to start. A permission error (the launching account
+    can't read Secrets) is downgraded to a warning: validation is best-effort,
+    not a gate that blocks users who simply lack secret-read RBAC.
+    """
+    try:
+        secret = kube.core_v1.read_namespaced_secret(name=secret_name, namespace=namespace)
+    except kubernetes.client.exceptions.ApiException as e:
+        if e.status == 404:
+            raise RuntimeError(
+                f"datastore_kubernetes_secret={secret_name!r} is set, but no Secret named "
+                f"{secret_name!r} exists in namespace {namespace!r}. Create it with keys "
+                f"{', '.join(_S3_CRED_ENV_KEYS)}, or unset the option to upload local AWS "
+                "credentials per workflow."
+            ) from e
+        logger.warning(
+            "Skipping validation of the configured datastore_kubernetes_secret: unable to read "
+            "secrets in namespace %r (typically an RBAC permission issue). status=%s reason=%s",
+            namespace,
+            e.status,
+            e.reason,
+        )
+        return
+    present = set(secret.data or {})
+    missing = [k for k in _S3_CRED_ENV_KEYS if k not in present]
+    if missing:
+        raise RuntimeError(
+            f"Secret {secret_name!r} in namespace {namespace!r} is missing required key(s): "
+            f"{', '.join(missing)}. It must contain {', '.join(_S3_CRED_ENV_KEYS)}."
+        )
+
+
 def _package_assets(
     config: WorkflowConfig,
     args: dict | None,
@@ -181,6 +220,7 @@ def _package_assets(
     workflow_secrets: list[dict],
     interactive: bool,
     step_service_account: str | None = None,
+    s3_secret_name: str | None = None,
 ):
     """Package up assets (code, scripts, jobset manifests, DAG definition) and upload to S3.
 
@@ -216,6 +256,7 @@ def _package_assets(
             interactive=interactive,
             assets_path=assets_path,
             step_service_account=step_service_account,
+            s3_secret_name=s3_secret_name,
         )
 
         # Write jobset manifest alongside the step's other assets
@@ -274,6 +315,7 @@ def _build_controller_jobset(
     datastore_root: str,
     interactive: bool,
     service_account: str,
+    s3_secret_name: str,
 ) -> dict:
     """Build the jobset.x-k8s.io/v1alpha2 JobSet manifest for the controller pod.
 
@@ -287,23 +329,32 @@ def _build_controller_jobset(
     controller_image = config.controller_image or _CONTROLLER_IMAGE
     controller_command = ["python", "-m", "controller"]
 
-    # Env vars for the controller's init container (S3 download via s5cmd)
+    # Env vars for the controller's init container (S3 download via s5cmd).
+    # Endpoint/region come from user config as plain values when set (so the
+    # controller's s5cmd reaches S3-compatible datastores), else fall back to
+    # the optional secretKeyRef; config wins over the Secret's key.
+    endpoint_url = _user_config.datastore_endpoint_url
+    region = _user_config.datastore_region
     init_env = [
         {
             "name": "AWS_ACCESS_KEY_ID",
-            "valueFrom": {"secretKeyRef": {"name": workflow_id, "key": "AWS_ACCESS_KEY_ID"}},
+            "valueFrom": {"secretKeyRef": {"name": s3_secret_name, "key": "AWS_ACCESS_KEY_ID"}},
         },
         {
             "name": "AWS_SECRET_ACCESS_KEY",
-            "valueFrom": {"secretKeyRef": {"name": workflow_id, "key": "AWS_SECRET_ACCESS_KEY"}},
+            "valueFrom": {"secretKeyRef": {"name": s3_secret_name, "key": "AWS_SECRET_ACCESS_KEY"}},
         },
-        {
+        {"name": "S3_ENDPOINT_URL", "value": endpoint_url}
+        if endpoint_url
+        else {
             "name": "S3_ENDPOINT_URL",
-            "valueFrom": {"secretKeyRef": {"name": workflow_id, "key": "S3_ENDPOINT_URL", "optional": True}},
+            "valueFrom": {"secretKeyRef": {"name": s3_secret_name, "key": "S3_ENDPOINT_URL", "optional": True}},
         },
-        {
+        {"name": "AWS_REGION", "value": region}
+        if region
+        else {
             "name": "AWS_REGION",
-            "valueFrom": {"secretKeyRef": {"name": workflow_id, "key": "AWS_REGION", "optional": True}},
+            "valueFrom": {"secretKeyRef": {"name": s3_secret_name, "key": "AWS_REGION", "optional": True}},
         },
     ]
 
@@ -440,6 +491,15 @@ def launch_k8s_workflow(
     sweep_pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
     sweep_future = sweep_pool.submit(ttl.sweep_expired, datastore_root)
 
+    # Validate a user-provided external S3-creds Secret up front too, in the
+    # background, so it also overlaps with staging/nix/packaging below.
+    external_secret = _user_config.datastore_kubernetes_secret
+    secret_check_pool = None
+    secret_check_future = None
+    if external_secret:
+        secret_check_pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+        secret_check_future = secret_check_pool.submit(_validate_external_s3_secret, external_secret, config.namespace)
+
     with tempfile.TemporaryDirectory() as staging_dir:
         staging_dir = Path(staging_dir)
 
@@ -458,13 +518,14 @@ def launch_k8s_workflow(
 
         config = process_nix(config, staged_code_dir=local_code_dest, staging_dir=staging_dir)
 
-        s3_creds = _get_s3_creds()
+        s3_creds = {} if external_secret else _get_s3_creds()
 
         job_info = _generate_job_info(datastore_root=datastore_root)
         workflow_id = job_info["id"]
+        s3_secret_name = external_secret or workflow_id
         ttl.write_ttl_marker(datastore_root, workflow_id, config.artifact_ttl)
 
-        workflow_secrets = _create_workflow_secrets(config, workflow_id, s3_creds)
+        workflow_secrets = _create_workflow_secrets(config, workflow_id, s3_secret_name)
 
         service_account = _user_config.service_account or detect_service_account(config.namespace)
 
@@ -480,7 +541,14 @@ def launch_k8s_workflow(
             workflow_secrets=workflow_secrets,
             interactive=interactive,
             step_service_account=_user_config.step_service_account,
+            s3_secret_name=s3_secret_name,
         )
+
+    if secret_check_future is not None:
+        try:
+            secret_check_future.result()
+        finally:
+            secret_check_pool.shutdown(wait=False)
 
     _create_secrets(workflow_id, s3_creds, config)
 
@@ -492,6 +560,7 @@ def launch_k8s_workflow(
         datastore_root=datastore_root,
         interactive=interactive,
         service_account=service_account,
+        s3_secret_name=s3_secret_name,
     )
 
     k8s_custom = kube.custom_objects

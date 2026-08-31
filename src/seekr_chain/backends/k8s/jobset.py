@@ -923,12 +923,14 @@ def build_jobset_context(
     interactive: bool,
     assets_path: Path,
     step_service_account: str | None = None,
+    s3_secret_name: str | None = None,
 ) -> tuple[str, dict]:
     """Build the Jinja2 template context for a JobSet manifest.
 
     Returns (js_name, context_dict). The context dict is passed directly to
     the jobset.yaml.j2 template.
     """
+    s3_secret_name = s3_secret_name or workflow_name
     step_config = workflow_config.steps[step_index]
     step_name = step_config.name
     js_name = f"{workflow_name}-{step_name}-js"
@@ -958,6 +960,9 @@ def build_jobset_context(
         "job_id": job_info["id"],
         "step_name": step_name,
         "workflow_name": workflow_name,
+        "s3_secret_name": s3_secret_name,
+        "datastore_endpoint_url": _user_config.datastore_endpoint_url,
+        "datastore_region": _user_config.datastore_region,
         "remote_assets_path": job_info["remote_assets_path"],
         "step_service_account": step_service_account,
         "success_policy": _build_success_policy(step_config),
@@ -995,6 +1000,7 @@ def create_jobset_manifest(
     interactive: bool,
     assets_path: Path,
     step_service_account: str | None = None,
+    s3_secret_name: str | None = None,
 ) -> tuple[str, str]:
     """Build and render the JobSet manifest.
 
@@ -1011,6 +1017,7 @@ def create_jobset_manifest(
         interactive=interactive,
         assets_path=assets_path,
         step_service_account=step_service_account,
+        s3_secret_name=s3_secret_name,
     )
 
     rendered = render.render("jobset.yaml.j2", context)
