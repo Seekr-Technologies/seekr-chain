@@ -106,7 +106,7 @@ class TestK8sWorkflowCancel:
         """cancel() must never suspend the controller's own JobSet — the label
         selector matches worker JobSets only, since suspending the controller
         pod would kill it before it can cascade-cancel dependents or self-patch
-        the CANCELLED annotation."""
+        the CANCELED annotation."""
         monkeypatch.setenv("SEEKRCHAIN_DATASTORE_ROOT", "s3://bucket/")
         mock_custom = MagicMock()
         mock_custom.list_namespaced_custom_object.return_value = {

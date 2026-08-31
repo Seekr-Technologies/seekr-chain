@@ -31,7 +31,7 @@ from seekr_chain.backends.k8s.workflow_state import (
 from seekr_chain.constants import LOCAL_LOG_PATH
 from seekr_chain.k8s_api import kube
 from seekr_chain.live import maybe_live
-from seekr_chain.status import WorkflowStatus
+from seekr_chain.status_model import Status
 from seekr_chain.workflow import Workflow
 
 logger = logging.getLogger(__name__)
@@ -144,12 +144,12 @@ class K8sWorkflow(Workflow):
         logger.debug("Expanding logs")
         return parse_logs(local_log_path, timestamps)
 
-    def get_status(self) -> WorkflowStatus:
+    def get_status(self) -> Status:
         status, _ = get_workflow_job_status(self._k8s_custom, self._k8s_v1, self._namespace, self._id)
         return status
 
     def watch_controller_status(self):
-        """Yield WorkflowStatus on each change by watching only the controller JobSet.
+        """Yield Status on each change by watching only the controller JobSet.
 
         Deliberately separate from workflow_state_watcher() (see watched_state.py),
         which watches the controller JobSet *and* worker JobSets *and* Pods to
@@ -267,7 +267,7 @@ class K8sWorkflow(Workflow):
                 while True:
                     live.update(render(workflow_state, watcher.connection_status()))
 
-                    if workflow_state.status.is_finished() or workflow_state.status == WorkflowStatus.UNKNOWN:
+                    if workflow_state.status.is_finished() or workflow_state.status == Status.UNKNOWN:
                         break
 
                     for step_state in workflow_state.steps:

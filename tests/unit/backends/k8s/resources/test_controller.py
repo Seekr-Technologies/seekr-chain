@@ -176,12 +176,12 @@ class TestDeriveStatus:
     @pytest.mark.parametrize(
         "phases, expected",
         [
-            ({"a": "CANCELLED", "b": "FAILED"}, "TERMINATED"),
-            ({"a": "CANCELLED", "b": "SUCCEEDED"}, "TERMINATED"),
+            ({"a": "CANCELED", "b": "FAILED"}, "CANCELED"),
+            ({"a": "CANCELED", "b": "SUCCEEDED"}, "CANCELED"),
             ({"a": "FAILED", "b": "SUCCEEDED"}, "FAILED"),
             ({"a": "SUCCEEDED", "b": "SKIPPED"}, "SUCCEEDED"),
             ({"a": "SUCCEEDED", "b": "RUNNING"}, "RUNNING"),
-            ({"a": "PENDING", "b": "PENDING"}, "RUNNING"),
+            ({"a": "PENDING", "b": "PENDING"}, "PENDING"),
         ],
     )
     def test_precedence(self, phases, expected):
@@ -268,9 +268,10 @@ class TestMainLinearDag:
         cluster.script_step("a", exit_code=0)
         assert run_controller_main(cluster, dag) == 0
         assert cluster.trace == [
-            ("status", "RUNNING"),
+            ("status", "PENDING"),
             ("submit", "a"),
             ("phases", {"a": "RUNNING"}),
+            ("status", "RUNNING"),
             ("exit", "a", 0),
             ("event", "StepSucceeded", "Step 'a' completed successfully"),
             ("phases", {"a": "SUCCEEDED"}),
@@ -283,9 +284,10 @@ class TestMainLinearDag:
         cluster.script_step("a", exit_code=1)
         assert run_controller_main(cluster, dag) == 0
         assert cluster.trace == [
-            ("status", "RUNNING"),
+            ("status", "PENDING"),
             ("submit", "a"),
             ("phases", {"a": "RUNNING"}),
+            ("status", "RUNNING"),
             ("exit", "a", 1),
             ("event", "StepFailed", "Step 'a' failed"),
             ("phases", {"a": "FAILED"}),
@@ -303,14 +305,17 @@ class TestMainLinearDag:
         assert run_controller_main(cluster, dag) == 0
         # b is only submitted once a has succeeded.
         assert cluster.trace == [
-            ("status", "RUNNING"),
+            ("status", "PENDING"),
             ("submit", "a"),
             ("phases", {"a": "RUNNING", "b": "PENDING"}),
+            ("status", "RUNNING"),
             ("exit", "a", 0),
             ("event", "StepSucceeded", "Step 'a' completed successfully"),
             ("phases", {"a": "SUCCEEDED", "b": "PENDING"}),
+            ("status", "PENDING"),
             ("submit", "b"),
             ("phases", {"a": "SUCCEEDED", "b": "RUNNING"}),
+            ("status", "RUNNING"),
             ("exit", "b", 0),
             ("event", "StepSucceeded", "Step 'b' completed successfully"),
             ("phases", {"a": "SUCCEEDED", "b": "SUCCEEDED"}),
@@ -327,14 +332,17 @@ class TestMainLinearDag:
         cluster.script_step("b", exit_code=1)
         assert run_controller_main(cluster, dag) == 0
         assert cluster.trace == [
-            ("status", "RUNNING"),
+            ("status", "PENDING"),
             ("submit", "a"),
             ("phases", {"a": "RUNNING", "b": "PENDING"}),
+            ("status", "RUNNING"),
             ("exit", "a", 0),
             ("event", "StepSucceeded", "Step 'a' completed successfully"),
             ("phases", {"a": "SUCCEEDED", "b": "PENDING"}),
+            ("status", "PENDING"),
             ("submit", "b"),
             ("phases", {"a": "SUCCEEDED", "b": "RUNNING"}),
+            ("status", "RUNNING"),
             ("exit", "b", 1),
             ("event", "StepFailed", "Step 'b' failed"),
             ("phases", {"a": "SUCCEEDED", "b": "FAILED"}),
@@ -352,9 +360,10 @@ class TestMainLinearDag:
         assert run_controller_main(cluster, dag) == 0
         # b must never be submitted — a's failure cascade-skips it.
         assert cluster.trace == [
-            ("status", "RUNNING"),
+            ("status", "PENDING"),
             ("submit", "a"),
             ("phases", {"a": "RUNNING", "b": "PENDING"}),
+            ("status", "RUNNING"),
             ("exit", "a", 1),
             ("event", "StepFailed", "Step 'a' failed"),
             ("phases", {"a": "FAILED", "b": "SKIPPED"}),
@@ -374,9 +383,10 @@ class TestMainLinearDag:
         cluster.script_step("a", exit_code=1)
         assert run_controller_main(cluster, dag) == 0
         assert cluster.trace == [
-            ("status", "RUNNING"),
+            ("status", "PENDING"),
             ("submit", "a"),
             ("phases", {"a": "RUNNING", "b": "PENDING", "c": "PENDING"}),
+            ("status", "RUNNING"),
             ("exit", "a", 1),
             ("event", "StepFailed", "Step 'a' failed"),
             ("phases", {"a": "FAILED", "b": "SKIPPED", "c": "SKIPPED"}),
@@ -402,26 +412,28 @@ class TestMainDiamondDag:
         cluster.script_step("d", exit_code=0)
         assert run_controller_main(cluster, dag) == 0
         assert cluster.trace == [
-            ("status", "RUNNING"),
+            ("status", "PENDING"),
             ("submit", "a"),
             ("phases", {"a": "RUNNING", "b": "PENDING", "c": "PENDING", "d": "PENDING"}),
+            ("status", "RUNNING"),
             ("exit", "a", 0),
             ("event", "StepSucceeded", "Step 'a' completed successfully"),
             ("phases", {"a": "SUCCEEDED", "b": "PENDING", "c": "PENDING", "d": "PENDING"}),
-            # Both b and c are submitted from the same submit_ready_steps
-            # pass — a's single completion unblocks both branches at once —
-            # before either one's own exit is observed.
+            ("status", "PENDING"),
             ("submit", "b"),
             ("submit", "c"),
             ("phases", {"a": "SUCCEEDED", "b": "RUNNING", "c": "RUNNING", "d": "PENDING"}),
+            ("status", "RUNNING"),
             ("exit", "b", 0),
             ("event", "StepSucceeded", "Step 'b' completed successfully"),
             ("phases", {"a": "SUCCEEDED", "b": "SUCCEEDED", "c": "RUNNING", "d": "PENDING"}),
             ("exit", "c", 0),
             ("event", "StepSucceeded", "Step 'c' completed successfully"),
             ("phases", {"a": "SUCCEEDED", "b": "SUCCEEDED", "c": "SUCCEEDED", "d": "PENDING"}),
+            ("status", "PENDING"),
             ("submit", "d"),
             ("phases", {"a": "SUCCEEDED", "b": "SUCCEEDED", "c": "SUCCEEDED", "d": "RUNNING"}),
+            ("status", "RUNNING"),
             ("exit", "d", 0),
             ("event", "StepSucceeded", "Step 'd' completed successfully"),
             ("phases", {"a": "SUCCEEDED", "b": "SUCCEEDED", "c": "SUCCEEDED", "d": "SUCCEEDED"}),
@@ -442,15 +454,18 @@ class TestMainDiamondDag:
         assert run_controller_main(cluster, dag) == 0
         # d must never be submitted — it cascade-skips once b fails.
         assert cluster.trace == [
-            ("status", "RUNNING"),
+            ("status", "PENDING"),
             ("submit", "a"),
             ("phases", {"a": "RUNNING", "b": "PENDING", "c": "PENDING", "d": "PENDING"}),
+            ("status", "RUNNING"),
             ("exit", "a", 0),
             ("event", "StepSucceeded", "Step 'a' completed successfully"),
             ("phases", {"a": "SUCCEEDED", "b": "PENDING", "c": "PENDING", "d": "PENDING"}),
+            ("status", "PENDING"),
             ("submit", "b"),
             ("submit", "c"),
             ("phases", {"a": "SUCCEEDED", "b": "RUNNING", "c": "RUNNING", "d": "PENDING"}),
+            ("status", "RUNNING"),
             ("exit", "b", 1),
             ("event", "StepFailed", "Step 'b' failed"),
             ("phases", {"a": "SUCCEEDED", "b": "FAILED", "c": "RUNNING", "d": "SKIPPED"}),
@@ -464,24 +479,25 @@ class TestMainDiamondDag:
 
 
 class TestMainCancellation:
-    def test_single_step_cancelled_exits(self, cluster):
+    def test_single_step_canceled_exits(self, cluster):
         """A JobSet suspended (chain cancel) with no terminalState must not hang."""
         dag = [{"name": "a", "depends_on": []}]
         cluster.script_step("a", cancel=True)
         assert run_controller_main(cluster, dag) == 0
         assert cluster.trace == [
-            ("status", "RUNNING"),
+            ("status", "PENDING"),
             ("submit", "a"),
             ("phases", {"a": "RUNNING"}),
+            ("status", "RUNNING"),
             ("cancel", "a"),
-            ("event", "StepCancelled", "Step 'a' was cancelled"),
-            ("phases", {"a": "CANCELLED"}),
-            ("status", "TERMINATED"),
-            ("event", "WorkflowCancelled", "Workflow cancelled — cancelled steps: ['a']"),
+            ("event", "StepCanceled", "Step 'a' was canceled"),
+            ("phases", {"a": "CANCELED"}),
+            ("status", "CANCELED"),
+            ("event", "WorkflowCanceled", "Workflow canceled — canceled steps: ['a']"),
         ]
 
     def test_cascade_cancels_unsubmitted_dependent(self, cluster):
-        """a is cancelled before b's dependency is satisfied — b must never be
+        """a is canceled before b's dependency is satisfied — b must never be
         submitted and must cascade-skip instead of hanging."""
         dag = [
             {"name": "a", "depends_on": []},
@@ -490,19 +506,20 @@ class TestMainCancellation:
         cluster.script_step("a", cancel=True)
         assert run_controller_main(cluster, dag) == 0
         assert cluster.trace == [
-            ("status", "RUNNING"),
+            ("status", "PENDING"),
             ("submit", "a"),
             ("phases", {"a": "RUNNING", "b": "PENDING"}),
+            ("status", "RUNNING"),
             ("cancel", "a"),
-            ("event", "StepCancelled", "Step 'a' was cancelled"),
-            ("phases", {"a": "CANCELLED", "b": "SKIPPED"}),
-            ("status", "TERMINATED"),
-            ("event", "WorkflowCancelled", "Workflow cancelled — cancelled steps: ['a']"),
+            ("event", "StepCanceled", "Step 'a' was canceled"),
+            ("phases", {"a": "CANCELED", "b": "SKIPPED"}),
+            ("status", "CANCELED"),
+            ("event", "WorkflowCanceled", "Workflow canceled — canceled steps: ['a']"),
         ]
         assert ("submit", "b") not in cluster.trace
 
     def test_diamond_partial_cancel_cascades_join_step(self, cluster):
-        """a → b, a → c, b+c → d. b is cancelled, c succeeds — d must
+        """a → b, a → c, b+c → d. b is canceled, c succeeds — d must
         cascade-skip rather than waiting forever for a JobSet that is never
         submitted.
 
@@ -525,20 +542,23 @@ class TestMainCancellation:
         cluster.complete_jobset("c-js")
         assert run_controller_main(cluster, dag) == 0
         assert cluster.trace == [
-            ("status", "RUNNING"),
+            ("status", "PENDING"),
             ("phases", {"a": "RUNNING", "b": "PENDING", "c": "PENDING", "d": "PENDING"}),
+            ("status", "RUNNING"),
             ("exit", "a", 0),
             ("event", "StepSucceeded", "Step 'a' completed successfully"),
             ("phases", {"a": "SUCCEEDED", "b": "PENDING", "c": "PENDING", "d": "PENDING"}),
+            ("status", "PENDING"),
             ("phases", {"a": "SUCCEEDED", "b": "RUNNING", "c": "RUNNING", "d": "PENDING"}),
+            ("status", "RUNNING"),
             ("cancel", "b"),
-            ("event", "StepCancelled", "Step 'b' was cancelled"),
-            ("phases", {"a": "SUCCEEDED", "b": "CANCELLED", "c": "RUNNING", "d": "SKIPPED"}),
-            ("status", "TERMINATED"),
+            ("event", "StepCanceled", "Step 'b' was canceled"),
+            ("phases", {"a": "SUCCEEDED", "b": "CANCELED", "c": "RUNNING", "d": "SKIPPED"}),
+            ("status", "CANCELED"),
             ("exit", "c", 0),
             ("event", "StepSucceeded", "Step 'c' completed successfully"),
-            ("phases", {"a": "SUCCEEDED", "b": "CANCELLED", "c": "SUCCEEDED", "d": "SKIPPED"}),
-            ("event", "WorkflowCancelled", "Workflow cancelled — cancelled steps: ['b']"),
+            ("phases", {"a": "SUCCEEDED", "b": "CANCELED", "c": "SUCCEEDED", "d": "SKIPPED"}),
+            ("event", "WorkflowCanceled", "Workflow canceled — canceled steps: ['b']"),
         ]
 
 
@@ -560,15 +580,18 @@ class TestMainSkippedStatus:
         assert run_controller_main(cluster, dag) == 0
 
         assert cluster.trace == [
-            ("status", "RUNNING"),
+            ("status", "PENDING"),
             ("submit", "a"),
             ("phases", {"a": "RUNNING", "b": "PENDING", "c": "PENDING", "d": "PENDING"}),
+            ("status", "RUNNING"),
             ("exit", "a", 0),
             ("event", "StepSucceeded", "Step 'a' completed successfully"),
             ("phases", {"a": "SUCCEEDED", "b": "PENDING", "c": "PENDING", "d": "PENDING"}),
+            ("status", "PENDING"),
             ("submit", "b"),
             ("submit", "c"),
             ("phases", {"a": "SUCCEEDED", "b": "RUNNING", "c": "RUNNING", "d": "PENDING"}),
+            ("status", "RUNNING"),
             ("exit", "b", 1),
             ("event", "StepFailed", "Step 'b' failed"),
             ("phases", {"a": "SUCCEEDED", "b": "FAILED", "c": "RUNNING", "d": "SKIPPED"}),
@@ -594,12 +617,10 @@ class TestMainWatchReconnect:
 
         assert run_controller_main(cluster, dag) == 0
         assert cluster.trace == [
-            ("status", "RUNNING"),
+            ("status", "PENDING"),
             ("submit", "a"),
             ("phases", {"a": "RUNNING"}),
-            # The stream() call that raises never yields anything, so no
-            # exit is recorded here — the loop simply reconnects and picks
-            # up a's terminal event on the next stream() call.
+            ("status", "RUNNING"),
             ("exit", "a", 0),
             ("event", "StepSucceeded", "Step 'a' completed successfully"),
             ("phases", {"a": "SUCCEEDED"}),
@@ -625,9 +646,10 @@ class TestMainWatchReconnect:
 
         assert run_controller_main(cluster, dag) == 0
         assert cluster.trace == [
-            ("status", "RUNNING"),
+            ("status", "PENDING"),
             ("submit", "a"),
             ("phases", {"a": "RUNNING"}),
+            ("status", "RUNNING"),
             ("exit", "a", 0),
             ("event", "StepSucceeded", "Step 'a' completed successfully"),
             ("phases", {"a": "SUCCEEDED"}),
@@ -649,8 +671,9 @@ class TestMainControllerRetry:
         cluster.complete_jobset("a-js")
         assert run_controller_main(cluster, dag) == 0
         assert cluster.trace == [
-            ("status", "RUNNING"),
+            ("status", "PENDING"),
             ("phases", {"a": "RUNNING"}),
+            ("status", "RUNNING"),
             ("exit", "a", 0),
             ("event", "StepSucceeded", "Step 'a' completed successfully"),
             ("phases", {"a": "SUCCEEDED"}),
@@ -670,13 +693,16 @@ class TestMainControllerRetry:
         cluster.script_step("b", exit_code=0)
         assert run_controller_main(cluster, dag) == 0
         assert cluster.trace == [
-            ("status", "RUNNING"),
+            ("status", "PENDING"),
             ("phases", {"a": "RUNNING", "b": "PENDING"}),
+            ("status", "RUNNING"),
             ("exit", "a", 0),
             ("event", "StepSucceeded", "Step 'a' completed successfully"),
             ("phases", {"a": "SUCCEEDED", "b": "PENDING"}),
+            ("status", "PENDING"),
             ("submit", "b"),
             ("phases", {"a": "SUCCEEDED", "b": "RUNNING"}),
+            ("status", "RUNNING"),
             ("exit", "b", 0),
             ("event", "StepSucceeded", "Step 'b' completed successfully"),
             ("phases", {"a": "SUCCEEDED", "b": "SUCCEEDED"}),
@@ -711,9 +737,10 @@ class TestMainControllerRetry:
         assert "a-js" not in cluster.jobsets
         assert "b-js" in cluster.jobsets
         assert cluster.trace == [
-            ("status", "RUNNING"),
+            ("status", "PENDING"),
             ("submit", "b"),
             ("phases", {"a": "SUCCEEDED", "b": "RUNNING"}),
+            ("status", "RUNNING"),
             ("exit", "b", 0),
             ("event", "StepSucceeded", "Step 'b' completed successfully"),
             ("phases", {"a": "SUCCEEDED", "b": "SUCCEEDED"}),
@@ -742,15 +769,25 @@ class TestMainControllerRetry:
         assert "a-js" not in cluster.jobsets
         assert all("zombie" not in name for name in cluster.jobsets)
         assert cluster.trace == [
-            ("status", "RUNNING"),
+            ("status", "PENDING"),
             ("submit", "b"),
             ("phases", {"a": "SUCCEEDED", "b": "RUNNING"}),
+            ("status", "RUNNING"),
             ("exit", "b", 0),
             ("event", "StepSucceeded", "Step 'b' completed successfully"),
             ("phases", {"a": "SUCCEEDED", "b": "SUCCEEDED"}),
             ("status", "SUCCEEDED"),
             ("event", "WorkflowSucceeded", "All steps completed successfully"),
         ]
+
+
+class TestWatchTimeout:
+    def test_stream_called_with_timeout_seconds(self, cluster):
+        """w.stream() must be called with timeout_seconds to prevent stale heartbeat."""
+        dag = [{"name": "a", "depends_on": []}]
+        cluster.script_step("a", exit_code=0)
+        assert run_controller_main(cluster, dag) == 0
+        assert cluster.watch_last_kwargs["timeout_seconds"] == 30
 
 
 # ---------------------------------------------------------------------------
@@ -773,10 +810,11 @@ class TestTransientSubmitRetry:
         # submit shows up in the trace.
         assert cluster.create_attempts == 2
         assert cluster.trace == [
-            ("status", "RUNNING"),
+            ("status", "PENDING"),
             ("phases", {"a": "PENDING"}),
             ("submit", "a"),
             ("phases", {"a": "RUNNING"}),
+            ("status", "RUNNING"),
             ("exit", "a", 0),
             ("event", "StepSucceeded", "Step 'a' completed successfully"),
             ("phases", {"a": "SUCCEEDED"}),
@@ -799,7 +837,7 @@ class TestMainSubmitError:
         assert run_controller_main(cluster, dag) == 0
 
         assert cluster.trace == [
-            ("status", "RUNNING"),
+            ("status", "PENDING"),
             ("phases", {"a": "FAILED", "b": "PENDING"}),
             ("status", "FAILED"),
             ("phases", {"a": "FAILED", "b": "SKIPPED"}),
@@ -890,8 +928,8 @@ class TestMainStatusJson:
         assert ["s5cmd", "cp", cluster.status_path, "s3://bucket/wf-abc/status.json"] in cluster.ship_calls
 
     def test_cancellation(self, cluster):
-        """A single cancelled step ends the workflow TERMINATED with the
-        step's phase CANCELLED, and still ships the terminal status."""
+        """A single canceled step ends the workflow CANCELED with the
+        step's phase CANCELED, and still ships the terminal status."""
         dag = [{"name": "a", "depends_on": []}]
         cluster.script_step("a", cancel=True)
 
@@ -902,7 +940,7 @@ class TestMainStatusJson:
         assert cluster.status_doc == {
             "schema_version": 1,
             "id": "wf-abc",
-            "status": "TERMINATED",
-            "steps": [{"name": "a", "phase": "CANCELLED"}],
+            "status": "CANCELED",
+            "steps": [{"name": "a", "phase": "CANCELED"}],
         }
         assert ["s5cmd", "cp", cluster.status_path, "s3://bucket/wf-abc/status.json"] in cluster.ship_calls

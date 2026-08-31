@@ -33,15 +33,32 @@ import json
 import logging
 import tempfile
 from dataclasses import dataclass
+from enum import Enum
 from typing import Optional
 
 import kubernetes as k8s
 
 from seekr_chain import remote_fs
 from seekr_chain.backends.k8s.job_info import get_job_info
-from seekr_chain.status import ContainerStatus, PodStatus, WorkflowStatus
+from seekr_chain.status_model import Status, aggregate
 
 logger = logging.getLogger(__name__)
+
+
+class Detail(str, Enum):
+    """Client-only, display-only pod/container startup nuance (image pulling,
+    init containers, pull errors) that ``Status`` deliberately excludes so
+    aggregation never has to reason about it. K8s-specific: the local backend
+    has no init containers or image pulls to report on, so this has no
+    business living outside backends/k8s.
+    """
+
+    INIT_WAITING = "INIT:WAITING"
+    INIT_RUNNING = "INIT:RUNNING"
+    INIT_ERROR = "INIT:ERROR"
+    PULL_ERROR = "PULL:ERROR"
+    PULLING_CLOSURE = "PULL:CLOSURE"
+    PULLING = "PULLING"
 
 
 # ---------------------------------------------------------------------------
@@ -52,9 +69,10 @@ logger = logging.getLogger(__name__)
 @dataclass
 class ContainerState:
     name: str
-    status: ContainerStatus
+    status: Status
     dt_start: Optional[datetime.datetime]
     dt_end: Optional[datetime.datetime]
+    detail: Optional[Detail] = None
     message: Optional[str] = None
     reason: Optional[str] = None
 
@@ -63,13 +81,14 @@ class ContainerState:
 class PodState:
     dt_start: Optional[datetime.datetime]
     dt_end: Optional[datetime.datetime]
-    status: PodStatus
+    status: Status
     init_containers: list[ContainerState]
     containers: list[ContainerState]
     name: str
     job_index: int
     job_global_index: int
     restart_attempt: int
+    detail: Optional[Detail] = None
 
 
 @dataclass
@@ -78,7 +97,7 @@ class RoleState:
     dt_end: Optional[datetime.datetime]
     name: Optional[str]
     pods: list[PodState]
-    status: PodStatus
+    status: Status
 
 
 @dataclass
@@ -103,7 +122,7 @@ class WorkflowState:
 
     id: str
     name: Optional[str]  # ``seekr-chain/job-name`` label, or None if not set
-    status: WorkflowStatus
+    status: Status
     dt_start: Optional[datetime.datetime]  # workflow start (controller Job start_time)
     dt_end: Optional[datetime.datetime]  # workflow completion (terminal only)
     total_steps: Optional[int]  # ``seekr-chain/step-count`` annotation
@@ -146,14 +165,14 @@ def _trim_pull_message(message: str) -> str:
 
 
 def _populate_from_waiting(state: ContainerState, waiting, is_init: bool) -> None:
-    """Set status and message from a V1ContainerStateWaiting."""
+    """Set status/detail and message from a V1ContainerStateWaiting."""
     reason = waiting.reason or ""
     if reason in _PULL_ERROR_REASONS:
-        state.status = ContainerStatus.PULL_ERROR
+        state.status, state.detail = Status.STARTING, Detail.PULL_ERROR
     elif is_init:
-        state.status = ContainerStatus.INIT_WAITING
+        state.status, state.detail = Status.STARTING, Detail.INIT_WAITING
     else:
-        state.status = ContainerStatus.WAITING
+        state.status, state.detail = Status.STARTING, None
     if reason not in _SKIP_WAITING_MESSAGE:
         raw = waiting.message or None
         if raw and reason in _PULL_ERROR_REASONS:
@@ -162,11 +181,11 @@ def _populate_from_waiting(state: ContainerState, waiting, is_init: bool) -> Non
 
 
 def _populate_from_terminated(state: ContainerState, terminated, is_init: bool) -> None:
-    """Set status, reason, and timestamps from a V1ContainerStateTerminated."""
+    """Set status/detail, reason, and timestamps from a V1ContainerStateTerminated."""
     if terminated.exit_code == 0:
-        state.status = ContainerStatus.SUCCEEDED
+        state.status, state.detail = Status.SUCCEEDED, None
     else:
-        state.status = ContainerStatus.INIT_ERROR if is_init else ContainerStatus.FAILED
+        state.status, state.detail = (Status.STARTING, Detail.INIT_ERROR) if is_init else (Status.FAILED, None)
         if (terminated.reason or "") == "OOMKilled":
             state.reason = "OOMKilled"
     state.dt_start = _parse_timestamp(terminated.started_at)
@@ -174,8 +193,8 @@ def _populate_from_terminated(state: ContainerState, terminated, is_init: bool) 
 
 
 def _populate_from_running(state: ContainerState, running, is_init: bool) -> None:
-    """Set status and start time from a V1ContainerStateRunning."""
-    state.status = ContainerStatus.INIT_RUNNING if is_init else ContainerStatus.RUNNING
+    """Set status/detail and start time from a V1ContainerStateRunning."""
+    state.status, state.detail = (Status.STARTING, Detail.INIT_RUNNING) if is_init else (Status.RUNNING, None)
     state.dt_start = _parse_timestamp(running.started_at)
 
 
@@ -185,7 +204,7 @@ def _container_state_from(container_status, is_init: bool) -> ContainerState:
         name=container_status.name,
         dt_start=None,
         dt_end=None,
-        status=ContainerStatus.UNKNOWN,
+        status=Status.UNKNOWN,
     )
     cs = container_status.state
     if cs.waiting:
@@ -215,36 +234,20 @@ def _collect_container_states(
     return [_container_state_from(cs, is_init) for cs in container_statuses]
 
 
-def _resolve_status(statuses: list[ContainerStatus], rules: list[tuple]) -> Optional[PodStatus]:
-    """Apply container-status → pod-status translation rules in order.
-
-    Each rule is a tuple:
-      ``(container_status, pod_status)``         — match if ANY container has the status
-      ``(container_status, pod_status, "all")``  — match if ALL containers have the status
-
-    Returns the first matching pod_status, or ``None`` if no rule matches.
-    """
-    for rule in rules:
-        src, dst = rule[0], rule[1]
-        check = all if len(rule) == 3 and rule[2] == "all" else any
-        if check(s == src for s in statuses):
-            return dst
-    return None
-
-
 # Init container that fetches the nix closure. When this specific container
-# is INIT_RUNNING, the pod is spending its startup time pulling a potentially
-# multi-GB closure — worth calling out with its own PodStatus so users can
-# distinguish nix-closure fetch (slow, visible) from generic init (fast).
+# is STARTING/INIT_RUNNING, the pod is spending its startup time pulling a
+# potentially multi-GB closure — worth calling out with its own detail so
+# users can distinguish nix-closure fetch (slow, visible) from generic init
+# (fast).
 _NIX_CLOSURE_INIT_CONTAINER = "chain-nix-init"
 
 
 def _derive_pod_status(
     pod_phase: str,
     init_containers: list[ContainerState],
-    main_statuses: list[ContainerStatus],
-) -> PodStatus:
-    """Derive overall pod status from container states + the pod phase.
+    main_containers: list[ContainerState],
+) -> tuple[Status, Optional[Detail]]:
+    """Derive overall pod (status, detail) from container states + the pod phase.
 
     Precedence:
       1. Pod phase already terminal (SUCCEEDED/FAILED) — use it directly.
@@ -256,58 +259,41 @@ def _derive_pod_status(
       5. Main containers exist but haven't started (no init container) — PULLING.
       6. Nothing yet — PENDING.
     """
-    init_statuses = [c.status for c in init_containers]
-
     if pod_phase in ("SUCCEEDED", "FAILED"):
-        return PodStatus(pod_phase)
+        return Status(pod_phase), None
 
-    pull_error = _resolve_status(
-        init_statuses + main_statuses,
-        [
-            (ContainerStatus.PULL_ERROR, PodStatus.PULL_ERROR),
-        ],
-    )
-    if pull_error:
-        return pull_error
+    all_containers = init_containers + main_containers
+    if any(c.detail == Detail.PULL_ERROR for c in all_containers):
+        return Status.STARTING, Detail.PULL_ERROR
 
     # Main containers have terminated but pod phase hasn't updated yet (transient):
     # show FAILED eagerly; otherwise keep RUNNING until the phase flips.
-    main_result = _resolve_status(
-        main_statuses,
-        [
-            (ContainerStatus.RUNNING, PodStatus.RUNNING),
-            (ContainerStatus.FAILED, PodStatus.FAILED),
-            (ContainerStatus.SUCCEEDED, PodStatus.RUNNING),
-        ],
-    )
-    if main_result:
-        return main_result
+    if any(c.status == Status.RUNNING for c in main_containers):
+        return Status.RUNNING, None
+    if any(c.status == Status.FAILED for c in main_containers):
+        return Status.FAILED, None
+    if any(c.status == Status.SUCCEEDED for c in main_containers):
+        return Status.RUNNING, None
 
-    if init_statuses:
+    if init_containers:
         # If chain-nix-init is the one currently running, surface it as
         # PULLING_CLOSURE — the user is waiting on a closure fetch, not
         # on generic init work.
-        if any(
-            c.status == ContainerStatus.INIT_RUNNING and c.name == _NIX_CLOSURE_INIT_CONTAINER for c in init_containers
-        ):
-            return PodStatus.PULLING_CLOSURE
-        return (
-            _resolve_status(
-                init_statuses,
-                [
-                    (ContainerStatus.INIT_RUNNING, PodStatus.INIT_RUNNING),
-                    (ContainerStatus.INIT_ERROR, PodStatus.INIT_ERROR),
-                    # All init containers done → main image is being pulled.
-                    (ContainerStatus.SUCCEEDED, PodStatus.PULLING, "all"),
-                ],
-            )
-            or PodStatus.INIT_WAITING
-        )
+        if any(c.detail == Detail.INIT_RUNNING and c.name == _NIX_CLOSURE_INIT_CONTAINER for c in init_containers):
+            return Status.STARTING, Detail.PULLING_CLOSURE
+        if any(c.detail == Detail.INIT_RUNNING for c in init_containers):
+            return Status.STARTING, Detail.INIT_RUNNING
+        if any(c.detail == Detail.INIT_ERROR for c in init_containers):
+            return Status.STARTING, Detail.INIT_ERROR
+        # All init containers done → main image is being pulled.
+        if all(c.status == Status.SUCCEEDED for c in init_containers):
+            return Status.STARTING, Detail.PULLING
+        return Status.STARTING, Detail.INIT_WAITING
 
-    if main_statuses:
-        return PodStatus.PULLING
+    if main_containers:
+        return Status.STARTING, Detail.PULLING
 
-    return PodStatus.PENDING
+    return Status.PENDING, None
 
 
 def _finalize_pod_times(pod_state: PodState) -> None:
@@ -343,17 +329,17 @@ def _collect_pod_state(pod) -> PodState:
         dt_start=_parse_timestamp(pod.status.start_time),
         dt_end=None,
         name=pod.metadata.name,
-        status=PodStatus.UNKNOWN,
+        status=Status.UNKNOWN,
         init_containers=_collect_container_states(pod.status.init_container_statuses, is_init=True),
         containers=_collect_container_states(pod.status.container_statuses, is_init=False),
         job_index=int(pod.metadata.labels.get("jobset.sigs.k8s.io/job-index", 0)),
         job_global_index=int(pod.metadata.labels.get("jobset.sigs.k8s.io/job-global-index", 0)),
         restart_attempt=int(pod.metadata.labels.get("jobset.sigs.k8s.io/restart-attempt", 0)),
     )
-    pod_state.status = _derive_pod_status(
+    pod_state.status, pod_state.detail = _derive_pod_status(
         pod_phase=(pod.status.phase or "UNKNOWN").upper(),
         init_containers=pod_state.init_containers,
-        main_statuses=[c.status for c in pod_state.containers],
+        main_containers=pod_state.containers,
     )
     _finalize_pod_times(pod_state)
     return pod_state
@@ -365,7 +351,7 @@ def _collect_role_state(role_name, role_pods) -> RoleState:
         dt_end=None,
         name=role_name,
         pods=[_collect_pod_state(role_pod) for role_pod in role_pods],
-        status=PodStatus("UNKNOWN"),
+        status=Status.UNKNOWN,
     )
 
     dt_starts = [pod.dt_start for pod in out.pods if pod.dt_start]
@@ -375,7 +361,7 @@ def _collect_role_state(role_name, role_pods) -> RoleState:
     if dt_ends:
         out.dt_end = max(dt_ends)
 
-    out.status = min([pod.status for pod in out.pods])
+    out.status = aggregate([pod.status for pod in out.pods])
     return out
 
 
@@ -389,21 +375,28 @@ def _jobset_step_pod(step_name: str, jobset: dict, role_states: list[RoleState])
     """
     spec = jobset.get("spec", {})
     status = jobset.get("status", {})
+    pod_detail = None
 
     if spec.get("suspend", False):
-        pod_status = PodStatus.PENDING
+        pod_status = Status.PENDING
     elif status.get("terminalState") == "Completed":
-        pod_status = PodStatus.SUCCEEDED
+        pod_status = Status.SUCCEEDED
     elif status.get("terminalState") == "Failed":
-        pod_status = PodStatus.FAILED
+        pod_status = Status.FAILED
     else:
         # Derive from worker pod statuses — more reliable than replicatedJobsStatus.active.
         # Any status beyond PENDING/UNKNOWN means the pod has been scheduled and is active.
-        all_pod_statuses = [pod.status for role in role_states for pod in role.pods]
-        if any(s not in (PodStatus.PENDING, PodStatus.UNKNOWN) for s in all_pod_statuses):
-            pod_status = min(all_pod_statuses)
+        all_pods = [pod for role in role_states for pod in role.pods]
+        all_pod_statuses = [pod.status for pod in all_pods]
+        if any(s not in (Status.PENDING, Status.UNKNOWN) for s in all_pod_statuses):
+            pod_status = aggregate(all_pod_statuses)
+            # Detail carries no aggregation semantics of its own — surface the
+            # detail of whichever pod produced the winning status, so a
+            # collapsed single-pod step still shows fine-grained startup text
+            # (PULL:ERROR, INIT:WAITING, ...) instead of the bare Status.
+            pod_detail = next((pod.detail for pod in all_pods if pod.status == pod_status), None)
         else:
-            pod_status = PodStatus.PENDING
+            pod_status = Status.PENDING
 
     conditions = status.get("conditions", []) or []
     all_times = [c.get("lastTransitionTime") for c in conditions if c.get("lastTransitionTime")]
@@ -425,6 +418,7 @@ def _jobset_step_pod(step_name: str, jobset: dict, role_states: list[RoleState])
     return PodState(
         name=step_name,
         status=pod_status,
+        detail=pod_detail,
         dt_start=dt_start,
         dt_end=dt_end,
         init_containers=[],
@@ -437,7 +431,7 @@ def _jobset_step_pod(step_name: str, jobset: dict, role_states: list[RoleState])
 
 def _bare_step_state(
     name: str,
-    status: PodStatus,
+    status: Status,
     dt_start: Optional[datetime.datetime] = None,
     dt_end: Optional[datetime.datetime] = None,
 ) -> StepState:
@@ -481,8 +475,8 @@ def _collect_step_state(name, roles, jobset: dict) -> StepState:
 
 def controller_jobset_status_and_completion(
     jobset: dict, phases_configmap=None
-) -> tuple[WorkflowStatus, Optional[datetime.datetime]]:
-    """Map a controller JobSet's ``.status`` into ``(WorkflowStatus, completion_time)``.
+) -> tuple[Status, Optional[datetime.datetime]]:
+    """Map a controller JobSet's ``.status`` into ``(Status, completion_time)``.
 
     Reads ``status.terminalState``/``status.conditions`` off the dict-shaped
     JobSet response — mirrors the per-step handling in ``_jobset_step_pod()``.
@@ -491,7 +485,7 @@ def controller_jobset_status_and_completion(
     The controller always exits 0 on ``Completed`` — DAG failure and
     `chain cancel` are both normal orchestration outcomes, not controller
     errors — so ``phases_configmap`` (see ``read_phases_configmap()``) is the
-    source of truth for SUCCEEDED/FAILED/TERMINATED. A ``Failed``
+    source of truth for SUCCEEDED/FAILED/CANCELED. A ``Failed``
     terminalState means the controller process itself crashed and exhausted
     its retry budget, which is a distinct condition (``ERROR``).
     """
@@ -507,25 +501,25 @@ def controller_jobset_status_and_completion(
         ]
         completion_time = _parse_timestamp(max(terminal_times)) if terminal_times else None
         if terminal_state == "Failed":
-            return WorkflowStatus.ERROR, completion_time
-        if workflow_cancelled(phases_configmap):
-            return WorkflowStatus.TERMINATED, completion_time
+            return Status.ERROR, completion_time
+        if workflow_canceled(phases_configmap):
+            return Status.CANCELED, completion_time
         if workflow_failed(phases_configmap):
-            return WorkflowStatus.FAILED, completion_time
-        return WorkflowStatus.SUCCEEDED, completion_time
+            return Status.FAILED, completion_time
+        return Status.SUCCEEDED, completion_time
 
     replicated_status = status.get("replicatedJobsStatus", []) or []
     active = sum(rs.get("active", 0) for rs in replicated_status)
     if active > 0:
-        return WorkflowStatus.RUNNING, None
-    return WorkflowStatus.PENDING, None
+        return Status.RUNNING, None
+    return Status.PENDING, None
 
 
 @dataclass
 class _JobMetadata:
     name: Optional[str]
     total_steps: Optional[int]
-    status: WorkflowStatus
+    status: Status
     dt_start: Optional[datetime.datetime]
     dt_end: Optional[datetime.datetime]
 
@@ -536,7 +530,7 @@ def _jobset_metadata_from_object(jobset: Optional[dict], phases_configmap=None) 
     Returns an all-``UNKNOWN``/``None`` ``_JobMetadata`` if ``jobset`` is ``None`` (not found).
     """
     if jobset is None:
-        return _JobMetadata(name=None, total_steps=None, status=WorkflowStatus.UNKNOWN, dt_start=None, dt_end=None)
+        return _JobMetadata(name=None, total_steps=None, status=Status.UNKNOWN, dt_start=None, dt_end=None)
 
     metadata = jobset.get("metadata", {})
     labels = metadata.get("labels", {}) or {}
@@ -637,11 +631,11 @@ def read_phases_configmap(k8s_v1, namespace: str, workflow_id: str):
         return None
 
 
-def workflow_cancelled(phases_configmap) -> bool:
-    """True if any step's persisted phase is CANCELLED.
+def workflow_canceled(phases_configmap) -> bool:
+    """True if any step's persisted phase is CANCELED (user-canceled).
 
     The controller always exits 0 on ``Completed``, so JobSet's own
-    terminalState can't distinguish a cancelled run from a successful or
+    terminalState can't distinguish a canceled run from a successful or
     failed one — this falls back to the phase ConfigMap the controller
     already persists for restart-resume.
     """
@@ -650,27 +644,27 @@ def workflow_cancelled(phases_configmap) -> bool:
     raw = (phases_configmap.data or {}).get("phases")
     if not raw:
         return False
-    return "CANCELLED" in json.loads(raw).values()
+    return Status.CANCELED.value in json.loads(raw).values()
 
 
 def workflow_failed(phases_configmap) -> bool:
-    """True if any step's persisted phase is FAILED. See ``workflow_cancelled()``."""
+    """True if any step's persisted phase is FAILED. See ``workflow_canceled()``."""
     if phases_configmap is None:
         return False
     raw = (phases_configmap.data or {}).get("phases")
     if not raw:
         return False
-    return "FAILED" in json.loads(raw).values()
+    return Status.FAILED.value in json.loads(raw).values()
 
 
 def _skipped_step_names(phases_configmap) -> set[str]:
-    """Names of steps whose persisted phase is SKIPPED. See ``workflow_cancelled()``."""
+    """Names of steps whose persisted phase is SKIPPED. See ``workflow_canceled()``."""
     if phases_configmap is None:
         return set()
     raw = (phases_configmap.data or {}).get("phases")
     if not raw:
         return set()
-    return {name for name, phase in json.loads(raw).items() if phase == "SKIPPED"}
+    return {name for name, phase in json.loads(raw).items() if phase == Status.SKIPPED.value}
 
 
 def build_workflow_state(
@@ -693,7 +687,7 @@ def build_workflow_state(
     # are still visible once the workflow has completed.
     if phases_configmap is not None:
         for name in _skipped_step_names(phases_configmap) - jobset_by_step.keys():
-            steps.append(_bare_step_state(name, PodStatus.SKIPPED))
+            steps.append(_bare_step_state(name, Status.SKIPPED))
     return WorkflowState(
         id=workflow_id,
         name=meta.name,
@@ -730,19 +724,6 @@ def read_status_doc(workflow_id: str, datastore_root: Optional[str] = None) -> O
         return None
 
 
-# Maps the controller's per-step "phase" strings (see
-# ``resources/controller/status.py:_build_status()``) to ``PodStatus`` —
-# CANCELLED has no PodStatus equivalent, so it collapses to TERMINATED.
-_PHASE_TO_POD_STATUS = {
-    "PENDING": PodStatus.PENDING,
-    "RUNNING": PodStatus.RUNNING,
-    "SUCCEEDED": PodStatus.SUCCEEDED,
-    "FAILED": PodStatus.FAILED,
-    "CANCELLED": PodStatus.TERMINATED,
-    "SKIPPED": PodStatus.SKIPPED,
-}
-
-
 def build_workflow_state_from_status_doc(workflow_id: str, doc: dict) -> WorkflowState:
     """Build a ``WorkflowState`` from an archived status.json document.
 
@@ -754,7 +735,7 @@ def build_workflow_state_from_status_doc(workflow_id: str, doc: dict) -> Workflo
     steps = [
         _bare_step_state(
             step["name"],
-            _PHASE_TO_POD_STATUS.get(step["phase"], PodStatus.UNKNOWN),
+            Status(step["phase"]),
             _parse_timestamp(step.get("dt_start")),
             _parse_timestamp(step.get("dt_end")),
         )
@@ -765,7 +746,7 @@ def build_workflow_state_from_status_doc(workflow_id: str, doc: dict) -> Workflo
     return WorkflowState(
         id=workflow_id,
         name=None,
-        status=WorkflowStatus(doc["status"]),
+        status=Status(doc["status"]),
         dt_start=min(starts) if starts else None,
         dt_end=max(ends) if ends else None,
         total_steps=len(steps),
@@ -803,12 +784,12 @@ def get_workflow_state(
 
 def get_workflow_job_status(
     k8s_custom, k8s_v1, namespace: str, workflow_id: str
-) -> tuple[WorkflowStatus, Optional[datetime.datetime]]:
+) -> tuple[Status, Optional[datetime.datetime]]:
     """Return ``(status, completion_time)`` for the controller JobSet — lightweight.
 
     Used by ``K8sWorkflow.get_status()`` (called repeatedly by ``wait()``) so
     callers can poll status without fetching the full workflow state. Only
-    reads the phases ConfigMap (for SUCCEEDED/FAILED/TERMINATED
+    reads the phases ConfigMap (for SUCCEEDED/FAILED/CANCELED
     disambiguation) once the JobSet has actually reached a Completed
     terminalState, keeping the common (non-terminal) poll to a single API
     call.
@@ -824,7 +805,7 @@ def get_workflow_job_status(
     except k8s.client.exceptions.ApiException as e:
         if e.status != 404:
             raise
-        return WorkflowStatus.UNKNOWN, None
+        return Status.UNKNOWN, None
     phases_configmap = None
     if jobset.get("status", {}).get("terminalState") == "Completed":
         phases_configmap = read_phases_configmap(k8s_v1, namespace, workflow_id)

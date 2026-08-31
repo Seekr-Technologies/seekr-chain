@@ -130,7 +130,7 @@ def wait(job_id, poll_interval):
     """Wait for a workflow to complete."""
     import seekr_chain
     from seekr_chain.backends.k8s.watched_state import WatchStalledError
-    from seekr_chain.status import WorkflowStatus
+    from seekr_chain.status_model import Status
 
     workflow = seekr_chain.K8sWorkflow(id=job_id)
     try:
@@ -141,7 +141,7 @@ def wait(job_id, poll_interval):
     # UNKNOWN means the job vanished mid-wait (e.g. deleted) rather than
     # finishing — treat it as a failure so CI/automation gating on this
     # exit code doesn't read a vanished job as success.
-    if status.is_failed() or status == WorkflowStatus.UNKNOWN:
+    if status.is_failed() or status == Status.UNKNOWN:
         sys.exit(1)
 
 
@@ -165,8 +165,7 @@ _STATUS_STYLES = {
     "Succeeded": "green",
     "Failed": "red",
     "Error": "red",
-    "Terminated": "red",
-    "Omitted": "dim",
+    "Canceled": "red",
     "Skipped": "dim",
 }
 
@@ -240,7 +239,7 @@ def cancel(job_ids):
     for job_id in job_ids:
         workflow = seekr_chain.K8sWorkflow(id=job_id)
         workflow.cancel()
-        click.echo(f"Cancelled: {job_id}")
+        click.echo(f"Canceled: {job_id}")
 
 
 @main.command(name="install-sa")

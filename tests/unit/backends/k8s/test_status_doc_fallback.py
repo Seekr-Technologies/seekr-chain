@@ -15,7 +15,7 @@ import kubernetes as k8s
 
 from seekr_chain.backends.k8s import workflow_state
 from seekr_chain.backends.k8s.workflow_state import build_workflow_state_from_status_doc, get_workflow_state
-from seekr_chain.status import PodStatus, WorkflowStatus
+from seekr_chain.status_model import Status
 
 
 def _controller_jobset(active=1):
@@ -74,12 +74,12 @@ _DOC = {
 def test_build_workflow_state_from_status_doc_maps_failed_and_skipped_steps():
     state = build_workflow_state_from_status_doc("wf-1", _DOC)
 
-    assert state.status == WorkflowStatus.FAILED
+    assert state.status == Status.FAILED
     assert state.total_steps == 3
     steps_by_name = {s.name: s for s in state.steps}
-    assert steps_by_name["a"].pod.status == PodStatus.FAILED
-    assert steps_by_name["b"].pod.status == PodStatus.SKIPPED
-    assert steps_by_name["c"].pod.status == PodStatus.SKIPPED
+    assert steps_by_name["a"].pod.status == Status.FAILED
+    assert steps_by_name["b"].pod.status == Status.SKIPPED
+    assert steps_by_name["c"].pod.status == Status.SKIPPED
     assert all(s.roles == [] for s in state.steps)
     assert state.dt_start.isoformat() == "2026-01-01T00:00:00+00:00"
     assert state.dt_end.isoformat() == "2026-01-01T00:01:00+00:00"
@@ -88,7 +88,7 @@ def test_build_workflow_state_from_status_doc_maps_failed_and_skipped_steps():
 def test_get_workflow_state_falls_back_to_s3_when_controller_jobset_is_gone(monkeypatch):
     monkeypatch.setattr(workflow_state, "read_status_doc", lambda workflow_id, datastore_root=None: _DOC)
     state = get_workflow_state(_FakeCustomObjects(None), _FakeCoreV1(), "ns", "wf-1")
-    assert state.status == WorkflowStatus.FAILED
+    assert state.status == Status.FAILED
     assert {s.name for s in state.steps} == {"a", "b", "c"}
 
 
@@ -98,13 +98,13 @@ def test_get_workflow_state_never_reads_s3_when_controller_jobset_is_present(mon
 
     monkeypatch.setattr(workflow_state, "read_status_doc", _fail)
     state = get_workflow_state(_FakeCustomObjects(_controller_jobset()), _FakeCoreV1(), "ns", "wf-1")
-    assert state.status == WorkflowStatus.RUNNING
+    assert state.status == Status.RUNNING
 
 
 def test_get_workflow_state_falls_through_to_unknown_when_s3_doc_is_also_missing(monkeypatch):
     monkeypatch.setattr(workflow_state, "read_status_doc", lambda workflow_id, datastore_root=None: None)
     state = get_workflow_state(_FakeCustomObjects(None), _FakeCoreV1(), "ns", "wf-1")
-    assert state.status == WorkflowStatus.UNKNOWN
+    assert state.status == Status.UNKNOWN
     assert state.steps == []
 
 

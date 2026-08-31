@@ -24,7 +24,7 @@ from seekr_chain.backends.k8s.watched_state import (
     controller_status_watcher,
     workflow_state_watcher,
 )
-from seekr_chain.status import WorkflowStatus
+from seekr_chain.status_model import Status
 
 # ---------------------------------------------------------------------------
 # Fake Kubernetes Watch API
@@ -168,7 +168,7 @@ def test_seed_produces_first_snapshot_without_waiting_for_watch_events(monkeypat
     with workflow_state_watcher(k8s_custom, k8s_v1, "ns", "wf-1") as w:
         state = w.wait_for_first(timeout=1)
         assert state.name == "my-job"
-        assert state.status == WorkflowStatus.RUNNING
+        assert state.status == Status.RUNNING
 
 
 def _wait_until(predicate, watcher, timeout=1.0):
@@ -205,8 +205,8 @@ def test_job_modified_event_updates_status(monkeypatch):
 
     with workflow_state_watcher(k8s_custom, k8s_v1, "ns", "wf-1") as w:
         w.wait_for_first(timeout=1)
-        state = _wait_until(lambda s: s.status == WorkflowStatus.SUCCEEDED, w)
-        assert state.status == WorkflowStatus.SUCCEEDED
+        state = _wait_until(lambda s: s.status == Status.SUCCEEDED, w)
+        assert state.status == Status.SUCCEEDED
 
 
 def test_pod_added_event_appears_in_next_snapshot(monkeypatch):
@@ -336,7 +336,7 @@ def test_success_resets_failure_streak():
 
 def _wait_until_status(predicate, watcher, timeout=1.0):
     """Same shape as _wait_until, but for a controller_status_watcher()'s
-    latest() (a bare WorkflowStatus, not a WorkflowState)."""
+    latest() (a bare Status, not a WorkflowState)."""
     deadline = time.monotonic() + timeout
     status = watcher.latest()
     while not predicate(status):
@@ -358,7 +358,7 @@ def test_controller_seed_produces_first_status_without_waiting_for_watch_events(
 
     with controller_status_watcher(k8s_custom, k8s_v1, "ns", "wf-1") as w:
         status = w.wait_for_first(timeout=1)
-        assert status == WorkflowStatus.RUNNING
+        assert status == Status.RUNNING
 
 
 def test_controller_returns_none_when_job_does_not_exist(monkeypatch):
@@ -388,8 +388,8 @@ def test_controller_job_modified_event_updates_status(monkeypatch):
 
     with controller_status_watcher(k8s_custom, k8s_v1, "ns", "wf-1") as w:
         w.wait_for_first(timeout=1)
-        status = _wait_until_status(lambda s: s == WorkflowStatus.SUCCEEDED, w)
-        assert status == WorkflowStatus.SUCCEEDED
+        status = _wait_until_status(lambda s: s == Status.SUCCEEDED, w)
+        assert status == Status.SUCCEEDED
 
 
 def test_controller_deleted_event_clears_status(monkeypatch):

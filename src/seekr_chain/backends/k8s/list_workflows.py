@@ -14,7 +14,7 @@ _PHASE_BY_STATUS = {
     "SUCCEEDED": "Succeeded",
     "FAILED": "Failed",
     "RUNNING": "Running",
-    "TERMINATED": "Terminated",
+    "CANCELED": "Canceled",
     "ERROR": "Error",
 }
 

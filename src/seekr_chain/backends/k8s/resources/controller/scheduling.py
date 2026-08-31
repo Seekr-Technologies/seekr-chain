@@ -5,6 +5,7 @@ import sys
 import kubernetes
 
 from .manifests import load_manifest, manifest_name
+from .status_model import Status
 
 
 def submit_ready_steps(
@@ -25,10 +26,10 @@ def submit_ready_steps(
     """
     for step in dag:
         name = step["name"]
-        if phases[name] != "PENDING":
+        if phases[name] != Status.PENDING.value:
             continue
         deps = step.get("depends_on") or []
-        if not all(phases[d] == "SUCCEEDED" for d in deps):
+        if not all(phases[d] == Status.SUCCEEDED.value for d in deps):
             continue
 
         manifest = load_manifest(assets_path, name)
@@ -71,9 +72,9 @@ def submit_ready_steps(
                     file=sys.stderr,
                     flush=True,
                 )
-                phases[name] = "FAILED"
+                phases[name] = Status.FAILED.value
                 continue
 
-        phases[name] = "RUNNING"
+        phases[name] = Status.RUNNING.value
         js_names[name] = js_name
         js_to_step[js_name] = name
