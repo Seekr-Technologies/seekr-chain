@@ -126,6 +126,25 @@ class _FakeCustomObjectsApi:
             "items": list(cluster.jobsets.values()),
         }
 
+    def patch_namespaced_custom_object(self, group, version, plural, namespace, name, body):
+        """Models the `spec.suspend=true` patch both `chain cancel` and the
+        controller's own failure-teardown (scheduling.cancel_step_jobsets)
+        issue. A jobset that already reached a terminalState (script_step
+        resolved it before the cancel arrived — a real race the fake can hit
+        too) doesn't get a second watch event; one delivering its real
+        outcome is already queued or delivered."""
+        cluster = self._cluster
+        if name not in cluster.jobsets:
+            raise ApiException(status=404)
+        js = cluster.jobsets[name]
+        spec_patch = body.get("spec", {})
+        if "suspend" in spec_patch:
+            js["spec"]["suspend"] = spec_patch["suspend"]
+            js["metadata"]["resourceVersion"] = cluster._bump_rv()
+            if spec_patch["suspend"] and not js.get("status", {}).get("terminalState"):
+                cluster._enqueue(name)
+        return js
+
 
 class _FakeCoreV1Api:
     """Stands in for kubernetes.client.CoreV1Api()."""
@@ -283,6 +302,7 @@ class FakeK8sCluster:
         exit_code: int = 0,
         pods: list[dict] | None = None,
         cancel: bool = False,
+        never_completes: bool = False,
     ) -> None:
         """Script what happens when the controller submits `step`'s JobSet:
         the fake resolves it the instant it's created, enqueuing the matching
@@ -292,16 +312,31 @@ class FakeK8sCluster:
         `cancel=True` scripts an externally-triggered cancellation (JobSet
         suspended, no terminalState) instead of a normal exit.
 
+        `never_completes=True` scripts a JobSet that just stays RUNNING once
+        submitted — no status, no watch event — for exercising the
+        controller's own failure-teardown cancellation (a real "still
+        running when another step fails" step, as opposed to one whose
+        outcome the fake already resolved by the time teardown looks at it).
+        It only becomes terminal if something patches `spec.suspend=true`
+        on it (see `_FakeCustomObjectsApi.patch_namespaced_custom_object`).
+
         `pods` (a list of {"role": str, "exit_code": int | None} dicts), if
         given, becomes visible via list_namespaced_pod under this step's
         label selector, for testing the pod-listing retry-decision path.
 
         A step with no script defaults to succeeding immediately.
         """
-        self._scripts[step] = {"exit_code": exit_code, "pods": pods or [], "cancel": cancel}
+        self._scripts[step] = {
+            "exit_code": exit_code,
+            "pods": pods or [],
+            "cancel": cancel,
+            "never_completes": never_completes,
+        }
 
     def _resolve_scripted_step(self, js_name: str, step: str) -> None:
-        outcome = self._scripts.get(step, {"exit_code": 0, "pods": [], "cancel": False})
+        outcome = self._scripts.get(step, {"exit_code": 0, "pods": [], "cancel": False, "never_completes": False})
+        if outcome.get("never_completes"):
+            return
         js = self.jobsets[js_name]
         if outcome.get("cancel"):
             js["spec"]["suspend"] = True
