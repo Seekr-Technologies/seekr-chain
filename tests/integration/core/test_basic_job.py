@@ -13,6 +13,16 @@ from seekr_chain._testing import assert_nested_match, assert_patterns_match
 # The controller's status.json timestamps come from timeutil.now_iso(), which
 # renders UTC time with a trailing "Z".
 ISO_TS = r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,6})?Z"
+_LABEL_ALLOWLIST = {"team.example.com/project", "cost-center"}
+
+
+def _relevant_labels(labels):
+    """Keep seekr-chain labels and labels explicitly under test for exact comparison."""
+    return {
+        key: value
+        for key, value in labels.items()
+        if key.startswith("seekr-chain") or key in _LABEL_ALLOWLIST
+    }
 
 
 def _read_status_json(s3_path, s3_client):
@@ -853,32 +863,80 @@ class TestDAGJob:
                 name=name,
             )
 
+        def get_pod(selector):
+            pods = v1_api.list_namespaced_pod(config.namespace, label_selector=selector).items
+            assert len(pods) == 1
+            return pods[0]
+
         controller = get_jobset(job.id)
         first = get_jobset(f"{job.id}-first-js")
         second = get_jobset(f"{job.id}-second-js")
-        first_pod = v1_api.list_namespaced_pod(
-            config.namespace, label_selector=f"seekr-chain/job-id={job.id},seekr-chain/step=first"
-        ).items[0]
-        second_pod = v1_api.list_namespaced_pod(
-            config.namespace, label_selector=f"seekr-chain/job-id={job.id},seekr-chain/step=second"
-        ).items[0]
-        controller_pod = v1_api.list_namespaced_pod(
-            config.namespace, label_selector=f"seekr-chain/job-id={job.id},seekr-chain/is-controller=true"
-        ).items[0]
+        controller_pod = get_pod(f"seekr-chain/job-id={job.id},seekr-chain/is-controller=true")
+        first_pod = get_pod(f"seekr-chain/job-id={job.id},seekr-chain/step=first")
+        second_pod = get_pod(f"seekr-chain/job-id={job.id},seekr-chain/step=second")
 
-        for labels in (
-            controller["metadata"]["labels"],
-            controller_pod.metadata.labels,
-            first["metadata"]["labels"],
-            first_pod.metadata.labels,
-        ):
-            assert labels["team.example.com/project"] == "workflow"
-            assert labels["seekr-chain/user"] == "integration-submitter"
-
-        for labels in (second["metadata"]["labels"], second_pod.metadata.labels):
-            assert labels["team.example.com/project"] == "second-step"
-            assert labels["cost-center"] == "integration"
-            assert labels["seekr-chain/user"] == "integration-submitter"
+        actual_labels = {
+            "jobsets": {
+                "controller": _relevant_labels(controller["metadata"]["labels"]),
+                "first": _relevant_labels(first["metadata"]["labels"]),
+                "second": _relevant_labels(second["metadata"]["labels"]),
+            },
+            "pods": {
+                "controller": _relevant_labels(controller_pod.metadata.labels),
+                "first": _relevant_labels(first_pod.metadata.labels),
+                "second": _relevant_labels(second_pod.metadata.labels),
+            },
+        }
+        assert_nested_match(
+            actual_labels,
+            {
+                "jobsets": {
+                    "controller": {
+                        "seekr-chain/job-id": job.id,
+                        "seekr-chain/job-name": "test-label-propagation",
+                        "seekr-chain/is-controller": "true",
+                        "seekr-chain/user": "integration-submitter",
+                        "team.example.com/project": "workflow",
+                    },
+                    "first": {
+                        "seekr-chain/job-id": job.id,
+                        "seekr-chain/step-name": "first",
+                        "seekr-chain/user": "integration-submitter",
+                        "team.example.com/project": "workflow",
+                    },
+                    "second": {
+                        "seekr-chain/job-id": job.id,
+                        "seekr-chain/step-name": "second",
+                        "seekr-chain/user": "integration-submitter",
+                        "team.example.com/project": "second-step",
+                        "cost-center": "integration",
+                    },
+                },
+                "pods": {
+                    "controller": {
+                        "seekr-chain/job-id": job.id,
+                        "seekr-chain/is-controller": "true",
+                        "seekr-chain/user": "integration-submitter",
+                        "team.example.com/project": "workflow",
+                    },
+                    "first": {
+                        "seekr-chain/job-id": job.id,
+                        "seekr-chain/step": "first",
+                        "seekr-chain/role": "main",
+                        "seekr-chain/user": "integration-submitter",
+                        "team.example.com/project": "workflow",
+                    },
+                    "second": {
+                        "seekr-chain/job-id": job.id,
+                        "seekr-chain/step": "second",
+                        "seekr-chain/role": "main",
+                        "seekr-chain/user": "integration-submitter",
+                        "team.example.com/project": "second-step",
+                        "cost-center": "integration",
+                    },
+                },
+            },
+        )
 
     def test_step_fail(self, s3_client):
         """When a dependency step fails, its downstream steps must not run."""
