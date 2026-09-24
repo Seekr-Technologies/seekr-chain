@@ -36,6 +36,16 @@ _CONTROLLER_IMAGE = _user_config.controller_image or _DEFAULT_CONTROLLER_IMAGE
 _S3_CRED_ENV_KEYS = ("AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY")
 
 
+def _add_submitter_label(config: WorkflowConfig) -> None:
+    """Add the portable submit-host identity unless the user configured one.
+
+    Kubeconfig credentials do not expose a consistent human identity across
+    auth providers, so `$USER` is the reliable value available at submission.
+    """
+    config.labels = dict(config.labels or {})
+    config.labels.setdefault("seekr-chain/user", os.environ.get("USER", "unknown")[:63])
+
+
 def _resolve_env_secrets(config: WorkflowConfig) -> dict[str, str]:
     """Resolve EnvSource secret values against the local environment and any .env file."""
     env_entries = {k: v for k, v in (config.secrets or {}).items() if isinstance(v, EnvSource)}
@@ -403,9 +413,9 @@ def _build_controller_jobset(
             "name": workflow_id,
             "namespace": config.namespace,
             "labels": {
+                **(config.labels or {}),
                 "seekr-chain/job-id": workflow_id,
                 "seekr-chain/job-name": config.name[:63],
-                "seekr-chain/user": os.environ.get("USER", "unknown")[:63],
                 "seekr-chain/is-controller": "true",
             },
             "annotations": {
@@ -425,6 +435,7 @@ def _build_controller_jobset(
                             "template": {
                                 "metadata": {
                                     "labels": {
+                                        **(config.labels or {}),
                                         "seekr-chain/job-id": workflow_id,
                                         "seekr-chain/is-controller": "true",
                                     }
@@ -477,6 +488,8 @@ def launch_k8s_workflow(
 
     if isinstance(config, dict):
         config = WorkflowConfig.model_validate(config)
+
+    _add_submitter_label(config)
 
     if interactive:
         if len(config.steps) != 1:
