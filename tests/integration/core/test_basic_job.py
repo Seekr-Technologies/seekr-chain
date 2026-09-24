@@ -863,6 +863,7 @@ class TestDAGJob:
         )
 
         job = seekr_chain.launch_k8s_workflow(config)
+        workflow_name = config.name
         job.follow()
         assert seekr_chain.wait(job, poll_interval=1).is_successful()
 
@@ -893,7 +894,7 @@ class TestDAGJob:
                 "jobsets": {
                     "controller": {
                         "seekr-chain/job-id": job.id,
-                        "seekr-chain/job-name": "test-label-propagation",
+                        "seekr-chain/job-name": workflow_name,
                         "seekr-chain/is-controller": "true",
                         "seekr-chain/user": "integration-submitter",
                         "team.example.com/project": "workflow",
