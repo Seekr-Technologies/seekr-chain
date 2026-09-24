@@ -20,7 +20,7 @@ from seekr_chain.config import MultiRoleStepConfig
 from seekr_chain.utils import generate_id
 
 # ---------------------------------------------------------------------------
-# Hermetic infrastructure fixtures (k3d cluster + MinIO)
+# Hermetic infrastructure fixtures (k3d cluster + RustFS)
 # These are intentionally scoped to tests/integration/ so that running
 # pytest tests/unit does not touch any cluster or container infrastructure.
 # ---------------------------------------------------------------------------
@@ -63,7 +63,7 @@ def hermetic_flag(request):
 # --- xdist-safe shared resource ref-counting ---
 # With pytest-xdist each worker gets its own session, so session-scoped fixture
 # teardown fires per-worker.  We use an atomic file counter so only the *last*
-# worker to finish tears down the shared k3d cluster and MinIO container.
+# worker to finish tears down the shared k3d cluster and RustFS container.
 _WORKER_COUNT_PATH = Path(tempfile.gettempdir()) / "seekr-hermetic-worker-count"
 _WORKER_COUNT_LOCK = Path(tempfile.gettempdir()) / "seekr-hermetic-worker-count.lock"
 
@@ -101,7 +101,7 @@ def k3d_cluster(_podman_socket, hermetic_flag):
         return
 
     from hermetic.cluster import HermeticCluster
-    from hermetic.minio import HermeticMinio
+    from hermetic.rustfs import HermeticRustFS
 
     cluster = HermeticCluster()
     kubeconfig = cluster.create()
@@ -111,7 +111,7 @@ def k3d_cluster(_podman_socket, hermetic_flag):
     if remaining == 0:
         if os.environ.get("CI"):
             # In CI, tear down everything to free resources.
-            HermeticMinio().stop()
+            HermeticRustFS().stop()
             cluster.destroy()
         else:
             # Locally, keep the cluster alive for fast re-runs and debugging.
@@ -119,23 +119,23 @@ def k3d_cluster(_podman_socket, hermetic_flag):
 
 
 @pytest.fixture(scope="session")
-def minio_service(hermetic_flag, k3d_cluster):
-    """Session fixture: starts MinIO in hermetic mode (default), yields MinioInfo.
+def s3_service(hermetic_flag, k3d_cluster):
+    """Start RustFS in hermetic mode and return its S3 connection details.
 
     Same file-lock pattern as k3d_cluster — only one worker creates the
-    MinIO container; others reuse it.
+    RustFS container; others reuse it.
     """
     if not hermetic_flag:
         yield None
         return
 
-    from hermetic.minio import HermeticMinio
+    from hermetic.rustfs import HermeticRustFS
 
-    minio = HermeticMinio()
-    info = minio.start()
+    rustfs = HermeticRustFS()
+    info = rustfs.start()
     yield info
-    # Cleanup handled by k3d_cluster teardown (last worker stops MinIO + destroys cluster).
-    # Locally, persist for fast re-runs (clean up manually: docker rm -f seekr-hermetic-minio).
+    # Cleanup handled by k3d_cluster teardown (last worker stops RustFS + destroys cluster).
+    # Locally, persist for fast re-runs (clean up manually: docker rm -f seekr-hermetic-rustfs).
 
 
 @pytest.fixture(scope="session")
@@ -189,13 +189,13 @@ def v1_api(k3d_cluster):
 
 
 @pytest.fixture
-def s3_client(minio_service):
-    if minio_service is not None:
+def s3_client(s3_service):
+    if s3_service is not None:
         return boto3.client(
             "s3",
-            endpoint_url=minio_service.endpoint_url_local,
-            aws_access_key_id=minio_service.access_key,
-            aws_secret_access_key=minio_service.secret_key,
+            endpoint_url=s3_service.endpoint_url_local,
+            aws_access_key_id=s3_service.access_key,
+            aws_secret_access_key=s3_service.secret_key,
             region_name="us-east-1",
         )
     return boto3.client("s3")
@@ -220,7 +220,7 @@ def job_name(request):
 
 
 @pytest.fixture(autouse=True)
-def patch_configs_for_testing(job_name, datastore_root, monkeypatch, hermetic_flag, minio_service, k3d_cluster):
+def patch_configs_for_testing(job_name, datastore_root, monkeypatch, hermetic_flag, s3_service, k3d_cluster):
     # Get the real original function (in case it's already been wrapped)
     original = inspect.unwrap(seekr_chain.launch_k8s_workflow)
 
@@ -229,22 +229,15 @@ def patch_configs_for_testing(job_name, datastore_root, monkeypatch, hermetic_fl
     if datastore_root is not None:
         monkeypatch.setenv("SEEKRCHAIN_DATASTORE_ROOT", datastore_root)
 
-    if hermetic_flag and minio_service is not None:
-        # Route test-runner boto3 and aws-cli to MinIO
-        monkeypatch.setenv("AWS_ENDPOINT_URL", minio_service.endpoint_url_local)
-        monkeypatch.setenv("AWS_ACCESS_KEY_ID", minio_service.access_key)
-        monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", minio_service.secret_key)
+    if hermetic_flag and s3_service is not None:
+        # Route test-runner boto3 and aws-cli to RustFS.
+        monkeypatch.setenv("AWS_ENDPOINT_URL", s3_service.endpoint_url_local)
+        monkeypatch.setenv("AWS_ACCESS_KEY_ID", s3_service.access_key)
+        monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", s3_service.secret_key)
         monkeypatch.setenv("AWS_DEFAULT_REGION", "us-east-1")
-        # Empirically confirmed: a zero-length-body PUT (e.g. the sentinel upload)
-        # immediately followed by a non-empty PUT on the SAME boto3 client
-        # reliably stalls ~30s against our hermetic MinIO (through the podman
-        # network path) -- the reused keep-alive connection is left in a bad
-        # state after the empty-body request. Forcing "Connection: close" on
-        # every S3 request avoids connection reuse and eliminates the stall.
-        # This never reproduces against real S3, so it's patched here rather
-        # than in production code. Patching boto3.client itself (not just the
-        # s3_client fixture below) so it also covers clients production code
-        # builds for itself, e.g. launch_k8s_workflow._get_s3_client_and_creds().
+        # The test service is always addressed over a container-network hop.
+        # Do not reuse S3 HTTP connections: this keeps the test transport
+        # deterministic across Docker and podman.
         import boto3 as _boto3
 
         _orig_boto3_client = _boto3.client
@@ -270,7 +263,7 @@ def patch_configs_for_testing(job_name, datastore_root, monkeypatch, hermetic_fl
         _job_name=job_name,
         _orig=original,
         _hermetic=hermetic_flag,
-        _minio=minio_service,
+        _s3_service=s3_service,
         **kwargs,
     ):
         config = kwargs.get("config") or args[0]
@@ -280,16 +273,14 @@ def patch_configs_for_testing(job_name, datastore_root, monkeypatch, hermetic_fl
             config.logging.upload_timeout = datetime.timedelta(seconds=30)
         if config.code:
             config.code.exclude = config.code.exclude + [".cache", "docs"]
-        if _hermetic and _minio is not None:
-            # Inject pod-side S3 endpoint secrets so init containers and log sidecar
-            # can reach MinIO from within the k3d cluster.
-            # FB_S3_ENDPOINT must include the http:// prefix — fluent-bit passes it
-            # to the AWS SDK as endpointOverride, which defaults to HTTPS when no
-            # protocol is specified (causing connection failure against MinIO).
+        if _hermetic and _s3_service is not None:
+            # Inject pod-side endpoints so every S3 client reaches RustFS from
+            # within the k3d network. FB_S3_ENDPOINT needs its http:// prefix:
+            # Fluent Bit otherwise assumes HTTPS.
             hermetic_secrets = {
-                "AWS_ENDPOINT_URL": _minio.endpoint_url_pod,  # boto3 / AWS CLI
-                "S3_ENDPOINT_URL": _minio.endpoint_url_pod,  # s5cmd
-                "FB_S3_ENDPOINT": _minio.endpoint_url_pod,  # fluent-bit
+                "AWS_ENDPOINT_URL": _s3_service.endpoint_url_pod,  # boto3 / AWS CLI
+                "S3_ENDPOINT_URL": _s3_service.endpoint_url_pod,  # s5cmd
+                "FB_S3_ENDPOINT": _s3_service.endpoint_url_pod,  # fluent-bit
                 "AWS_REGION": "us-east-1",
             }
             if config.secrets is None:

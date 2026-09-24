@@ -342,7 +342,7 @@ class TestBasic:
 
         assert_nested_match(logs, expected)
 
-    def test_external_creds_secret_with_endpoint_config_reaches_minio(self, v1_api, minio_service, monkeypatch):
+    def test_external_creds_secret_with_endpoint_config_reaches_rustfs(self, v1_api, s3_service, monkeypatch):
         """A named external creds Secret + plain endpoint config together let every pod
         container reach the datastore.
 
@@ -354,12 +354,12 @@ class TestBasic:
              (+ FB_S3_ENDPOINT on the log sidecar) as plain env values.
 
         The external Secret holds ONLY creds — no endpoint key — so the init container /
-        log sidecar / controller can only learn MinIO's address from feature 2's plain
+        log sidecar / controller can only learn RustFS's address from feature 2's plain
         injection. A regression in either feature leaves the init container's s5cmd unable
-        to reach MinIO, the job fails, and this test fails.
+        to reach RustFS, the job fails, and this test fails.
         """
-        if minio_service is None:
-            pytest.skip("hermetic-only: needs the MinIO datastore")
+        if s3_service is None:
+            pytest.skip("hermetic-only: needs the RustFS datastore")
 
         import importlib
 
@@ -375,8 +375,8 @@ class TestBasic:
             metadata=kubernetes.client.V1ObjectMeta(name="test-datastore-creds"),
             type="Opaque",
             string_data={
-                "AWS_ACCESS_KEY_ID": minio_service.access_key,
-                "AWS_SECRET_ACCESS_KEY": minio_service.secret_key,
+                "AWS_ACCESS_KEY_ID": s3_service.access_key,
+                "AWS_SECRET_ACCESS_KEY": s3_service.secret_key,
             },
         )
         v1_api.create_namespaced_secret(namespace="argo-workflows", body=secret)
@@ -390,7 +390,7 @@ class TestBasic:
                 replace(
                     lkw._user_config,
                     datastore_kubernetes_secret="test-datastore-creds",
-                    datastore_endpoint_url=minio_service.endpoint_url_pod,
+                    datastore_endpoint_url=s3_service.endpoint_url_pod,
                     datastore_region="us-east-1",
                 ),
             )
@@ -399,7 +399,7 @@ class TestBasic:
                 "_user_config",
                 replace(
                     jobset_mod._user_config,
-                    datastore_endpoint_url=minio_service.endpoint_url_pod,
+                    datastore_endpoint_url=s3_service.endpoint_url_pod,
                     datastore_region="us-east-1",
                 ),
             )

@@ -20,7 +20,7 @@ def pytest_addoption(parser):
         "--real-cluster",
         action="store_true",
         default=False,
-        help="Run tests against a real K8s cluster instead of hermetic k3d+MinIO",
+        help="Run tests against a real K8s cluster instead of hermetic k3d+RustFS",
     )
     parser.addoption(
         "--gpu", action="store_true", default=False, help="Run ONLY gpu-marked tests (implies --real-cluster)"
