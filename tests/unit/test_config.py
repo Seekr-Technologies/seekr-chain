@@ -138,6 +138,29 @@ class TestFailureRuleOnExitCodes:
             self._config_with_rule({"action": "FAIL_JOB_SET", "operator": "NOT_IN"})
 
 
+class TestLabels:
+    def test_workflow_and_step_labels_are_accepted(self):
+        config = WorkflowConfig.model_validate(
+            {
+                "name": "test",
+                "labels": {"team.example.com/project": "alpha", "seekr-chain/user": "alice"},
+                "steps": [{**_minimal_step("a"), "labels": {"team.example.com/project": "beta"}}],
+            }
+        )
+
+        assert config.labels == {"team.example.com/project": "alpha", "seekr-chain/user": "alice"}
+        assert config.steps[0].labels == {"team.example.com/project": "beta"}
+
+    @pytest.mark.parametrize("labels", [{"not valid": "value"}, {"team.example.com/key": "not valid"}])
+    def test_invalid_kubernetes_labels_are_rejected(self, labels):
+        with pytest.raises(ValidationError, match="label (key|value)"):
+            WorkflowConfig(name="test", labels=labels, steps=[_minimal_step("a")])
+
+    def test_managed_label_is_rejected(self):
+        with pytest.raises(ValidationError, match="managed by seekr-chain"):
+            WorkflowConfig(name="test", labels={"seekr-chain/job-id": "other"}, steps=[_minimal_step("a")])
+
+
 class TestArtifactTtl:
     def test_default_is_90_days(self):
         config = WorkflowConfig(name="test", steps=[_minimal_step("a")])
