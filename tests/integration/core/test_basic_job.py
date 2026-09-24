@@ -18,11 +18,23 @@ _LABEL_ALLOWLIST = {"team.example.com/project", "cost-center"}
 
 def _relevant_labels(labels):
     """Keep seekr-chain labels and labels explicitly under test for exact comparison."""
-    return {
-        key: value
-        for key, value in labels.items()
-        if key.startswith("seekr-chain") or key in _LABEL_ALLOWLIST
-    }
+    return {key: value for key, value in labels.items() if key.startswith("seekr-chain") or key in _LABEL_ALLOWLIST}
+
+
+def _get_jobset(k8s_custom, namespace, name):
+    return k8s_custom.get_namespaced_custom_object(
+        group="jobset.x-k8s.io",
+        version="v1alpha2",
+        plural="jobsets",
+        namespace=namespace,
+        name=name,
+    )
+
+
+def _get_single_pod(v1_api, namespace, label_selector):
+    pods = v1_api.list_namespaced_pod(namespace, label_selector=label_selector).items
+    assert len(pods) == 1
+    return pods[0]
 
 
 def _read_status_json(s3_path, s3_client):
@@ -854,26 +866,14 @@ class TestDAGJob:
         job.follow()
         assert seekr_chain.wait(job, poll_interval=1).is_successful()
 
-        def get_jobset(name):
-            return job._k8s_custom.get_namespaced_custom_object(
-                group="jobset.x-k8s.io",
-                version="v1alpha2",
-                plural="jobsets",
-                namespace=config.namespace,
-                name=name,
-            )
-
-        def get_pod(selector):
-            pods = v1_api.list_namespaced_pod(config.namespace, label_selector=selector).items
-            assert len(pods) == 1
-            return pods[0]
-
-        controller = get_jobset(job.id)
-        first = get_jobset(f"{job.id}-first-js")
-        second = get_jobset(f"{job.id}-second-js")
-        controller_pod = get_pod(f"seekr-chain/job-id={job.id},seekr-chain/is-controller=true")
-        first_pod = get_pod(f"seekr-chain/job-id={job.id},seekr-chain/step=first")
-        second_pod = get_pod(f"seekr-chain/job-id={job.id},seekr-chain/step=second")
+        controller = _get_jobset(job._k8s_custom, config.namespace, job.id)
+        first = _get_jobset(job._k8s_custom, config.namespace, f"{job.id}-first-js")
+        second = _get_jobset(job._k8s_custom, config.namespace, f"{job.id}-second-js")
+        controller_pod = _get_single_pod(
+            v1_api, config.namespace, f"seekr-chain/job-id={job.id},seekr-chain/is-controller=true"
+        )
+        first_pod = _get_single_pod(v1_api, config.namespace, f"seekr-chain/job-id={job.id},seekr-chain/step=first")
+        second_pod = _get_single_pod(v1_api, config.namespace, f"seekr-chain/job-id={job.id},seekr-chain/step=second")
 
         actual_labels = {
             "jobsets": {

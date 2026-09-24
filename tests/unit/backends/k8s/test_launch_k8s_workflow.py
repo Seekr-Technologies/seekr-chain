@@ -41,7 +41,9 @@ def test_submitter_label_uses_user_and_allows_workflow_override(monkeypatch):
     assert config.labels["seekr-chain/user"] == "submitter"
 
     overridden = WorkflowConfig(
-        name="t", labels={"seekr-chain/user": "service-account"}, steps=[{"name": "a", "image": "ubuntu", "script": "echo hi"}]
+        name="t",
+        labels={"seekr-chain/user": "service-account"},
+        steps=[{"name": "a", "image": "ubuntu", "script": "echo hi"}],
     )
     _add_submitter_label(overridden)
     assert overridden.labels["seekr-chain/user"] == "service-account"
@@ -301,7 +303,10 @@ class TestControllerJobsetStatusSyncSidecar:
         jobset = _build_controller_jobset(
             workflow_id="wf-abc",
             config=config,
-            job_info={"remote_assets_path": "s3://bucket/assets.tar.gz", "remote_status_path": "s3://bucket/status.json"},
+            job_info={
+                "remote_assets_path": "s3://bucket/assets.tar.gz",
+                "remote_status_path": "s3://bucket/status.json",
+            },
             workflow_secrets=[],
             datastore_root="s3://bucket/",
             interactive=False,
