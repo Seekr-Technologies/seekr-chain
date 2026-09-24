@@ -816,6 +816,70 @@ class TestDAGJob:
 
         assert_nested_match(logs, expected)
 
+    def test_labels_propagate_to_controller_and_steps(self, v1_api):
+        """Workflow labels reach every submitted resource; step labels override them."""
+        config = seekr_chain.WorkflowConfig.model_validate(
+            {
+                "name": "test-label-propagation",
+                "namespace": "argo-workflows",
+                "ttl": "1:00:00",
+                "labels": {
+                    "team.example.com/project": "workflow",
+                    "seekr-chain/user": "integration-submitter",
+                },
+                "steps": [
+                    {"name": "first", "image": "ubuntu:24.04", "script": "echo first"},
+                    {
+                        "name": "second",
+                        "image": "ubuntu:24.04",
+                        "script": "echo second",
+                        "depends_on": ["first"],
+                        "labels": {"team.example.com/project": "second-step", "cost-center": "integration"},
+                    },
+                ],
+            }
+        )
+
+        job = seekr_chain.launch_k8s_workflow(config)
+        job.follow()
+        assert seekr_chain.wait(job, poll_interval=1).is_successful()
+
+        def get_jobset(name):
+            return job._k8s_custom.get_namespaced_custom_object(
+                group="jobset.x-k8s.io",
+                version="v1alpha2",
+                plural="jobsets",
+                namespace=config.namespace,
+                name=name,
+            )
+
+        controller = get_jobset(job.id)
+        first = get_jobset(f"{job.id}-first-js")
+        second = get_jobset(f"{job.id}-second-js")
+        first_pod = v1_api.list_namespaced_pod(
+            config.namespace, label_selector=f"seekr-chain/job-id={job.id},seekr-chain/step=first"
+        ).items[0]
+        second_pod = v1_api.list_namespaced_pod(
+            config.namespace, label_selector=f"seekr-chain/job-id={job.id},seekr-chain/step=second"
+        ).items[0]
+        controller_pod = v1_api.list_namespaced_pod(
+            config.namespace, label_selector=f"seekr-chain/job-id={job.id},seekr-chain/is-controller=true"
+        ).items[0]
+
+        for labels in (
+            controller["metadata"]["labels"],
+            controller_pod.metadata.labels,
+            first["metadata"]["labels"],
+            first_pod.metadata.labels,
+        ):
+            assert labels["team.example.com/project"] == "workflow"
+            assert labels["seekr-chain/user"] == "integration-submitter"
+
+        for labels in (second["metadata"]["labels"], second_pod.metadata.labels):
+            assert labels["team.example.com/project"] == "second-step"
+            assert labels["cost-center"] == "integration"
+            assert labels["seekr-chain/user"] == "integration-submitter"
+
     def test_step_fail(self, s3_client):
         """When a dependency step fails, its downstream steps must not run."""
         config = seekr_chain.WorkflowConfig.model_validate(
