@@ -2,7 +2,7 @@
 
 ``test_build_then_warm`` — closure missing → in-cluster build + s3 push,
 then a second submit hits the cache and skips the build step. Verifies
-the cache-hit contract end-to-end against the hermetic minio store.
+the cache-hit contract end-to-end against the hermetic RustFS store.
 
 Needs ``nix`` locally to evaluate the closure hash at submit time.
 """
@@ -40,7 +40,7 @@ def nix_basic_dir(monkeypatch, test_code_dir):
 def _evict_narinfo(s3_client, bucket: str, closure_path: str) -> None:
     """Delete the closure's narinfo from the bucket so it looks "missing".
 
-    The hermetic minio container persists locally across sessions, so a
+    The hermetic RustFS container persists locally across sessions, so a
     previous run may have populated the cache. We delete the narinfo (the
     one file ``closure_exists`` looks for); the nar blobs are content-
     addressed and reuploading them is a no-op when present.
@@ -57,7 +57,7 @@ def _evict_narinfo(s3_client, bucket: str, closure_path: str) -> None:
 
 
 class TestNixMode:
-    def test_build_then_warm(self, nix_basic_dir, s3_client, minio_service):
+    def test_build_then_warm(self, nix_basic_dir, s3_client, s3_service):
         """Two submits of the same closure: first builds, second cache-hits.
 
         Expected log shape:
@@ -68,7 +68,7 @@ class TestNixMode:
 
         # Pre-resolve the closure hash so we can evict any stale narinfo
         # from a previous run. Without this, "first run builds" is flaky
-        # when minio persists across sessions.
+        # when RustFS persists across sessions.
         closure = nix_utils.eval_closure_path("./", system=_NIX_SYSTEM)
         _evict_narinfo(s3_client, "seekr-chain-test", closure)
 
@@ -76,9 +76,9 @@ class TestNixMode:
         # inside the build pod) doesn't read AWS_ENDPOINT_URL the way boto3
         # does -- it needs the endpoint/scheme as store-URI query params
         # (https://nix.dev/manual/nix/stable/store/types/s3-binary-cache-store).
-        # endpoint_url_pod (not _local) since the build pod reaches MinIO
+        # endpoint_url_pod (not _local) since the build pod reaches RustFS
         # over the cluster network, not the host's localhost port mapping.
-        pod_endpoint = urlsplit(minio_service.endpoint_url_pod).netloc
+        pod_endpoint = urlsplit(s3_service.endpoint_url_pod).netloc
         store_uri = f"s3://seekr-chain-test?endpoint={pod_endpoint}&scheme=http&region=us-east-1"
 
         def make_config():
