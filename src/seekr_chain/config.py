@@ -15,6 +15,16 @@ class BaseModel(pydantic.BaseModel):
 
 
 _RFC1123_LABEL_RE = re.compile(r"^[a-z0-9]([-a-z0-9]*[a-z0-9])?$")
+_K8S_LABEL_NAME_RE = re.compile(r"^[A-Za-z0-9]([A-Za-z0-9_.-]*[A-Za-z0-9])?$")
+_K8S_LABEL_PREFIX_RE = re.compile(r"^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$")
+_RESERVED_JOB_LABELS = {
+    "seekr-chain/job-id",
+    "seekr-chain/job-name",
+    "seekr-chain/step-name",
+    "seekr-chain/step",
+    "seekr-chain/role",
+    "seekr-chain/is-controller",
+}
 
 
 def _validate_rfc1123_name(name: str) -> str:
@@ -27,6 +37,23 @@ def _validate_rfc1123_name(name: str) -> str:
             "alphanumeric character (no underscores or uppercase letters allowed)."
         )
     return name
+
+
+def _validate_labels(labels: dict[str, str] | None) -> dict[str, str] | None:
+    """Validate user labels before Kubernetes rejects a rendered JobSet."""
+    if labels is None:
+        return labels
+    for key, value in labels.items():
+        prefix, separator, name = key.rpartition("/")
+        if separator and (len(prefix) > 253 or not _K8S_LABEL_PREFIX_RE.match(prefix)):
+            raise ValueError(f"label key {key!r} has an invalid DNS prefix")
+        if len(name) > 63 or not _K8S_LABEL_NAME_RE.match(name):
+            raise ValueError(f"label key {key!r} has an invalid name")
+        if len(value) > 63 or (value and not _K8S_LABEL_NAME_RE.match(value)):
+            raise ValueError(f"label value for {key!r} must be empty or a valid Kubernetes label value")
+        if key in _RESERVED_JOB_LABELS or key.startswith("seekr-chain/pg.") or key == "seekr-chain.nix/closure":
+            raise ValueError(f"label key {key!r} is managed by seekr-chain and cannot be configured")
+    return labels
 
 
 class NodeAffinityRule(BaseModel):
@@ -406,6 +433,9 @@ class SingleRoleStepConfig(RoleSpecConfig):
 
     depends_on: Optional[list[str]] = None
     failure_policy: FailurePolicy | None = None
+    labels: Optional[dict[str, str]] = None
+
+    _validate_labels = field_validator("labels")(_validate_labels)
 
     @pydantic.model_validator(mode="after")
     def check_failure_policy(self) -> Self:
@@ -445,6 +475,9 @@ class MultiRoleStepConfig(BaseModel):
     success_policy: Optional[SuccessPolicy] = None
     failure_policy: FailurePolicy | None = None
     roles: list[RoleSpecConfig]
+    labels: Optional[dict[str, str]] = None
+
+    _validate_labels = field_validator("labels")(_validate_labels)
 
     @field_validator("name")
     @classmethod
@@ -530,6 +563,15 @@ class WorkflowConfig(BaseModel):
     affinity: Optional[list[AffinityRule]] = None
     scheduling: Optional[SchedulingConfig] = None
     logging: LoggingConfig = LoggingConfig()
+    labels: Optional[dict[str, str]] = None
+    """Labels applied to the controller and every worker JobSet and pod.
+
+    A configured ``seekr-chain/user`` value overrides the submit-host `$USER`.
+    Step labels override these labels on that step's worker JobSet and pods.
+    """
+
+    _validate_labels = field_validator("labels")(_validate_labels)
+
     controller_image: Optional[str] = None
     """Override the controller pod image for this workflow (k8s backend only).
 

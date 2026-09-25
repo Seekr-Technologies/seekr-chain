@@ -40,6 +40,33 @@ SEEKRCHAIN_DATASTORE_ROOT=s3://my-bucket/seekr-chain/
 
 > **Note:** `.env` files are commonly used for secrets and are expected to be gitignored. For a committed team default, use `.seekrchain.toml` instead.
 
+## Job labels
+
+Set `labels` on a workflow to apply Kubernetes labels to its controller, every
+step JobSet, and every pod. Set `labels` on an individual step to add or
+override labels for that step's JobSet and pods.
+
+```yaml
+name: train-model
+labels:
+  team.example.com/project: foundation-models
+  cost-center: research
+  seekr-chain/user: ml-service  # optional override for the submitter
+steps:
+  - name: train
+    image: pytorch/pytorch:latest
+    script: python train.py
+    labels:
+      cost-center: gpu-research # overrides the workflow value for this step
+```
+
+Seekr-chain automatically sets `seekr-chain/user` from `$USER` at submission
+time (or `unknown` when it is unset). Kubeconfig authentication identities are
+provider-specific, so they are not a portable source for this label. Specify
+`labels.seekr-chain/user` to override the automatic value, such as for CI or a
+shared service account. Labels must use Kubernetes label syntax; operational
+seekr-chain labels are reserved.
+
 ## Settings reference
 
 | Setting | Env var | TOML key | Description |

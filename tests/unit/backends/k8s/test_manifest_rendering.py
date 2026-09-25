@@ -74,6 +74,36 @@ class TestJobsetTemplateRendering:
 
         assert "serviceAccountName" not in manifest["spec"]["replicatedJobs"][0]["template"]["spec"]["template"]["spec"]
 
+    def test_workflow_and_step_labels_propagate_to_jobset_and_pods(self, tmp_path):
+        config = _minimal_config(
+            labels={"team.example.com/project": "workflow", "seekr-chain/user": "alice"},
+            steps=[
+                {
+                    "name": "train",
+                    "image": "pytorch:2.0",
+                    "script": "echo hello",
+                    "labels": {"team.example.com/project": "step", "cost-center": "ml"},
+                }
+            ],
+        )
+
+        _, context = build_jobset_context(
+            workflow_config=config,
+            step_index=0,
+            job_info=_fake_job_info(),
+            workflow_name="ab1234",
+            workflow_secrets=[],
+            interactive=False,
+            assets_path=tmp_path / "assets",
+        )
+        manifest = yaml.safe_load(render.render("jobset.yaml.j2", context))
+        pod_labels = manifest["spec"]["replicatedJobs"][0]["template"]["spec"]["template"]["metadata"]["labels"]
+
+        assert manifest["metadata"]["labels"]["team.example.com/project"] == "step"
+        assert pod_labels["team.example.com/project"] == "step"
+        assert pod_labels["cost-center"] == "ml"
+        assert pod_labels["seekr-chain/user"] == "alice"
+
     def test_renders_valid_yaml(self, tmp_path):
         config = _minimal_config()
         job_info = _fake_job_info()

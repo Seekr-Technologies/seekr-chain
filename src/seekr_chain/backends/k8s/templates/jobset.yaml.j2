@@ -77,6 +77,11 @@ spec:
               {% if role.closure_hash %}
               seekr-chain.nix/closure: {{ role.closure_hash }}
               {% endif %}
+              {% if labels %}
+              {% for k, v in labels.items() %}
+              {{ k }}: {{ v }}
+              {% endfor %}
+              {% endif %}
           spec:
             restartPolicy: Never
             {% if step_service_account %}

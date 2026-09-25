@@ -23,6 +23,7 @@ from seekr_chain.user_config import UserConfig
 # import_module() reads straight from sys.modules and sidesteps that.
 lkw_module = importlib.import_module("seekr_chain.backends.k8s.launch_k8s_workflow")
 _package_assets = lkw_module._package_assets
+_add_submitter_label = lkw_module._add_submitter_label
 _build_controller_jobset = lkw_module._build_controller_jobset
 
 
@@ -31,6 +32,21 @@ def _make_config() -> WorkflowConfig:
         name="t",
         steps=[{"name": "a", "image": "ubuntu", "script": "echo hi"}],
     )
+
+
+def test_submitter_label_uses_user_and_allows_workflow_override(monkeypatch):
+    config = _make_config()
+    monkeypatch.setenv("USER", "submitter")
+    _add_submitter_label(config)
+    assert config.labels["seekr-chain/user"] == "submitter"
+
+    overridden = WorkflowConfig(
+        name="t",
+        labels={"seekr-chain/user": "service-account"},
+        steps=[{"name": "a", "image": "ubuntu", "script": "echo hi"}],
+    )
+    _add_submitter_label(overridden)
+    assert overridden.labels["seekr-chain/user"] == "service-account"
 
 
 def test_package_assets_passes_interactive_through(monkeypatch, tmp_path):
@@ -277,6 +293,31 @@ class TestControllerJobsetStatusSyncSidecar:
             service_account="sa",
             s3_secret_name=s3_secret_name,
         )
+
+    def test_controller_labels_propagate_to_its_pod(self):
+        config = WorkflowConfig(
+            name="t",
+            labels={"team.example.com/project": "alpha", "seekr-chain/user": "alice"},
+            steps=[{"name": "a", "image": "ubuntu", "script": "echo hi"}],
+        )
+        jobset = _build_controller_jobset(
+            workflow_id="wf-abc",
+            config=config,
+            job_info={
+                "remote_assets_path": "s3://bucket/assets.tar.gz",
+                "remote_status_path": "s3://bucket/status.json",
+            },
+            workflow_secrets=[],
+            datastore_root="s3://bucket/",
+            interactive=False,
+            service_account="sa",
+            s3_secret_name="wf-abc",
+        )
+        pod_labels = jobset["spec"]["replicatedJobs"][0]["template"]["spec"]["template"]["metadata"]["labels"]
+
+        assert jobset["metadata"]["labels"]["team.example.com/project"] == "alpha"
+        assert pod_labels["team.example.com/project"] == "alpha"
+        assert pod_labels["seekr-chain/user"] == "alice"
 
     def test_controller_container_env_carries_s3_creds_and_remote_status_path(self):
         jobset = self._build()

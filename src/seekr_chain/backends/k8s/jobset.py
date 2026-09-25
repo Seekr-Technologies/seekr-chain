@@ -643,8 +643,9 @@ def _build_role_context(
     }
 
 
-def _build_jobset_labels(workflow_config) -> dict | None:
-    labels = {}
+def _build_jobset_labels(workflow_config, step_config) -> dict | None:
+    """Merge inherited labels; per-step labels override workflow labels."""
+    labels = {**(workflow_config.labels or {}), **(step_config.labels or {})}
     if workflow_config.scheduling is not None:
         labels["kueue.x-k8s.io/queue-name"] = workflow_config.scheduling.queue
         if workflow_config.scheduling.priority is not None:
@@ -969,7 +970,7 @@ def build_jobset_context(
         "failure_policy": _build_failure_policy(step_config),
         "affinity": affinity,
         "pack_groups": pack_groups,
-        "labels": _build_jobset_labels(workflow_config),
+        "labels": _build_jobset_labels(workflow_config, step_config),
         "roles": [
             _build_role_context(
                 role_config=role_config,
