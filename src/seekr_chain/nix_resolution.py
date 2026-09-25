@@ -34,6 +34,7 @@ from urllib.parse import urlparse
 
 from seekr_chain import nix_utils
 from seekr_chain.config import (
+    DependsOnCondition,
     MultiRoleStepConfig,
     NixConfig,
     ResourceConfig,
@@ -553,15 +554,16 @@ def _inject_build_steps(
     # matching on (closure, store) so each role depends on the build step
     # that pushes to *its* store, not just any step that built the closure.
     for step, nix_roles in nix_roles_by_step:
-        added_deps: list[str] = []
+        existing_dep_steps = {cond.step for cond in step.depends_on}
+        added_deps: list[DependsOnCondition] = []
         for role in nix_roles:
             key = role_to_key[id(role)]
             if key in key_to_build_step_name:
                 build_name = key_to_build_step_name[key]
-                if build_name not in (step.depends_on or []) and build_name not in added_deps:
-                    added_deps.append(build_name)
+                if build_name not in existing_dep_steps and build_name not in {cond.step for cond in added_deps}:
+                    added_deps.append(DependsOnCondition(step=build_name))
         if added_deps:
-            step.depends_on = (step.depends_on or []) + added_deps
+            step.depends_on = step.depends_on + added_deps
 
     # Build steps go at the front for readability — depends_on drives execution.
     config.steps = build_steps + list(config.steps)

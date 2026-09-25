@@ -205,7 +205,7 @@ class TestBuildStepInjection:
         assert build.name.startswith("nix-build-")
         assert train.name == "train"
         # depends_on wired: train waits for the build.
-        assert build.name in (train.depends_on or [])
+        assert build.name in [d.step for d in train.depends_on]
         # Build step uses nix-runner image and is a plain (non-nix) step.
         assert build.image == "registry.example.com/nix-runner:test"
         assert build.nix is None
@@ -283,8 +283,8 @@ class TestBuildStepInjection:
         # Both user steps depend on the same build step.
         train_a = next(s for s in out.steps if s.name == "a")
         train_b = next(s for s in out.steps if s.name == "b")
-        assert build_steps[0].name in (train_a.depends_on or [])
-        assert build_steps[0].name in (train_b.depends_on or [])
+        assert build_steps[0].name in [d.step for d in train_a.depends_on]
+        assert build_steps[0].name in [d.step for d in train_b.depends_on]
 
     def test_same_closure_different_store_gets_two_build_steps(
         self,
@@ -332,10 +332,10 @@ class TestBuildStepInjection:
 
         # Each user step depends on the build step pushing to *its* store,
         # not just any build step for the shared closure.
-        assert build_for_a.name in (step_a.depends_on or [])
-        assert build_for_a.name not in (step_b.depends_on or [])
-        assert build_for_b.name in (step_b.depends_on or [])
-        assert build_for_b.name not in (step_a.depends_on or [])
+        assert build_for_a.name in [d.step for d in step_a.depends_on]
+        assert build_for_a.name not in [d.step for d in step_b.depends_on]
+        assert build_for_b.name in [d.step for d in step_b.depends_on]
+        assert build_for_b.name not in [d.step for d in step_a.depends_on]
 
     def test_two_distinct_closures_get_two_build_steps(
         self,
@@ -434,8 +434,9 @@ class TestBuildStepInjection:
         out = resolve_nix_steps(c, staged_code_dir=staged_dir, staging_dir=staging_dir)
         train = next(s for s in out.steps if s.name == "train")
         # Has both the original 'prep' dep AND the new build step.
-        assert "prep" in train.depends_on
-        assert any(d.startswith("nix-build-") for d in train.depends_on)
+        dep_steps = [d.step for d in train.depends_on]
+        assert "prep" in dep_steps
+        assert any(d.startswith("nix-build-") for d in dep_steps)
 
 
 # ---------------------------------------------------------------------------
@@ -960,7 +961,7 @@ class TestMultiRoleSteps:
         out = resolve_nix_steps(c, staged_code_dir=staged_dir, staging_dir=staging_dir)
         build = next(s for s in out.steps if s.name.startswith("nix-build-"))
         training = next(s for s in out.steps if s.name == "training")
-        assert build.name in (training.depends_on or [])
+        assert build.name in [d.step for d in training.depends_on]
 
 
 class TestStagedEval:

@@ -5,6 +5,7 @@ import sys
 import kubernetes
 
 from .manifests import load_manifest, manifest_name
+from .phases import dep_satisfied, normalize_dep
 from .status_model import Status
 
 
@@ -17,19 +18,21 @@ def submit_ready_steps(
     namespace: str,
     owner_ref: list[dict],
     k8s_custom,
+    exit_codes: dict[str, list[int]] | None = None,
 ) -> None:
-    """Submit any PENDING steps whose dependencies have all SUCCEEDED.
+    """Submit any PENDING steps whose `depends_on` conditions are all satisfied.
 
     Updates js_names and js_to_step in place for newly submitted steps.
     Handles 409 Conflict gracefully: if a JobSet already exists (e.g. on
     controller pod retry after a crash), treat it as already submitted.
     """
+    exit_codes = exit_codes or {}
     for step in dag:
         name = step["name"]
         if phases[name] != Status.PENDING.value:
             continue
-        deps = step.get("depends_on") or []
-        if not all(phases[d] == Status.SUCCEEDED.value for d in deps):
+        deps = [normalize_dep(d) for d in (step.get("depends_on") or [])]
+        if not all(dep_satisfied(phases[d["step"]], d, exit_codes) for d in deps):
             continue
 
         manifest = load_manifest(assets_path, name)
@@ -78,3 +81,34 @@ def submit_ready_steps(
         phases[name] = Status.RUNNING.value
         js_names[name] = js_name
         js_to_step[js_name] = name
+
+
+def cancel_step_jobsets(step_names: list[str], js_names: dict[str, str], namespace: str, k8s_custom) -> None:
+    """Suspend (spec.suspend=true) the JobSets for `step_names` without
+    deleting them — the same patch `chain cancel` uses
+    (K8sWorkflow.cancel()). A future watch event observes the resulting
+    suspend and marks the step CANCELED; this call only requests it.
+
+    Best-effort: a step not yet in `js_names` (never actually submitted, or
+    already gone) is skipped, and a patch failure for one step doesn't stop
+    the others from being cancelled.
+    """
+    for name in step_names:
+        js_name = js_names.get(name)
+        if js_name is None:
+            continue
+        try:
+            k8s_custom.patch_namespaced_custom_object(
+                group="jobset.x-k8s.io",
+                version="v1alpha2",
+                plural="jobsets",
+                namespace=namespace,
+                name=js_name,
+                body={"spec": {"suspend": True}},
+            )
+            print(f"[controller] cancelling step={name!r} jobset={js_name!r} (workflow failed)", flush=True)
+        except kubernetes.client.exceptions.ApiException as e:
+            print(
+                f"[controller] warning: failed to cancel jobset={js_name!r} for step={name!r}: {e}",
+                flush=True,
+            )

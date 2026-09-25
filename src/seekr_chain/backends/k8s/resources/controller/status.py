@@ -43,21 +43,19 @@ _start_lock = threading.Lock()
 _shipper: threading.Thread | None = None
 
 
-def _workflow_status_from_phases(phases: dict[str, str]) -> str:
-    """Roll per-step phases up into a single workflow status.
+def _workflow_status_from_phases(phases: dict[str, str], optional_steps: set[str] | None = None) -> str:
+    """Roll per-step phases up into a single workflow status, via the shared
+    aggregate() precedence table (see status_model.py).
 
-    CANCELED wins over FAILED even though aggregate()'s general precedence
-    (status_model.py) puts FAILED first -- a user's cancellation is the
-    deciding action, matching workflow_state.controller_jobset_status_and_completion()'s
-    workflow_canceled()-before-workflow_failed() check. Falls back to
-    aggregate() for everything else.
+    `optional_steps` (see config.py's `optional` field) are excluded from the
+    rollup — a conditional cleanup/notification step's own FAILED phase must
+    not flip the archived, post-hoc status this document backs (see
+    `workflow_state.build_workflow_state_from_status_doc`), matching the
+    live `apply_failure_teardown`/`workflow_failed` rollup.
     """
-    statuses = [Status(p) for p in phases.values()]
-    if Status.CANCELED in statuses:
-        return Status.CANCELED.value
-    if Status.FAILED in statuses:
-        return Status.FAILED.value
-    return aggregate(statuses).value
+    optional_steps = optional_steps or set()
+    rollup_phases = {name: p for name, p in phases.items() if name not in optional_steps}
+    return aggregate([Status(p) for p in rollup_phases.values()]).value
 
 
 def _build_status(
@@ -67,10 +65,11 @@ def _build_status(
     timings: dict[str, dict],
 ) -> dict:
     """Assemble the outcome-only status document for one workflow snapshot."""
+    optional_steps = {step["name"] for step in dag if step.get("optional", False)}
     return {
         "schema_version": 1,
         "id": workflow_id,
-        "status": _workflow_status_from_phases(phases),
+        "status": _workflow_status_from_phases(phases, optional_steps),
         "steps": [
             {
                 "name": step["name"],
