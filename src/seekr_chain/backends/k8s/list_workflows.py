@@ -2,6 +2,7 @@
 
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -11,6 +12,8 @@ from seekr_chain.backends.k8s.workflow_state import (
     read_phases_configmap,
 )
 from seekr_chain.k8s_api import kube
+
+_CONFIGMAP_READ_WORKERS = 32
 
 _PHASE_BY_STATUS = {
     "SUCCEEDED": "Succeeded",
@@ -66,24 +69,41 @@ def list_k8s_workflows(
     items = result.get("items", [])
     _profile(f"list {len(items)} JobSets: {time.perf_counter() - started:.3f}s")
 
-    workflows = []
-    configmap_reads = 0
+    completed_indices = [
+        index for index, jobset in enumerate(items) if jobset.get("status", {}).get("terminalState") == "Completed"
+    ]
+
+    def read_completed_phases(index: int):
+        metadata = items[index].get("metadata", {})
+        workflow_id = metadata.get("name") or "<unknown>"
+        started = time.perf_counter()
+        phases_configmap = read_phases_configmap(k8s_v1, namespace, metadata.get("name"))
+        elapsed = time.perf_counter() - started
+        _profile(f"{workflow_id}: read phases ConfigMap: {elapsed:.3f}s")
+        return index, phases_configmap, elapsed
+
+    phases_configmaps = {}
     configmap_seconds = 0.0
-    for jobset in items:
+    started = time.perf_counter()
+    if completed_indices:
+        with ThreadPoolExecutor(max_workers=_CONFIGMAP_READ_WORKERS) as executor:
+            for index, phases_configmap, elapsed in executor.map(read_completed_phases, completed_indices):
+                phases_configmaps[index] = phases_configmap
+                configmap_seconds += elapsed
+    configmap_wall_seconds = time.perf_counter() - started
+    _profile(
+        f"phases ConfigMap reads ({len(completed_indices)} requests, {_CONFIGMAP_READ_WORKERS} workers): "
+        f"{configmap_wall_seconds:.3f}s wall / {configmap_seconds:.3f}s cumulative"
+    )
+
+    workflows = []
+    for index, jobset in enumerate(items):
         item_started = time.perf_counter()
         metadata = jobset.get("metadata", {})
         labels = metadata.get("labels", {}) or {}
         workflow_id = metadata.get("name") or "<unknown>"
 
-        phases_configmap = None
-        if jobset.get("status", {}).get("terminalState") == "Completed":
-            started = time.perf_counter()
-            phases_configmap = read_phases_configmap(k8s_v1, namespace, metadata.get("name"))
-            elapsed = time.perf_counter() - started
-            configmap_reads += 1
-            configmap_seconds += elapsed
-            _profile(f"{workflow_id}: read phases ConfigMap: {elapsed:.3f}s")
-        status, completion_time = controller_jobset_status_and_completion(jobset, phases_configmap)
+        status, completion_time = controller_jobset_status_and_completion(jobset, phases_configmaps.get(index))
         phase = _PHASE_BY_STATUS.get(status.value, "Pending")
 
         # Duration calculation
@@ -119,6 +139,5 @@ def list_k8s_workflows(
         )
         _profile(f"{workflow_id}: process JobSet: {time.perf_counter() - item_started:.3f}s")
 
-    _profile(f"phases ConfigMap reads ({configmap_reads} serial requests): {configmap_seconds:.3f}s")
     _profile(f"backend total ({len(workflows)} workflows): {time.perf_counter() - total_started:.3f}s")
     return workflows
