@@ -484,6 +484,38 @@ class TestListWorkflows:
         assert mock_v1.read_namespaced_config_map.call_count == 3
 
     @patch("seekr_chain.backends.k8s.list_workflows.kube")
+    def test_limit_is_applied_before_configmap_reads_and_keeps_active(self, mock_kube):
+        def jobset(name, created, terminal_state=None):
+            status = {"conditions": []}
+            if terminal_state is not None:
+                status["terminalState"] = terminal_state
+            return {
+                "metadata": {"name": name, "creationTimestamp": created, "labels": {}},
+                "status": status,
+            }
+
+        mock_custom = MagicMock()
+        mock_custom.list_namespaced_custom_object.return_value = {
+            "items": [
+                jobset("newest", "2026-01-03T00:00:00Z", "Completed"),
+                jobset("active", "2026-01-01T00:00:00Z"),
+                jobset("oldest", "2026-01-02T00:00:00Z", "Completed"),
+            ]
+        }
+        mock_v1 = MagicMock()
+        mock_configmap = MagicMock(data={"phases": "{}"})
+        mock_v1.read_namespaced_config_map.return_value = mock_configmap
+        mock_kube.custom_objects = mock_custom
+        mock_kube.core_v1 = mock_v1
+        mock_kube.namespace = "default"
+
+        result = list_workflows(limit=1)
+
+        assert [workflow["name"] for workflow in result] == ["newest", "active"]
+        mock_v1.read_namespaced_config_map.assert_called_once_with(name="newest-phases", namespace="default")
+        assert "limit" not in mock_custom.list_namespaced_custom_object.call_args.kwargs
+
+    @patch("seekr_chain.backends.k8s.list_workflows.kube")
     def test_missing_completed_configmap_still_reports_succeeded(self, mock_kube):
         jobset = {
             "metadata": {"name": "completed", "creationTimestamp": None, "labels": {}},
@@ -533,7 +565,7 @@ class TestList:
             result = runner.invoke(main, ["list"])
 
         assert result.exit_code == 0, result.output
-        mock_list.assert_called_once_with(namespace=None, user="testuser")
+        mock_list.assert_called_once_with(namespace=None, limit=20, user="testuser")
 
     def test_all_users(self):
         """chain list --all-users → list_workflows called with user=None."""
@@ -543,7 +575,7 @@ class TestList:
             result = runner.invoke(main, ["list", "--all-users"])
 
         assert result.exit_code == 0, result.output
-        mock_list.assert_called_once_with(namespace=None, user=None)
+        mock_list.assert_called_once_with(namespace=None, limit=20, user=None)
 
     def test_with_options(self):
         """chain list --namespace ns --user alice → namespace forwarded; limit applied client-side."""
@@ -553,7 +585,7 @@ class TestList:
             result = runner.invoke(main, ["list", "--namespace", "my-ns", "--user", "alice"])
 
         assert result.exit_code == 0, result.output
-        mock_list.assert_called_once_with(namespace="my-ns", user="alice")
+        mock_list.assert_called_once_with(namespace="my-ns", limit=20, user="alice")
 
     def test_default_limit_applied(self):
         """Default limit=20 keeps only the 20 most recent finished workflows."""

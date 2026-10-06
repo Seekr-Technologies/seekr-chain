@@ -200,7 +200,7 @@ def list_cmd(namespace, limit, user, all_users):
         effective_user = os.environ.get("USER")
 
     started = time.perf_counter()
-    workflows = seekr_chain.list_workflows(namespace=namespace, user=effective_user)
+    workflows = seekr_chain.list_workflows(namespace=namespace, limit=limit, user=effective_user)
     click.echo(
         f"[chain list profile] fetch and process {len(workflows)} workflows: {time.perf_counter() - started:.3f}s",
         err=True,

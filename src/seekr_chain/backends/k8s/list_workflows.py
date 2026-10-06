@@ -33,6 +33,9 @@ def list_k8s_workflows(
 ) -> list[dict]:
     """List controller JobSets in the given namespace.
 
+    When ``limit`` is non-zero, phase state is fetched only for the most recent
+    finished workflows. Active workflows are always retained.
+
     Returns a list of dicts with keys: name, job_name, user, status, created, duration.
     """
     total_started = time.perf_counter()
@@ -61,13 +64,21 @@ def list_k8s_workflows(
         "namespace": namespace,
         "label_selector": label_selector,
     }
-    if limit is not None:
-        kwargs["limit"] = limit
-
     started = time.perf_counter()
     result = k8s_custom.list_namespaced_custom_object(**kwargs)
     items = result.get("items", [])
     _profile(f"list {len(items)} JobSets: {time.perf_counter() - started:.3f}s")
+
+    if limit:
+        finished = [
+            jobset for jobset in items if jobset.get("status", {}).get("terminalState") in ("Completed", "Failed")
+        ]
+        active = [
+            jobset for jobset in items if jobset.get("status", {}).get("terminalState") not in ("Completed", "Failed")
+        ]
+        finished.sort(key=lambda jobset: jobset.get("metadata", {}).get("creationTimestamp") or "")
+        items = finished[-limit:] + active
+        _profile(f"apply early limit: {len(items)} JobSets retained ({len(active)} active)")
 
     completed_indices = [
         index for index, jobset in enumerate(items) if jobset.get("status", {}).get("terminalState") == "Completed"
