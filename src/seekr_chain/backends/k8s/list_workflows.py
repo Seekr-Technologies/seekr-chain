@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 
+import sys
+import time
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -19,6 +21,10 @@ _PHASE_BY_STATUS = {
 }
 
 
+def _profile(message: str) -> None:
+    print(f"[chain list profile] {message}", file=sys.stderr, flush=True)
+
+
 def list_k8s_workflows(
     namespace: Optional[str] = None, limit: Optional[int] = None, user: Optional[str] = None
 ) -> list[dict]:
@@ -26,11 +32,20 @@ def list_k8s_workflows(
 
     Returns a list of dicts with keys: name, job_name, user, status, created, duration.
     """
+    total_started = time.perf_counter()
+
+    started = time.perf_counter()
     k8s_custom = kube.custom_objects
+    _profile(f"initialize CustomObjects API: {time.perf_counter() - started:.3f}s")
+
+    started = time.perf_counter()
     k8s_v1 = kube.core_v1
+    _profile(f"initialize CoreV1 API: {time.perf_counter() - started:.3f}s")
 
     if namespace is None:
+        started = time.perf_counter()
         namespace = kube.namespace
+        _profile(f"resolve namespace: {time.perf_counter() - started:.3f}s")
 
     label_selector = "seekr-chain/job-id,seekr-chain/is-controller=true"
     if user is not None:
@@ -46,16 +61,28 @@ def list_k8s_workflows(
     if limit is not None:
         kwargs["limit"] = limit
 
+    started = time.perf_counter()
     result = k8s_custom.list_namespaced_custom_object(**kwargs)
+    items = result.get("items", [])
+    _profile(f"list {len(items)} JobSets: {time.perf_counter() - started:.3f}s")
 
     workflows = []
-    for jobset in result.get("items", []):
+    configmap_reads = 0
+    configmap_seconds = 0.0
+    for jobset in items:
+        item_started = time.perf_counter()
         metadata = jobset.get("metadata", {})
         labels = metadata.get("labels", {}) or {}
+        workflow_id = metadata.get("name") or "<unknown>"
 
         phases_configmap = None
         if jobset.get("status", {}).get("terminalState") == "Completed":
+            started = time.perf_counter()
             phases_configmap = read_phases_configmap(k8s_v1, namespace, metadata.get("name"))
+            elapsed = time.perf_counter() - started
+            configmap_reads += 1
+            configmap_seconds += elapsed
+            _profile(f"{workflow_id}: read phases ConfigMap: {elapsed:.3f}s")
         status, completion_time = controller_jobset_status_and_completion(jobset, phases_configmap)
         phase = _PHASE_BY_STATUS.get(status.value, "Pending")
 
@@ -90,5 +117,8 @@ def list_k8s_workflows(
                 "duration": duration,
             }
         )
+        _profile(f"{workflow_id}: process JobSet: {time.perf_counter() - item_started:.3f}s")
 
+    _profile(f"phases ConfigMap reads ({configmap_reads} serial requests): {configmap_seconds:.3f}s")
+    _profile(f"backend total ({len(workflows)} workflows): {time.perf_counter() - total_started:.3f}s")
     return workflows

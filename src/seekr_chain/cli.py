@@ -2,6 +2,7 @@
 
 import os
 import sys
+import time
 
 import click
 
@@ -179,12 +180,17 @@ _STATUS_STYLES = {
 @click.option("-A", "--all-users", is_flag=True, help="Show workflows from all users")
 def list_cmd(namespace, limit, user, all_users):
     """List workflows."""
+    total_started = time.perf_counter()
+    started = time.perf_counter()
+
     from rich.box import SIMPLE_HEAD
     from rich.console import Console
     from rich.table import Table
     from rich.text import Text
 
     import seekr_chain
+
+    click.echo(f"[chain list profile] import rendering/backend modules: {time.perf_counter() - started:.3f}s", err=True)
 
     if all_users:
         effective_user = None
@@ -193,14 +199,28 @@ def list_cmd(namespace, limit, user, all_users):
     else:
         effective_user = os.environ.get("USER")
 
+    started = time.perf_counter()
     workflows = seekr_chain.list_workflows(namespace=namespace, user=effective_user)
-    workflows.sort(key=lambda wf: wf["created"])
+    click.echo(
+        f"[chain list profile] fetch and process {len(workflows)} workflows: {time.perf_counter() - started:.3f}s",
+        err=True,
+    )
 
+    started = time.perf_counter()
+    workflows.sort(key=lambda wf: wf["created"])
+    click.echo(f"[chain list profile] sort workflows: {time.perf_counter() - started:.3f}s", err=True)
+
+    started = time.perf_counter()
     if limit:
         running = [wf for wf in workflows if wf["status"] in ("Running", "Pending")]
         finished = [wf for wf in workflows if wf["status"] not in ("Running", "Pending")]
         workflows = finished[-limit:] + running
+    click.echo(
+        f"[chain list profile] apply limit ({len(workflows)} displayed): {time.perf_counter() - started:.3f}s",
+        err=True,
+    )
 
+    started = time.perf_counter()
     table = Table(box=SIMPLE_HEAD, pad_edge=False)
     table.add_column("ID")
     table.add_column("Job Name")
@@ -215,7 +235,12 @@ def list_cmd(namespace, limit, user, all_users):
             wf["name"], wf["job_name"], wf["user"], status_text, format_timestamp(wf["created"]), wf["duration"]
         )
 
+    click.echo(f"[chain list profile] build table: {time.perf_counter() - started:.3f}s", err=True)
+
+    started = time.perf_counter()
     Console().print(table)
+    click.echo(f"[chain list profile] render table: {time.perf_counter() - started:.3f}s", err=True)
+    click.echo(f"[chain list profile] CLI total: {time.perf_counter() - total_started:.3f}s", err=True)
 
 
 @main.command()
