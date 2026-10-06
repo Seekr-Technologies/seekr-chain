@@ -2,6 +2,7 @@
 
 import os
 import textwrap
+import threading
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -451,6 +452,73 @@ class TestListWorkflows:
         result = list_workflows()
 
         assert result[0]["status"] == "Failed"
+
+    @patch("seekr_chain.backends.k8s.list_workflows.kube")
+    def test_completed_configmaps_are_read_concurrently_in_result_order(self, mock_kube):
+        jobsets = [
+            {
+                "metadata": {"name": name, "creationTimestamp": None, "labels": {}},
+                "status": {"terminalState": "Completed", "conditions": []},
+            }
+            for name in ("first", "second", "third")
+        ]
+        barrier = threading.Barrier(len(jobsets), timeout=1)
+
+        def read_configmap(name, namespace):
+            barrier.wait()
+            configmap = MagicMock()
+            configmap.data = {"phases": "{}"}
+            return configmap
+
+        mock_custom = MagicMock()
+        mock_custom.list_namespaced_custom_object.return_value = {"items": jobsets}
+        mock_v1 = MagicMock()
+        mock_v1.read_namespaced_config_map.side_effect = read_configmap
+        mock_kube.custom_objects = mock_custom
+        mock_kube.core_v1 = mock_v1
+        mock_kube.namespace = "default"
+
+        result = list_workflows()
+
+        assert [workflow["name"] for workflow in result] == ["first", "second", "third"]
+        assert mock_v1.read_namespaced_config_map.call_count == 3
+
+    @patch("seekr_chain.backends.k8s.list_workflows.kube")
+    def test_missing_completed_configmap_still_reports_succeeded(self, mock_kube):
+        jobset = {
+            "metadata": {"name": "completed", "creationTimestamp": None, "labels": {}},
+            "status": {"terminalState": "Completed", "conditions": []},
+        }
+        mock_custom = MagicMock()
+        mock_custom.list_namespaced_custom_object.return_value = {"items": [jobset]}
+        mock_v1 = MagicMock()
+        mock_v1.read_namespaced_config_map.side_effect = ApiException(status=404)
+        mock_kube.custom_objects = mock_custom
+        mock_kube.core_v1 = mock_v1
+        mock_kube.namespace = "default"
+
+        result = list_workflows()
+
+        assert result[0]["status"] == "Succeeded"
+
+    @patch("seekr_chain.backends.k8s.list_workflows.kube")
+    def test_completed_configmap_api_error_is_propagated(self, mock_kube):
+        jobset = {
+            "metadata": {"name": "completed", "creationTimestamp": None, "labels": {}},
+            "status": {"terminalState": "Completed", "conditions": []},
+        }
+        mock_custom = MagicMock()
+        mock_custom.list_namespaced_custom_object.return_value = {"items": [jobset]}
+        mock_v1 = MagicMock()
+        mock_v1.read_namespaced_config_map.side_effect = ApiException(status=403)
+        mock_kube.custom_objects = mock_custom
+        mock_kube.core_v1 = mock_v1
+        mock_kube.namespace = "default"
+
+        with pytest.raises(ApiException) as exc_info:
+            list_workflows()
+
+        assert exc_info.value.status == 403
 
 
 class TestList:
