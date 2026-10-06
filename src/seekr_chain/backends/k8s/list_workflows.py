@@ -13,7 +13,7 @@ from seekr_chain.backends.k8s.workflow_state import (
 )
 from seekr_chain.k8s_api import kube
 
-_CONFIGMAP_READ_WORKERS = 32
+_CONFIGMAP_READ_WORKERS = 10
 
 _PHASE_BY_STATUS = {
     "SUCCEEDED": "Succeeded",
