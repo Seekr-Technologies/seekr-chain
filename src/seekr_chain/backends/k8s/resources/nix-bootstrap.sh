@@ -54,6 +54,17 @@ BOOTSTRAP_MKDIR_ERR=/tmp/seekr-chain-bootstrap-mkdir.err
 # real 300s wait; matches nix_utils.py's SEEKR_CHAIN_NIX_EVAL_TIMEOUT_S.
 BOOTSTRAP_WAIT_S="${SEEKR_CHAIN_NIX_BOOTSTRAP_WAIT_S:-300}"
 
+# Repair only the store directory's metadata. Store paths are immutable and
+# may be shared by active pods, so never recursively chown them. This must run
+# even when BOOTSTRAP_DONE already exists: a hostPath can retain root:root/0755
+# metadata from an older runner image long after its initial copy was skipped.
+normalize_store_permissions() {
+  if [ -d "$NIX_ROOT/store" ]; then
+    chown 0:30000 "$NIX_ROOT/store"
+    chmod 1775 "$NIX_ROOT/store"
+  fi
+}
+
 # Runs the actual /nix-baked -> /nix copy. Assumes the caller already
 # holds BOOTSTRAP_LOCK. Factored out so both the normal
 # "we won the lock" path and the "reclaimed a stale lock" recovery
@@ -181,3 +192,8 @@ if [ ! -e "$BOOTSTRAP_DONE" ]; then
     exit 1
   fi
 fi
+
+# Do this outside the bootstrap-marker branch so warm node-local stores are
+# migrated too. chown/chmod operate on the directory inode only, making the
+# repair idempotent and safe to repeat as pods start concurrently.
+normalize_store_permissions
