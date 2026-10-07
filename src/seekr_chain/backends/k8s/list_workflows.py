@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -9,6 +10,8 @@ from seekr_chain.backends.k8s.workflow_state import (
     read_phases_configmap,
 )
 from seekr_chain.k8s_api import kube
+
+_CONFIGMAP_READ_WORKERS = 10
 
 _PHASE_BY_STATUS = {
     "SUCCEEDED": "Succeeded",
@@ -23,6 +26,9 @@ def list_k8s_workflows(
     namespace: Optional[str] = None, limit: Optional[int] = None, user: Optional[str] = None
 ) -> list[dict]:
     """List controller JobSets in the given namespace.
+
+    When ``limit`` is non-zero, phase state is fetched only for the most recent
+    finished workflows. Active workflows are always retained.
 
     Returns a list of dicts with keys: name, job_name, user, status, created, duration.
     """
@@ -43,20 +49,41 @@ def list_k8s_workflows(
         "namespace": namespace,
         "label_selector": label_selector,
     }
-    if limit is not None:
-        kwargs["limit"] = limit
-
     result = k8s_custom.list_namespaced_custom_object(**kwargs)
+    items = result.get("items", [])
+
+    if limit:
+        finished = [
+            jobset for jobset in items if jobset.get("status", {}).get("terminalState") in ("Completed", "Failed")
+        ]
+        active = [
+            jobset for jobset in items if jobset.get("status", {}).get("terminalState") not in ("Completed", "Failed")
+        ]
+        finished.sort(key=lambda jobset: jobset.get("metadata", {}).get("creationTimestamp") or "")
+        items = finished[-limit:] + active
+
+    completed_indices = [
+        index for index, jobset in enumerate(items) if jobset.get("status", {}).get("terminalState") == "Completed"
+    ]
+
+    def read_completed_phases(index: int):
+        metadata = items[index].get("metadata", {})
+        phases_configmap = read_phases_configmap(k8s_v1, namespace, metadata.get("name"))
+        return index, phases_configmap
+
+    phases_configmaps = {}
+    if completed_indices:
+        workers = min(_CONFIGMAP_READ_WORKERS, len(completed_indices))
+        with ThreadPoolExecutor(max_workers=workers) as executor:
+            for index, phases_configmap in executor.map(read_completed_phases, completed_indices):
+                phases_configmaps[index] = phases_configmap
 
     workflows = []
-    for jobset in result.get("items", []):
+    for index, jobset in enumerate(items):
         metadata = jobset.get("metadata", {})
         labels = metadata.get("labels", {}) or {}
 
-        phases_configmap = None
-        if jobset.get("status", {}).get("terminalState") == "Completed":
-            phases_configmap = read_phases_configmap(k8s_v1, namespace, metadata.get("name"))
-        status, completion_time = controller_jobset_status_and_completion(jobset, phases_configmap)
+        status, completion_time = controller_jobset_status_and_completion(jobset, phases_configmaps.get(index))
         phase = _PHASE_BY_STATUS.get(status.value, "Pending")
 
         # Duration calculation

@@ -193,9 +193,8 @@ def list_cmd(namespace, limit, user, all_users):
     else:
         effective_user = os.environ.get("USER")
 
-    workflows = seekr_chain.list_workflows(namespace=namespace, user=effective_user)
+    workflows = seekr_chain.list_workflows(namespace=namespace, limit=limit, user=effective_user)
     workflows.sort(key=lambda wf: wf["created"])
-
     if limit:
         running = [wf for wf in workflows if wf["status"] in ("Running", "Pending")]
         finished = [wf for wf in workflows if wf["status"] not in ("Running", "Pending")]
