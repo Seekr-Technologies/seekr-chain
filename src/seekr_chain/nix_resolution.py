@@ -48,12 +48,13 @@ logger = logging.getLogger(__name__)
 
 # Default runtime image for nix-mode roles. Built from
 # `docker/Dockerfile.nix-runner` via the `Build Nix Runner Image`
-# GitHub Actions workflow; the version pinned here must match the
-# value in `docker/nix-runner.version`.
+# GitHub Actions workflow. `docker/nix-runner.version` is the next immutable
+# publish candidate; update this version *and its published digest* together
+# only after that workflow succeeds. Do not point at an unpublished tag or
+# pair a new tag with an old digest.
 #
-# Bump both files together whenever the Dockerfile changes — k8s
-# caches non-:latest tags per-node forever otherwise, and the workflow
-# refuses to overwrite an existing tag.
+# K8s caches non-:latest tags per-node forever, and the workflow refuses to
+# overwrite an existing tag.
 _DEFAULT_NIX_RUNNER_IMAGE = "ghcr.io/seekr-technologies/seekr-chain-nix-runner:0.3.0@sha256:b26c9e5ff6ebb904abcd9e452c3c4bdf8ff0bf45a7d7a942eaeb221447ff2ede"
 _NIX_RUNNER_IMAGE = _user_config.nix_runner_image or _DEFAULT_NIX_RUNNER_IMAGE
 

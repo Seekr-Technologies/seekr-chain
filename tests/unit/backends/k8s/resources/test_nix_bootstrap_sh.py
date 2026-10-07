@@ -7,6 +7,7 @@ behavior, never its internals.
 """
 
 import os
+import stat
 import subprocess
 import threading
 import time
@@ -23,6 +24,17 @@ def _run_bootstrap(nix_root: Path, nix_baked: Path, extra_env: dict | None = Non
     env["SEEKR_CHAIN_NIX_BAKED_ROOT"] = str(nix_baked)
     if extra_env:
         env.update(extra_env)
+    # The production containers run this script as root. Unit tests commonly
+    # run unprivileged, so replace only chown with a no-op there; chmod still
+    # validates the observable setgid/sticky mode transition. The image smoke
+    # test covers the real numeric ownership change as root.
+    if os.geteuid() != 0:
+        fake_bin = nix_root.parent / "fake-bin"
+        fake_bin.mkdir(exist_ok=True)
+        fake_chown = fake_bin / "chown"
+        fake_chown.write_text("#!/bin/sh\nexit 0\n")
+        fake_chown.chmod(0o755)
+        env["PATH"] = f"{fake_bin}:{env['PATH']}"
     return subprocess.run(
         ["sh", str(SCRIPT)],
         env=env,
@@ -56,6 +68,18 @@ class TestNixBootstrap:
         assert (nix_root / "store" / "marker").read_text() == "toolchain-marker"
         assert (nix_root / ".seekr-chain-bootstrap.done").exists()
         assert not (nix_root / ".seekr-chain-bootstrap.lock").exists()
+        assert stat.S_IMODE((nix_root / "store").stat().st_mode) == 0o1775
+
+    def test_repairs_warm_store_mode_when_done_marker_exists(self, nix_root, nix_baked):
+        warm_store = nix_root / "store"
+        warm_store.mkdir()
+        warm_store.chmod(0o755)
+        (nix_root / ".seekr-chain-bootstrap.done").write_text("")
+
+        result = _run_bootstrap(nix_root, nix_baked)
+
+        assert result.returncode == 0
+        assert stat.S_IMODE(warm_store.stat().st_mode) == 0o1775
 
     def test_skips_bootstrap_when_already_done(self, nix_root, nix_baked):
         (nix_root / ".seekr-chain-bootstrap.done").write_text("")

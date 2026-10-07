@@ -5,18 +5,14 @@
 FROM nixos/nix:2.21.1@sha256:3f6c77ee4d2c82e472e64e6cd7087241dc391421a0b42c22e6849c586d5398d9 AS nix-src
 
 # Enable the modern nix CLI (`nix copy`, `nix run`) and disable build
-# sandboxing. build-users-group is cleared (empty, not the `nixbld`
-# default) because everything here runs as root in a container with no
-# real multi-user separation -- the default expects a `nixbld` group +
-# users to exist, which the nix-src image provisions in its own
-# /etc/passwd and /etc/group, but the final stage below is busybox-based
-# and never copies those over. Clearing it makes nix build directly as
-# the current user (root) instead of erroring with "the group 'nixbld'
-# specified in 'build-users-group' does not exist".
+# sandboxing. Keep Nix's normal multi-user builder isolation: the final stage
+# below recreates the upstream nixos/nix:2.21.1 nixbld accounts with their
+# fixed numeric IDs, so the root Nix coordinator can still execute each
+# derivation as an unprivileged build user.
 RUN { \
         echo 'experimental-features = nix-command flakes'; \
         echo 'sandbox = false'; \
-        echo 'build-users-group ='; \
+        echo 'build-users-group = nixbld'; \
     } >> /etc/nix/nix.conf
 
 # The final image is busybox-based, not nix-src-based — it never has a
@@ -35,9 +31,43 @@ FROM busybox:1.36-musl@sha256:3c6ae8008e2c2eedd141725c30b20d9c36b026eb796688f882
 # substitution (`2> >(tee ...)`), which plain /bin/sh can't parse.
 RUN for tool in \
         sh head awk cat tee touch sleep time mkfifo \
-        ps ls find grep sed kill df du wc tail less more env which; \
+        ps ls find grep sed kill df du wc tail less more env which \
+        chmod chown cp date id mkdir rmdir stat; \
     do \
         ln -sf /bin/busybox /bin/$tool; \
+    done
+
+# Preserve the nixos/nix:2.21.1 account ABI even though this final stage is
+# BusyBox-based. /nix is shared as a hostPath, so ownership survives image
+# changes and these IDs must not be replaced by distro-specific ones. Nix
+# chooses its build users from nixbld's member list; primary-group membership
+# alone is insufficient for that lookup.
+RUN set -eu; \
+    nixbld_members=''; \
+    i=1; \
+    while [ "$i" -le 32 ]; do \
+        if [ -n "$nixbld_members" ]; then nixbld_members="$nixbld_members,"; fi; \
+        nixbld_members="${nixbld_members}nixbld${i}"; \
+        i=$((i + 1)); \
+    done; \
+    expected_group="nixbld:x:30000:${nixbld_members}"; \
+    if grep -qx "$expected_group" /etc/group; then :; \
+    elif grep -q '^nixbld:' /etc/group || grep -q '^[^:]*:[^:]*:30000:' /etc/group; then \
+        echo 'nixbld name or GID 30000 conflicts with the BusyBox base image' >&2; exit 1; \
+    else \
+        echo "$expected_group" >> /etc/group; \
+    fi; \
+    i=1; \
+    while [ "$i" -le 32 ]; do \
+        uid=$((30000 + i)); \
+        expected_user="nixbld${i}:x:${uid}:30000:Nix build user ${i}:/var/empty:/sbin/nologin"; \
+        if grep -qx "$expected_user" /etc/passwd; then :; \
+        elif grep -q "^nixbld${i}:" /etc/passwd || grep -q "^[^:]*:[^:]*:${uid}:" /etc/passwd; then \
+            echo "nixbld${i} name or UID ${uid} conflicts with the BusyBox base image" >&2; exit 1; \
+        else \
+            echo "$expected_user" >> /etc/passwd; \
+        fi; \
+        i=$((i + 1)); \
     done
 
 # Preserve nix-src's toolchain at /nix-baked — the only copy of it in
@@ -54,6 +84,13 @@ RUN for tool in \
 # bootstrapped at runtime.
 COPY --from=nix-src /nix /nix-baked
 COPY --from=nix-src /etc/nix/nix.conf /etc/nix/nix.conf
+
+# Nix creates store paths through this directory as root, then gives build
+# users access via the fixed nixbld GID. Setgid preserves that group for new
+# paths and sticky prevents one builder from unlinking another's entries.
+# nix-bootstrap.sh repeats this non-recursively for pre-existing hostPath
+# stores, whose metadata outlives the image that originally created them.
+RUN chown 0:30000 /nix-baked/store && chmod 1775 /nix-baked/store
 COPY --from=nix-src /root/.nix-profile /root/.nix-profile
 
 # /bin/bash is required for many autoconf-generated nix builds. The
