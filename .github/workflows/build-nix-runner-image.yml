@@ -26,6 +26,11 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@d7f5e7f509e45cec5c76c4d5afdd7de93d0b3df5 # v4.1.0
 
+      - name: Build and smoke test native runner image
+        run: |
+          docker build --file docker/Dockerfile.nix-runner --tag seekr-chain-nix-runner:smoke docker
+          sh docker/test-nix-runner.sh seekr-chain-nix-runner:smoke
+
       - name: Log in to GHCR
         uses: docker/login-action@650006c6eb7dba73a995cc03b0b2d7f5ca915bee # v4.2.0
         with:

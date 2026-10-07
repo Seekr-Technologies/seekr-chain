@@ -475,6 +475,16 @@ class TestNixRendering:
         main = next(c for c in pod["spec"]["containers"] if c["name"] == "main")
         assert main["command"] == ["/bin/sh", "-c"]
 
+    def test_nix_main_explicitly_runs_nix_coordinator_as_root(self, tmp_path, monkeypatch):
+        _manifest, pod = _render_nix_jobset(tmp_path=tmp_path, monkeypatch=monkeypatch)
+        main = next(c for c in pod["spec"]["containers"] if c["name"] == "main")
+
+        # The coordinator needs to manage the shared store. The runner's Nix
+        # configuration, not the pod identity, drops individual derivations
+        # to its fixed nixbld users.
+        assert main["securityContext"]["runAsUser"] == 0
+        assert main["securityContext"]["runAsGroup"] == 0
+
     def test_chain_init_skips_busybox_injection_in_nix_mode(self, tmp_path, monkeypatch):
         """Chain-init must not waste time injecting busybox when nix-runner has /bin/sh."""
         _manifest, pod = _render_nix_jobset(tmp_path=tmp_path, monkeypatch=monkeypatch)
@@ -729,6 +739,10 @@ class TestNixRendering:
         nix_mount = next(m for m in main["volumeMounts"] if m["name"] == "nix-store")
         assert nix_mount["mountPath"] == "/nix"
         assert nix_mount["subPath"] == "nix"
+        # Auto-injected builders use the same root coordinator identity as
+        # consumer mains; individual derivations drop to nixbld in the image.
+        assert main["securityContext"]["runAsUser"] == 0
+        assert main["securityContext"]["runAsGroup"] == 0
         # Volume itself is hostPath like consumer pods.
         vol = next(v for v in pod["spec"]["volumes"] if v["name"] == "nix-store")
         assert vol["hostPath"]["path"] == "/var/lib/seekr-chain/nix"
