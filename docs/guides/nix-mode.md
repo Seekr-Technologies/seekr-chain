@@ -268,6 +268,8 @@ steps:
       # build_resources:         # optional — bump for heavy native builds
       #   cpus_per_node: 32
       #   mem_per_node: 256G
+      # build_max_jobs: 1         # integer or AUTO; concurrent derivations
+      # build_cores: 0            # cores per derivation; 0 means all available
     script: python train.py
 ```
 
@@ -471,6 +473,40 @@ steps:
         gpus_per_node: 0
     script: python train.py
 ```
+
+### Nix build parallelism
+
+Nix defaults to one concurrent derivation (`max-jobs = 1`) and makes all
+available cores visible to that derivation (`cores = 0`). These defaults
+can underuse a build pod when a closure contains many independent
+derivations. Configure both values per Nix runtime:
+
+```yaml
+steps:
+  - name: train
+    nix:
+      expression: ./
+      build_resources:
+        cpus_per_node: 32
+        mem_per_node: 256G
+      build_max_jobs: 4
+      build_cores: 8
+    script: python train.py
+```
+
+`build_max_jobs` accepts a non-negative integer or `AUTO`;
+case-insensitive spellings such as `auto` are accepted and normalized.
+`build_cores` is a non-negative integer. A value of zero retains Nix's
+behavior of exposing all available cores to each derivation. These options
+tune Nix within the pod; they do not change the pod's Kubernetes resource
+request, which remains controlled by `build_resources`.
+
+Additional build controls that may be exposed as typed settings in the
+future include per-derivation `timeout`, `max-silent-time`,
+`keep-going`, `keep-failed`, `max-build-log-size`, and `fallback`.
+Cache trust, substituters, sandboxing, build users, and shared-store garbage
+collection remain seekr-chain-managed invariants rather than arbitrary
+per-step options.
 
 ### Pre-build manually, refuse auto-build
 
