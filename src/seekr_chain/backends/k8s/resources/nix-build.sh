@@ -23,6 +23,7 @@ START_TIME=$(date +%s)
 # stderr from nix build + nix copy is tee'd here so the final summary can
 # parse stats out of it. /tmp is the build pod's ephemeral scratch.
 LOG=/tmp/nix-build.log
+NIX_CONF="${SEEKR_CHAIN_NIX_CONF:-/etc/nix/nix.conf}"
 
 # Successful derivations are recorded by the static post-build hook below.
 # A per-process directory avoids stale entries if a container runtime happens
