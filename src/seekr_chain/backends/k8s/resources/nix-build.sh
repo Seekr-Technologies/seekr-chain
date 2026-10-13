@@ -24,6 +24,19 @@ START_TIME=$(date +%s)
 # parse stats out of it. /tmp is the build pod's ephemeral scratch.
 LOG=/tmp/nix-build.log
 
+# Successful derivations are recorded by the static post-build hook below.
+# A per-process directory avoids stale entries if a container runtime happens
+# to preserve /tmp across an attempted restart.
+JOURNAL="/tmp/nix-build-outputs.$$"
+POST_BUILD_HOOK=/seekr-chain/resources/nix-post-build-hook.sh
+PARTIAL_COPY_BATCH_SIZE=100
+CANCELLED=0
+
+# Kubernetes termination must not turn into a potentially long cache upload.
+# The foreground nix process receives the pod's signal independently; this
+# flag only controls what we do after it exits.
+trap 'CANCELLED=1' HUP INT TERM
+
 # POSIX-sh substitute for bash's `2> >(tee -a "$LOG" >&2)`: a named pipe
 # fed into a backgrounded `tee`, started before the wrapped command so
 # it's already waiting when that command opens its end. Once the command
@@ -75,10 +88,80 @@ substituters = $SEEKR_CHAIN_NIX_STORE https://cache.nixos.org
 require-sigs = false
 log-lines = 200
 max-jobs = $SEEKR_CHAIN_NIX_MAX_JOBS
-cores = $SEEKR_CHAIN_NIX_CORES"
+cores = $SEEKR_CHAIN_NIX_CORES
+post-build-hook = $POST_BUILD_HOOK"
 export NIX_CONFIG
 
 cd "${SEEKR_CHAIN_NIX_WORKSPACE:-/seekr-chain/workspace}"
+
+rm -rf "$JOURNAL"
+mkdir -m 700 "$JOURNAL"
+export SEEKR_CHAIN_NIX_BUILD_JOURNAL="$JOURNAL"
+
+# Durable-copy URI is needed by both the failed-build partial upload and the
+# existing successful full-closure upload.
+case "$SEEKR_CHAIN_NIX_STORE" in
+  *\?*) COPY_URI="$SEEKR_CHAIN_NIX_STORE&compression=$SEEKR_CHAIN_NIX_COMPRESSION" ;;
+  *)    COPY_URI="$SEEKR_CHAIN_NIX_STORE?compression=$SEEKR_CHAIN_NIX_COMPRESSION" ;;
+esac
+
+copy_partial_batch() {
+    batch_size=$#
+    echo "=== nix copy partial batch ($batch_size paths) --to $COPY_URI ==="
+    if run_teeing_stderr nix copy --to "$COPY_URI" "$@"; then
+        echo "partial cache upload: copied $batch_size journaled paths"
+        return 0
+    else
+        copy_status=$?
+        echo "ERROR: partial cache upload batch failed with status $copy_status" >&2
+        return "$copy_status"
+    fi
+}
+
+upload_partial_outputs() {
+    partial_valid=0
+    partial_invalid=0
+    partial_failures=0
+    set --
+
+    for entry in "$JOURNAL"/*; do
+        [ -d "$entry" ] || continue
+        store_name=${entry##*/}
+        store_path="/nix/store/$store_name"
+
+        if ! nix path-info "$store_path" >/dev/null 2>&1; then
+            partial_invalid=$((partial_invalid + 1))
+            echo "WARNING: skipping invalid journaled store path: $store_path" >&2
+            continue
+        fi
+
+        partial_valid=$((partial_valid + 1))
+        set -- "$@" "$store_path"
+        if [ "$#" -ge "$PARTIAL_COPY_BATCH_SIZE" ]; then
+            if ! copy_partial_batch "$@"; then
+                partial_failures=$((partial_failures + 1))
+            fi
+            set --
+        fi
+    done
+
+    if [ "$#" -gt 0 ]; then
+        if ! copy_partial_batch "$@"; then
+            partial_failures=$((partial_failures + 1))
+        fi
+    fi
+
+    if [ "$partial_valid" -eq 0 ]; then
+        echo "partial cache upload: no valid locally built outputs were journaled"
+    elif [ "$partial_failures" -eq 0 ]; then
+        echo "partial cache upload complete: $partial_valid paths copied"
+    else
+        echo "ERROR: partial cache upload completed with $partial_failures failed batch(es) out of $partial_valid valid paths" >&2
+    fi
+    if [ "$partial_invalid" -gt 0 ]; then
+        echo "partial cache upload: skipped $partial_invalid invalid path(s)" >&2
+    fi
+}
 
 # No --store flag: nix build runs against the real, bootstrapped /nix
 # directly. An earlier design passed --store local?root=/nix-shared here
@@ -96,7 +179,31 @@ echo "=== nix build $FLAKE_REF ==="
 # output when stdout/stderr aren't a TTY — so chain pod logs would show
 # only "building '<drv>'" headers and you'd have no way to tell whether
 # a 10-minute "build" is making progress or stuck.
-BUILT=$(run_teeing_stderr nix build --print-out-paths --no-link -L "$FLAKE_REF")
+if BUILT=$(run_teeing_stderr nix build --print-out-paths --no-link -L "$FLAKE_REF"); then
+    BUILD_STATUS=0
+else
+    BUILD_STATUS=$?
+fi
+
+if [ "$BUILD_STATUS" -ne 0 ]; then
+    # A signal may terminate nix before the shell's trap runs. Conventional
+    # shell signal statuses are >=128; all of them skip best-effort upload.
+    if [ "$BUILD_STATUS" -ge 128 ]; then
+        CANCELLED=1
+    fi
+
+    if [ "$CANCELLED" -eq 1 ]; then
+        echo "nix build cancelled (status $BUILD_STATUS); skipping partial cache upload" >&2
+    else
+        echo "nix build failed with status $BUILD_STATUS; uploading valid completed outputs" >&2
+        upload_partial_outputs
+    fi
+    rm -rf "$JOURNAL"
+    exit "$BUILD_STATUS"
+fi
+
+rm -rf "$JOURNAL"
+trap - HUP INT TERM
 echo "built closure: $BUILT"
 
 if [ "$BUILT" != "$SEEKR_CHAIN_NIX_CLOSURE" ]; then
@@ -112,10 +219,6 @@ fi
 # `nix copy --from` decompresses correctly regardless of what we picked at
 # upload time. Only NEW paths are affected — existing paths in the cache
 # stay as they were written (mixed-scheme caches are fine in nix).
-case "$SEEKR_CHAIN_NIX_STORE" in
-  *\?*) COPY_URI="$SEEKR_CHAIN_NIX_STORE&compression=$SEEKR_CHAIN_NIX_COMPRESSION" ;;
-  *)    COPY_URI="$SEEKR_CHAIN_NIX_STORE?compression=$SEEKR_CHAIN_NIX_COMPRESSION" ;;
-esac
 echo "=== nix copy --to $COPY_URI ==="
 run_teeing_stderr nix copy --to "$COPY_URI" "$BUILT"
 echo "pushed $SEEKR_CHAIN_NIX_CLOSURE to $SEEKR_CHAIN_NIX_STORE"
