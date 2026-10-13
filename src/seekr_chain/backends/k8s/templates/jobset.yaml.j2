@@ -188,7 +188,16 @@ spec:
               image: {{ role.image }}
               securityContext:
                 privileged: {{ role.privileged | to_yaml_bool }}
-              # Nix-mode uses the image's /bin/sh (nix-runner provides it).
+                {% if role.nix_volume %}
+                # Nix itself coordinates the shared store as root, then drops
+                # each derivation to a nixbld build user inside the runner.
+                # Pin this rather than inheriting an admission controller's
+                # ambient image-user default; fsGroup cannot replace the
+                # runner's fixed numeric nixbld ownership contract.
+                runAsUser: 0
+                runAsGroup: 0
+                {% endif %}
+              # Nix-mode uses the image's /bin/sh (the nix-runner provides it).
               # Image-mode uses the busybox we just injected at /seekr-chain/bin/sh
               # — so we don't depend on the user's image providing a shell.
               command: ["{% if role.nix_init %}/bin/sh{% else %}/seekr-chain/bin/sh{% endif %}", "-c"]

@@ -35,6 +35,7 @@ _REAL_BINS = [
     "sh",
     "awk",
     "cat",
+    "chmod",
     "cp",
     "date",
     "expr",
@@ -66,6 +67,10 @@ def _make_real_bin_dir(tmp_path: Path, *, real_du: bool) -> Path:
         real = shutil.which(binname)
         if real:
             (bindir / binname).symlink_to(real)
+    # The real init container is root. These focused chain-nix-init tests run
+    # as an unprivileged developer/CI user, so leave numeric ownership to the
+    # root-only runner smoke test and preserve this suite's constrained PATH.
+    _write_exe(bindir / "chown", "#!/bin/sh\nexit 0\n")
     return bindir
 
 
