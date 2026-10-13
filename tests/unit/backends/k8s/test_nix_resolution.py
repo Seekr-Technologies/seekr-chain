@@ -178,6 +178,14 @@ class TestClosureExists:
 # ---------------------------------------------------------------------------
 
 
+class TestBuildScript:
+    def test_applies_parallelism_as_quoted_nix_build_options(self):
+        script = (Path(nr_mod.__file__).parent / "backends" / "k8s" / "resources" / "nix-build.sh").read_text()
+
+        assert '--max-jobs "$SEEKR_CHAIN_NIX_MAX_JOBS"' in script
+        assert '--cores "$SEEKR_CHAIN_NIX_CORES"' in script
+
+
 class TestBuildStepInjection:
     def test_single_missing_closure_injects_one_build_step(
         self,
@@ -227,8 +235,44 @@ class TestBuildStepInjection:
         assert build.env["SEEKR_CHAIN_NIX_SYSTEM"] == "x86_64-linux"
         assert build.env["SEEKR_CHAIN_NIX_ATTR"] == "default"
         assert build.env["SEEKR_CHAIN_NIX_COMPRESSION"] == "zstd"
+        assert build.env["SEEKR_CHAIN_NIX_MAX_JOBS"] == "1"
+        assert build.env["SEEKR_CHAIN_NIX_CORES"] == "0"
         assert build.env["SEEKR_NIX_STORE_BACKEND"] == "s3://test-bucket"
         assert build.env["SEEKR_CHAIN_NIX_WORKSPACE"].startswith("/seekr-chain/nix-workspaces/")
+
+    @pytest.mark.parametrize(("max_jobs", "expected"), [(8, "8"), ("AUTO", "auto"), ("auto", "auto")])
+    def test_build_parallelism_override(
+        self,
+        max_jobs,
+        expected,
+        staged_dir,
+        monkeypatch,
+        _nix_user_config,
+        _no_eval_needed,
+        staging_dir,
+    ):
+        _missing(monkeypatch)
+        c = WorkflowConfig(
+            name="t",
+            code={"path": "/tmp/t"},
+            steps=[
+                {
+                    "name": "a",
+                    "nix": {
+                        "expression": "./",
+                        "build_max_jobs": max_jobs,
+                        "build_cores": 3,
+                    },
+                    "script": "echo",
+                }
+            ],
+        )
+
+        out = resolve_nix_steps(c, staged_code_dir=staged_dir, staging_dir=staging_dir)
+        build = next(s for s in out.steps if s.name.startswith("nix-build-"))
+
+        assert build.env["SEEKR_CHAIN_NIX_MAX_JOBS"] == expected
+        assert build.env["SEEKR_CHAIN_NIX_CORES"] == "3"
 
     def test_compression_override(self, staged_dir, monkeypatch, _no_eval_needed, staging_dir):
         """user_config.nix_compression overrides the default ZSTD."""

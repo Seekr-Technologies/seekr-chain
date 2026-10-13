@@ -10,6 +10,8 @@
 #   SEEKR_CHAIN_NIX_SYSTEM       e.g. x86_64-linux
 #   SEEKR_CHAIN_NIX_ATTR         attribute path within the flake (default: "default")
 #   SEEKR_CHAIN_NIX_COMPRESSION  zstd|xz|none|bzip2|gzip — applied to NARs we upload
+#   SEEKR_CHAIN_NIX_MAX_JOBS    max concurrent derivations (integer or auto)
+#   SEEKR_CHAIN_NIX_CORES       cores exposed to each derivation (0 means all)
 #
 # Plain POSIX sh, deliberately: run_teeing_stderr() below replaces bash's
 # `2> >(tee -a "$LOG" >&2)` process substitution (which plain /bin/sh, i.e.
@@ -92,7 +94,10 @@ echo "=== nix build $FLAKE_REF ==="
 # output when stdout/stderr aren't a TTY — so chain pod logs would show
 # only "building '<drv>'" headers and you'd have no way to tell whether
 # a 10-minute "build" is making progress or stuck.
-BUILT=$(run_teeing_stderr nix build --print-out-paths --no-link -L "$FLAKE_REF")
+BUILT=$(run_teeing_stderr nix build \
+    --max-jobs "$SEEKR_CHAIN_NIX_MAX_JOBS" \
+    --cores "$SEEKR_CHAIN_NIX_CORES" \
+    --print-out-paths --no-link -L "$FLAKE_REF")
 echo "built closure: $BUILT"
 
 if [ "$BUILT" != "$SEEKR_CHAIN_NIX_CLOSURE" ]; then

@@ -73,6 +73,8 @@ _DEFAULT_NIX_COMPRESSION = "zstd"
 #   SEEKR_CHAIN_NIX_SYSTEM      e.g. x86_64-linux
 #   SEEKR_CHAIN_NIX_ATTR        attr inside the flake (default: "default")
 #   SEEKR_CHAIN_NIX_COMPRESSION compression scheme for NAR uploads
+#   SEEKR_CHAIN_NIX_MAX_JOBS   max concurrent derivations (integer or auto)
+#   SEEKR_CHAIN_NIX_CORES      cores exposed to each derivation
 #   SEEKR_NIX_STORE_BACKEND     same URI as SEEKR_CHAIN_NIX_STORE, under
 #                               the name seekr-nix's nix-wrapper.sh shim
 #                               requires to accelerate `nix build` at
@@ -272,6 +274,10 @@ def _make_build_step(
             "SEEKR_CHAIN_NIX_SYSTEM": nix_cfg.system,
             "SEEKR_CHAIN_NIX_ATTR": nix_cfg.attr,
             "SEEKR_CHAIN_NIX_COMPRESSION": compression,
+            # Nix spells the automatic max-jobs value lowercase even though
+            # seekr-chain's public one-of convention uses uppercase.
+            "SEEKR_CHAIN_NIX_MAX_JOBS": str(nix_cfg.build_max_jobs).lower(),
+            "SEEKR_CHAIN_NIX_CORES": str(nix_cfg.build_cores),
             # seekr-nix's nix-wrapper.sh shim only accelerates a `nix
             # build` call when this env var is set (its own generic,
             # runner-image-level convention for "an OCI backend is
