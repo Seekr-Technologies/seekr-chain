@@ -41,10 +41,28 @@ class TestNixConfigSchema:
         assert n.attr == "default"
         assert n.system == "x86_64-linux"
         assert n.build is True
+        assert n.build_max_jobs == 1
+        assert n.build_cores == 0
 
     def test_expression_set_ok(self):
         n = NixConfig(expression="./subdir")
         assert n.expression == "./subdir"
+
+    @pytest.mark.parametrize("value", ["AUTO", "auto", "Auto"])
+    def test_build_max_jobs_auto_is_case_insensitive_and_normalized(self, value):
+        assert NixConfig(build_max_jobs=value).build_max_jobs == "AUTO"
+
+    @pytest.mark.parametrize(
+        ("field", "value"),
+        [
+            ("build_max_jobs", -1),
+            ("build_max_jobs", "invalid"),
+            ("build_cores", -1),
+        ],
+    )
+    def test_invalid_build_parallelism_rejected(self, field, value):
+        with pytest.raises(ValidationError):
+            NixConfig(**{field: value})
 
 
 class TestRoleSpecImageXorNix:

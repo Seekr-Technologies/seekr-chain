@@ -377,6 +377,11 @@ class NixConfig(BaseModel):
         modest (4 CPU / 16 GiB RAM / 0 GPU) — fine for small python closures;
         large native builds (pytorch from source, flash-attn) want much more
         and should set this explicitly.
+    build_max_jobs : Maximum number of derivations Nix may build concurrently.
+        Accepts a non-negative integer or ``"AUTO"`` (case-insensitive).
+        Defaults to Nix's standard value of 1.
+    build_cores : Number of build cores Nix exposes to each derivation. Zero
+        means all available cores. Defaults to Nix's standard value of 0.
     include : Optional list of root-relative glob patterns that define the
         source tree staged for nix eval/build. Unset (the default): nix
         shares ``code``'s filtered tree exactly, no separate copy, no
@@ -401,6 +406,8 @@ class NixConfig(BaseModel):
     store: Optional[str] = None
     build: bool = True
     build_resources: Optional[ResourceConfig] = None
+    build_max_jobs: Union[int, Literal["AUTO"]] = 1
+    build_cores: int = Field(default=0, ge=0)
     include: Optional[list[str]] = None
     exclude: Optional[list[str]] = None
 
@@ -427,6 +434,20 @@ class NixConfig(BaseModel):
     # nodes. None = not queried yet (e.g. unit tests that bypass resolution);
     # [] = queried, no warm nodes known (first-ever pull).
     _warm_nodes: Optional[list[str]] = PrivateAttr(default=None)
+
+    @field_validator("build_max_jobs", mode="before")
+    @classmethod
+    def _normalize_build_max_jobs(cls, value):
+        if isinstance(value, str) and value.upper() == "AUTO":
+            return "AUTO"
+        return value
+
+    @field_validator("build_max_jobs")
+    @classmethod
+    def _validate_build_max_jobs(cls, value):
+        if isinstance(value, int) and value < 0:
+            raise ValueError("build_max_jobs must be non-negative or 'AUTO'")
+        return value
 
 
 class RoleSpecConfig(BaseModel):
