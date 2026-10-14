@@ -57,24 +57,26 @@ export AWS_CONNECT_TIMEOUT=10000
 # for the full rationale.
 sh /seekr-chain/resources/nix-bootstrap.sh
 
+# Centralized runtime configuration for every Nix command in this build pod.
+# Add future build-specific Nix settings HERE rather than mutating nix.conf or
+# adding configuration flags to the `nix build` command below. Keeping the
+# command shape stable lets compatible runner images safely recognize and
+# accelerate it. Existing image/user NIX_CONFIG is preserved first; these
+# pod-owned settings come last and therefore win on duplicate keys.
+#
 # $SEEKR_CHAIN_NIX_STORE is the durable cache; cache.nixos.org backs the
-# nix toolchain's own transitive deps. No local?root= substituter needed:
-# now that /nix is bootstrapped and real (not chroot), a warm path from a
-# previous build/run pod on this node is already valid in nix's own store
-# DB — nix finds it without substituting at all.
-{
-  echo 'experimental-features = nix-command flakes'
-  echo 'sandbox = false'
-  echo 'filter-syscalls = false'
-  echo "substituters = $SEEKR_CHAIN_NIX_STORE https://cache.nixos.org"
-  # $SEEKR_CHAIN_NIX_STORE has no signing key; unlike `nix copy` there's
-  # no per-command --no-check-sigs equivalent for implicit substitution
-  # during `nix build`, so this has to be set globally.
-  echo 'require-sigs = false'
-  # Default 10 lines is too few to debug failed builds. 200 captures most
-  # autoconf/configure failures with their actual error context.
-  echo 'log-lines = 200'
-} >> /etc/nix/nix.conf
+# nix toolchain's own transitive deps. No local?root= substituter is needed:
+# a warm path on this node is already valid in Nix's local store DB.
+NIX_CONFIG="${NIX_CONFIG:+$NIX_CONFIG
+}experimental-features = nix-command flakes
+sandbox = false
+filter-syscalls = false
+substituters = $SEEKR_CHAIN_NIX_STORE https://cache.nixos.org
+require-sigs = false
+log-lines = 200
+max-jobs = $SEEKR_CHAIN_NIX_MAX_JOBS
+cores = $SEEKR_CHAIN_NIX_CORES"
+export NIX_CONFIG
 
 cd "${SEEKR_CHAIN_NIX_WORKSPACE:-/seekr-chain/workspace}"
 
@@ -94,10 +96,7 @@ echo "=== nix build $FLAKE_REF ==="
 # output when stdout/stderr aren't a TTY — so chain pod logs would show
 # only "building '<drv>'" headers and you'd have no way to tell whether
 # a 10-minute "build" is making progress or stuck.
-BUILT=$(run_teeing_stderr nix build \
-    --max-jobs "$SEEKR_CHAIN_NIX_MAX_JOBS" \
-    --cores "$SEEKR_CHAIN_NIX_CORES" \
-    --print-out-paths --no-link -L "$FLAKE_REF")
+BUILT=$(run_teeing_stderr nix build --print-out-paths --no-link -L "$FLAKE_REF")
 echo "built closure: $BUILT"
 
 if [ "$BUILT" != "$SEEKR_CHAIN_NIX_CLOSURE" ]; then
