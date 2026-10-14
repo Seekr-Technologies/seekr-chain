@@ -46,7 +46,6 @@ set -eu
 # the real mounts; unset in production. Same idea as nix-gc.sh's and
 # nix-bootstrap.sh's SEEKR_CHAIN_NIX_ROOT.
 NIX_ROOT="${SEEKR_CHAIN_NIX_ROOT:-/nix}"
-NIX_CONF="${SEEKR_CHAIN_NIX_CONF:-/etc/nix/nix.conf}"
 RESOURCE_DIR="${SEEKR_CHAIN_RESOURCE_DIR:-/seekr-chain/resources}"
 
 # Millisecond clock. `date +%s` is too coarse to attribute phases that
@@ -157,39 +156,25 @@ fi' EXIT
 stage "bootstrap"
 sh "$RESOURCE_DIR/nix-bootstrap.sh"
 
-stage "nix.conf setup"
-{
-  echo 'experimental-features = nix-command flakes'
-  echo 'sandbox = false'
-  echo 'filter-syscalls = false'
-  echo 'download-attempts = 8'
-  # stalled-download-timeout only applies to HTTP/libcurl, not to s3
-  # transport. Set it anyway in case the store URI is changed to http.
-  echo 'stalled-download-timeout = 60'
-  # This role never substitutes from anywhere: the actual closure
-  # transfer goes through `nix copy --from "$SEEKR_CHAIN_NIX_STORE"`
-  # below (an explicit --from, not a substituter), and every other
-  # `nix path-info` call in this script is meant to be a pure local-DB
-  # presence check. Without this, those checks fall through to
-  # whatever substituters the runner image's own nix.conf configures
-  # for its own purposes and pay a real (multi-second, per call) tax
-  # probing each one before concluding "not present" -- same fix
-  # nix-build.sh already applies for its own role by setting its own
-  # substituters list.
-  #
-  # This relies on nix.conf's last-write-wins semantics for repeated
-  # keys: appending `substituters =` here only clears the runner
-  # image's own earlier `substituters = ...` line because nix reads
-  # the LAST occurrence of a key, not the first or a merge of both --
-  # verified empirically (nix 2.34.7): a nix.conf with
-  # `substituters = https://cache.nixos.org` followed later by a bare
-  # `substituters =` resolves via `nix show-config` to an empty
-  # substituters list, not the cache.nixos.org value. If this were
-  # instead first-write-wins or additive, this line would silently do
-  # nothing and every path-info call above would keep paying the
-  # substituter-probe tax this exists to avoid.
-  echo 'substituters ='
-} >> "$NIX_CONF"
+stage "NIX_CONFIG setup"
+# Centralized runtime configuration for every Nix command in this init
+# container. Add future init-specific Nix settings HERE rather than mutating
+# nix.conf or scattering --option flags across commands. Existing image/user
+# NIX_CONFIG is preserved first; these container-owned settings come last and
+# therefore win on duplicate keys.
+#
+# This role never substitutes implicitly: closure transfer uses an explicit
+# `nix copy --from`, while `nix path-info` calls are pure local-DB checks.
+# An empty substituter list prevents those checks from probing the runner
+# image's defaults before concluding that a path is absent.
+NIX_CONFIG="${NIX_CONFIG:+$NIX_CONFIG
+}experimental-features = nix-command flakes
+sandbox = false
+filter-syscalls = false
+download-attempts = 8
+stalled-download-timeout = 60
+substituters ="
+export NIX_CONFIG
 
 # aws-sdk-cpp timeouts. These ARE honored on s3:// substituters (where
 # nix's internal stalled-download-timeout doesn't reach). 10 min per

@@ -1,8 +1,8 @@
 """Behavior tests for chain-nix-init.sh.
 
 Runs the real script via subprocess against a throwaway store root
-(``SEEKR_CHAIN_NIX_ROOT``), nix.conf (``SEEKR_CHAIN_NIX_CONF``) and resource
-dir (``SEEKR_CHAIN_RESOURCE_DIR``), on a curated ``PATH`` with fake ``nix``
+(``SEEKR_CHAIN_NIX_ROOT``) and resource dir
+(``SEEKR_CHAIN_RESOURCE_DIR``), on a curated ``PATH`` with fake ``nix``
 and (where the test needs it) fake ``du`` binaries. Same dependency-injection-
 at-the-process-boundary approach as ``test_nix_gc_sh.py``: every assertion is
 about exit code and stdout/stderr given a filesystem state and env vars.
@@ -118,6 +118,7 @@ def _make_fake_nix(
     _write_exe(
         bindir / "nix",
         "#!/bin/sh\n"
+        '[ -z "$FAKE_NIX_CONFIG_LOG" ] || printf "%s\\n" "$NIX_CONFIG" > "$FAKE_NIX_CONFIG_LOG"\n'
         'case "$1 $2" in\n'
         f'  "path-info --recursive") echo "{CLOSURE}"; exit {path_info_exit};;\n'
         f'  "path-info --closure-size") echo "{CLOSURE}	4096"; exit {path_info_exit};;\n'
@@ -136,17 +137,14 @@ def _run_init(tmp_path: Path, path_dirs: list, extra_env: dict = None):
     baked = tmp_path / "nix-baked"
     (baked / "store").mkdir(parents=True, exist_ok=True)
     (baked / "var").mkdir(exist_ok=True)
-    nix_conf = tmp_path / "nix.conf"
-    nix_conf.touch()
-
     env = {
         "PATH": ":".join(str(p) for p in path_dirs),
         "SEEKR_CHAIN_NIX_ROOT": str(nix_root),
         "SEEKR_CHAIN_NIX_BAKED_ROOT": str(baked),
-        "SEEKR_CHAIN_NIX_CONF": str(nix_conf),
         "SEEKR_CHAIN_RESOURCE_DIR": str(RESOURCES),
         "SEEKR_CHAIN_NIX_STORE": "oci://namespace/bucket/prefix",
         "SEEKR_CHAIN_NIX_CLOSURE": CLOSURE,
+        "FAKE_NIX_CONFIG_LOG": str(tmp_path / "seen-nix-config"),
     }
     env.update(extra_env or {})
     return subprocess.run(
@@ -169,6 +167,29 @@ class TestChainNixInit:
         assert "chain-nix-init summary" in result.stdout
         assert "chain-nix-init phase timing" in result.stdout
 
+    def test_centralizes_runtime_settings_in_nix_config(self, tmp_path):
+        result = _run_init(
+            tmp_path,
+            [_make_fake_nix(tmp_path), _make_real_bin_dir(tmp_path, real_du=True)],
+            {"NIX_CONFIG": "keep-existing = true"},
+        )
+
+        assert result.returncode == 0, result.stderr
+        config = (tmp_path / "seen-nix-config").read_text()
+        assert config.startswith("keep-existing = true\n")
+        for setting in (
+            "experimental-features = nix-command flakes",
+            "sandbox = false",
+            "filter-syscalls = false",
+            "download-attempts = 8",
+            "stalled-download-timeout = 60",
+            "substituters =",
+        ):
+            assert setting in config
+        script = SCRIPT.read_text()
+        assert "Add future init-specific Nix settings HERE" in script
+        assert '>> "$NIX_CONF"' not in script
+
     def test_phase_timing_attributes_every_phase(self, tmp_path):
         """The banner's own Duration covers only the pull, so a container that
         takes 8s to move 2s of data looks unexplained. Every phase has to be
@@ -181,7 +202,7 @@ class TestChainNixInit:
         assert result.returncode == 0, result.stderr
         for phase in (
             "bootstrap",
-            "nix.conf setup",
+            "NIX_CONFIG setup",
             "pre-pull store size (du)",
             "closure pull",
             "summary stats (nix path-info)",
