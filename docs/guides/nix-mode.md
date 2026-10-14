@@ -191,17 +191,26 @@ Nix-mode pods use a minimal "nix-runner" OCI image
   roughly one toolchain's worth of image size; an accepted cost of the
   bootstrap design, not an oversight.
 
-Image config:
+Image and runtime config:
 
-- `experimental-features = nix-command flakes` baked into `/etc/nix/nix.conf`
-- `sandbox = false` baked in (k8s container can't nest sandboxes)
-- `filter-syscalls = false` set at runtime by `chain-nix-init.sh`
-  (must match `sandbox = false`; both are needed for nix to operate in
-  an unprivileged k8s container without tripping the runtime's default
-  seccomp profile, which blocks `seccomp(2)`)
+- The reference image keeps only its static baseline in
+  `/etc/nix/nix.conf`, including `experimental-features = nix-command
+  flakes` and `sandbox = false`.
+- `nix-build.sh` and `chain-nix-init.sh` each assemble one explicit
+  `NIX_CONFIG` block for their pod-specific settings. These blocks preserve
+  an existing `NIX_CONFIG` first and append seekr-chain's managed settings
+  last.
+- Build controls such as `max-jobs` and `cores` are configuration entries,
+  not `nix build` flags. This keeps the build command shape stable for
+  compatible runner wrappers.
+- Runtime settings such as `filter-syscalls = false` remain paired with
+  `sandbox = false`; both are needed in an unprivileged Kubernetes container
+  whose seccomp profile blocks `seccomp(2)`.
 
-Nothing else beyond the preserved toolchain snapshot. Everything your
-job actually needs comes from the closure.
+Future pod-specific Nix settings belong in the centralized `NIX_CONFIG`
+block for the relevant resource script, rather than scattered command flags
+or runtime edits to `/etc/nix/nix.conf`. Everything the job actually needs
+still comes from the closure.
 
 ### The closure-fetch pipeline visualized
 
@@ -497,9 +506,11 @@ steps:
 `build_max_jobs` accepts a non-negative integer or `AUTO`;
 case-insensitive spellings such as `auto` are accepted and normalized.
 `build_cores` is a non-negative integer. A value of zero retains Nix's
-behavior of exposing all available cores to each derivation. These options
-tune Nix within the pod; they do not change the pod's Kubernetes resource
-request, which remains controlled by `build_resources`.
+behavior of exposing all available cores to each derivation. These values are
+applied through the build pod's centralized `NIX_CONFIG`, keeping the
+wrapper-visible `nix build` command stable. They tune Nix within the pod; they
+do not change the pod's Kubernetes resource request, which remains controlled
+by `build_resources`.
 
 Additional build controls that may be exposed as typed settings in the
 future include per-derivation `timeout`, `max-silent-time`,

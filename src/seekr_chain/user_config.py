@@ -86,8 +86,8 @@ class UserConfig:
         nix store type works. Used when a step's ``nix.store`` is not
         explicitly set; per-step overrides win.
     nix_runner_image :
-        OCI image for nix-mode roles. Must contain ``nix`` + ``s5cmd`` with
-        experimental-features + sandbox + filter-syscalls configured (see
+        OCI image for nix-mode roles. Must contain ``nix`` + ``s5cmd`` and
+        honor runtime settings supplied through ``NIX_CONFIG`` (see
         ``docker/Dockerfile.nix-runner`` for the reference build).
     nix_store_volume_kind :
         Volume kind for the in-pod ``/nix`` store. ``"hostPath"`` (default)

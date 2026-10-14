@@ -179,11 +179,17 @@ class TestClosureExists:
 
 
 class TestBuildScript:
-    def test_applies_parallelism_as_quoted_nix_build_options(self):
+    def test_centralizes_runtime_settings_in_nix_config(self):
         script = (Path(nr_mod.__file__).parent / "backends" / "k8s" / "resources" / "nix-build.sh").read_text()
 
-        assert '--max-jobs "$SEEKR_CHAIN_NIX_MAX_JOBS"' in script
-        assert '--cores "$SEEKR_CHAIN_NIX_CORES"' in script
+        assert "Add future build-specific Nix settings HERE" in script
+        assert "max-jobs = $SEEKR_CHAIN_NIX_MAX_JOBS" in script
+        assert "cores = $SEEKR_CHAIN_NIX_CORES" in script
+        assert "substituters = $SEEKR_CHAIN_NIX_STORE https://cache.nixos.org" in script
+        assert ">> /etc/nix/nix.conf" not in script
+        assert '--max-jobs "$SEEKR_CHAIN_NIX_MAX_JOBS"' not in script
+        assert '--cores "$SEEKR_CHAIN_NIX_CORES"' not in script
+        assert "nix build --print-out-paths --no-link -L" in script
 
 
 class TestBuildStepInjection:
