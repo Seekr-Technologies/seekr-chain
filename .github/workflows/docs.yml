@@ -18,6 +18,8 @@ jobs:
           fetch-depth: 0
           fetch-tags: true
       - uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
+        with:
+          version-file: "pyproject.toml"
       - run: uv sync --group docs
       - run: uv run mkdocs build --strict
 
@@ -33,6 +35,8 @@ jobs:
           fetch-depth: 0
           fetch-tags: true
       - uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
+        with:
+          version-file: "pyproject.toml"
       - run: uv sync --group docs
       - name: Configure git identity
         run: |

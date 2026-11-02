@@ -28,8 +28,9 @@ jobs:
 
       - name: Build and smoke test native runner image
         run: |
-          docker build --file docker/Dockerfile.nix-runner --tag seekr-chain-nix-runner:smoke docker
+          docker build --no-cache --pull --file docker/Dockerfile.nix-runner --tag seekr-chain-nix-runner:smoke docker
           sh docker/test-nix-runner.sh seekr-chain-nix-runner:smoke
+          sh docker/test-certificates.sh seekr-chain-nix-runner:smoke nix-runner
 
       - name: Log in to GHCR
         uses: docker/login-action@650006c6eb7dba73a995cc03b0b2d7f5ca915bee # v4.2.0
@@ -53,6 +54,8 @@ jobs:
           context: docker
           file: docker/Dockerfile.nix-runner
           platforms: linux/amd64,linux/arm64
+          no-cache: true
+          pull: true
           push: true
           tags: |
             ghcr.io/seekr-technologies/seekr-chain-nix-runner:${{ steps.version.outputs.tag }}

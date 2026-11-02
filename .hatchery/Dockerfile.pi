@@ -1,0 +1,106 @@
+# Hatchery Sandbox
+# Minimal image for running an AI coding agent in an isolated environment.
+# Uncomment the sections below to add tools your project needs.
+FROM debian:trixie-slim@sha256:62bd423aeee912639ca8ee681c2b762cb3e25137e0a92b20be455898a9f034ad
+
+# ── System packages ───────────────────────────────────────────────────────────
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    git \
+    curl \
+    ca-certificates \
+    jq \
+    make \
+    unzip \
+    zip \
+    python3 \
+    && rm -rf /var/lib/apt/lists/*
+
+# ── Non-root user ─────────────────────────────────────────────────────────────
+RUN useradd -m -s /bin/bash hatchery
+USER hatchery
+ENV HOME=/home/hatchery
+ENV PATH="/home/hatchery/.npm-global/bin:/home/hatchery/.local/bin:$PATH"
+
+# ── Agent install ─────────────────────────────────────────────────────────────
+# ── pi coding agent ─────────────────────────────────────────────────────────
+USER root
+# ripgrep (rg) + fd (fdfind) are pi's search tools; installing them on PATH
+# stops pi from downloading its own copies into ~/.pi/agent/bin at first run
+# (that dir is a fresh per-task volume, so it would re-download every task).
+# pi accepts either "fd" or "fdfind" on PATH (tools-manager.ts systemBinaryNames).
+# eMudhra mitigation: Debian trixie's nodejs is still Node 20; use patched Node 22.23.4.
+# Return to apt-get install nodejs npm once trixie ships Node >=22.23.4.
+COPY --from=node:22.23.4-bookworm-slim@sha256:de170b39439eb0e5a3444ad7d60b015614a381e10fecae2e30ec9e735122f38d /usr/local/ /usr/local/
+RUN apt-get update && apt-get install -y --no-install-recommends ripgrep fd-find \
+    && rm -rf /var/lib/apt/lists/*
+USER hatchery
+RUN npm config set prefix '/home/hatchery/.npm-global' \
+    && npm install -g --ignore-scripts @earendil-works/pi-coding-agent@1.4.0
+
+# =============================================================================
+# Optional extras — uncomment what you need
+# =============================================================================
+
+# ── Python / uv ───────────────────────────────────────────────────────────────
+COPY --from=ghcr.io/astral-sh/uv:0.13.5@sha256:32a7bb39b496babbd997b0a39a4d66c126bdaf5661b302bf6f06abda8deca6ff /uv /uvx /bin/
+ENV UV_PROJECT_ENVIRONMENT=/home/hatchery/.venv
+
+# ── Go ────────────────────────────────────────────────────────────────────────
+# COPY --from=golang:1.24 /usr/local/go /usr/local/go
+# ENV PATH="/usr/local/go/bin:$PATH"
+
+# ── Rust / cargo ──────────────────────────────────────────────────────────────
+# COPY --from=rust:1.86-slim /usr/local/cargo /usr/local/cargo
+# COPY --from=rust:1.86-slim /usr/local/rustup /usr/local/rustup
+# ENV RUSTUP_HOME=/usr/local/rustup
+# ENV PATH="/usr/local/cargo/bin:$PATH"
+
+# ── Extra apt packages ────────────────────────────────────────────────────────
+# USER root
+# RUN apt-get update && apt-get install -y --no-install-recommends \
+#     build-essential \
+#     postgresql-client \
+#     && rm -rf /var/lib/apt/lists/*
+# USER hatchery
+
+# ── kubectl ───────────────────────────────────────────────────────────────────
+USER root
+RUN ARCH=$(dpkg --print-architecture) \
+    && curl -fsSL "https://dl.k8s.io/release/v1.32.3/bin/linux/${ARCH}/kubectl" -o /usr/local/bin/kubectl \
+    && chmod +x /usr/local/bin/kubectl
+USER hatchery
+
+# ── nix (single-user mode) ────────────────────────────────────────────────────
+USER root
+RUN apt-get update && apt-get install -y --no-install-recommends xz-utils \
+    && rm -rf /var/lib/apt/lists/* \
+    && mkdir -m 0755 /nix && chown hatchery:hatchery /nix
+USER hatchery
+ENV USER=hatchery
+RUN curl -fsSL https://nixos.org/nix/install -o /tmp/nix-install.sh \
+    && sh /tmp/nix-install.sh --no-daemon --no-channel-add \
+    && rm /tmp/nix-install.sh \
+    && mkdir -p /home/hatchery/.config/nix \
+    && echo 'experimental-features = nix-command flakes' >> /home/hatchery/.config/nix/nix.conf
+ENV PATH="/home/hatchery/.nix-profile/bin:$PATH"
+
+# ── Podman-in-Podman (DinD) ──────────────────────────────────────────────────
+# Uncomment this section AND set `dind: true` in .hatchery/docker.yaml.
+# USER root
+# RUN apt-get update && apt-get install -y --no-install-recommends \
+#     podman podman-docker sudo fuse-overlayfs uidmap \
+#     && rm -rf /var/lib/apt/lists/*
+# RUN printf 'hatchery:1001:64535\n' > /etc/subuid \
+#     && printf 'hatchery:1001:64535\n' > /etc/subgid
+# RUN mkdir -p /root/.config/containers \
+#     && printf '[storage]\ndriver = "overlay"\n\n[storage.options.overlay]\nmount_program = "/usr/bin/fuse-overlayfs"\n' \
+#         > /root/.config/containers/storage.conf \
+#     && printf '[containers]\nnetns = "host"\ncgroups = "disabled"\ndefault_sysctls = []\n[engine]\ncgroup_manager = "cgroupfs"\nevents_logger = "file"\n' \
+#         > /root/.config/containers/containers.conf
+# RUN echo 'hatchery ALL=(root) NOPASSWD: /usr/bin/podman' \
+#         > /etc/sudoers.d/hatchery-podman \
+#     && chmod 440 /etc/sudoers.d/hatchery-podman
+# RUN printf '#!/bin/sh\nexec sudo -n /usr/bin/podman "$@"\n' \
+#         > /usr/local/bin/podman \
+#     && chmod +x /usr/local/bin/podman
+# USER hatchery

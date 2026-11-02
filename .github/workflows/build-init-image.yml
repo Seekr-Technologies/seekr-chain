@@ -26,6 +26,11 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@d7f5e7f509e45cec5c76c4d5afdd7de93d0b3df5 # v4.1.0
 
+      - name: Check certificates in final image
+        run: |
+          docker build --no-cache --pull --file docker/Dockerfile.init --tag seekr-chain-init:certificates docker
+          sh docker/test-certificates.sh seekr-chain-init:certificates init
+
       - name: Log in to GHCR
         uses: docker/login-action@650006c6eb7dba73a995cc03b0b2d7f5ca915bee # v4.2.0
         with:
@@ -48,6 +53,8 @@ jobs:
           context: docker
           file: docker/Dockerfile.init
           platforms: linux/amd64,linux/arm64
+          no-cache: true
+          pull: true
           push: true
           tags: |
             ghcr.io/seekr-technologies/seekr-chain-init:${{ steps.version.outputs.tag }}

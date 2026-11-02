@@ -23,7 +23,7 @@ from seekr_chain.utils import format_bytes, human_to_int, resolve_image
 
 logger = logging.getLogger(__name__)
 
-_DEFAULT_INIT_IMAGE = "ghcr.io/seekr-technologies/seekr-chain-init:1.0.0@sha256:f1fc456cffae92eab86c18814f3668c766ab12b69231308083ff128a8d4d0a9c"
+_DEFAULT_INIT_IMAGE = "ghcr.io/seekr-technologies/seekr-chain-init:1.0.1@sha256:2cc7f2d50ad40296cb5cb66aaf13fa00aad8fdab2f1edf92baeafcc6f6a9efe3"
 _INIT_IMAGE = _user_config.init_image or _DEFAULT_INIT_IMAGE
 
 
@@ -155,17 +155,12 @@ def _resolve_nix_role(role_config, code_path: str | None = None) -> dict:
         "main_env": [
             {"name": "SEEKR_CHAIN_NIX_STORE", "value": store_uri},
             {"name": "SEEKR_CHAIN_NIX_CLOSURE", "value": closure},
-            # Point common TLS clients at the closure's CA bundle. nss-cacert
-            # is a transitive dep of anything that does HTTPS (Python requests,
-            # urllib, pip, curl, wget, ...), so this path exists in essentially
-            # any non-trivial closure. We set three env vars to cover the
-            # mainstream lookup paths:
-            #   SSL_CERT_FILE        — Python's stdlib `ssl` module
-            #   REQUESTS_CA_BUNDLE   — requests' Session.merge_environment_settings
-            #   NIX_SSL_CERT_FILE    — nixpkgs-patched curl / openssl / nss
-            # Users with closures missing cacert can override via their step's env:.
+            # Use the runner image's checked CA bundle, not a potentially stale
+            # nss-cacert in a cached/shared closure. Explicit workflow/role env
+            # overrides are preserved when these defaults are merged below.
+            # Covers stdlib ssl, requests, and nixpkgs-patched TLS clients.
             *[
-                {"name": k, "value": f"{closure}/etc/ssl/certs/ca-bundle.crt"}
+                {"name": k, "value": "/etc/ssl/certs/ca-certificates.crt"}
                 for k in ("SSL_CERT_FILE", "REQUESTS_CA_BUNDLE", "NIX_SSL_CERT_FILE")
             ],
         ],
@@ -592,10 +587,15 @@ def _build_role_context(
         step_name=step_name,
     )
 
-    # Nix-mode env additions appended after the standard env so they don't
-    # override (and so they're visible to chain-entrypoint via env inheritance).
+    # TLS entries are defaults; explicit workflow/role/secret env wins. Keep
+    # computed store/closure identity authoritative, as before, but do not emit
+    # duplicate names (Kubernetes otherwise silently uses the last one).
     if nix_main_env:
-        raw_env = raw_env + nix_main_env
+        tls_names = {"SSL_CERT_FILE", "REQUESTS_CA_BUNDLE", "NIX_SSL_CERT_FILE"}
+        explicit_tls = {entry["name"] for entry in raw_env} & tls_names
+        additions = [entry for entry in nix_main_env if entry["name"] not in explicit_tls]
+        replaced_names = {entry["name"] for entry in additions}
+        raw_env = [entry for entry in raw_env if entry["name"] not in replaced_names] + additions
 
     # Closure-hash label + closure-hash podAffinity term. Applies to both
     # nix-mode user steps (which CONSUME the closure) and auto-injected

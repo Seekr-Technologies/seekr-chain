@@ -179,13 +179,10 @@ class TestResolveNixRole:
             assert env_dict["SEEKR_CHAIN_NIX_STORE"] == "s3://bucket"
             assert env_dict["SEEKR_CHAIN_NIX_CLOSURE"] == "/nix/store/jppn-foo"
 
-        # main_env additionally points TLS clients at the closure's cacert so
-        # nixpkgs-patched Python requests / urllib / pip don't blow up looking
-        # for /nix/var/nix/profiles/default/etc/ssl/certs/ca-bundle.crt (a
-        # path that only exists when nss-cacert is in the active default
-        # profile, which we never set up in the sterile closure-only volume).
+        # TLS clients must use the image's checked bundle, not stale roots in
+        # a closure that may have been cached before the security update.
         main_env_dict = {e["name"]: e["value"] for e in result["main_env"]}
-        expected_cert = "/nix/store/jppn-foo/etc/ssl/certs/ca-bundle.crt"
+        expected_cert = "/etc/ssl/certs/ca-certificates.crt"
         assert main_env_dict["SSL_CERT_FILE"] == expected_cert
         assert main_env_dict["REQUESTS_CA_BUNDLE"] == expected_cert
         assert main_env_dict["NIX_SSL_CERT_FILE"] == expected_cert
@@ -388,6 +385,8 @@ def _render_nix_jobset(
     closure="/nix/store/abc12345def-train",
     store="s3://bucket",
     user_config_overrides=None,
+    workflow_env=None,
+    step_env=None,
 ):
     """Render a nix-mode JobSet manifest to dict and return (manifest, role_pod_template).
 
@@ -411,11 +410,13 @@ def _render_nix_jobset(
 
     cfg = WorkflowConfig(
         name="test-job",
+        env=workflow_env,
         steps=[
             {
                 "name": "train",
                 "nix": {"expression": "./", "store": store, "build": False},
                 "script": "echo hi",
+                "env": step_env,
                 "resources": {
                     "cpus_per_node": "4",
                     "mem_per_node": "8Gi",
@@ -441,6 +442,40 @@ def _render_nix_jobset(
 
 
 class TestNixRendering:
+    def test_main_tls_defaults_use_checked_image_bundle(self, tmp_path, monkeypatch):
+        _manifest, pod = _render_nix_jobset(tmp_path=tmp_path, monkeypatch=monkeypatch)
+        main = next(c for c in pod["spec"]["containers"] if c["name"] == "main")
+        env = main["env"]
+        for name in ("SSL_CERT_FILE", "REQUESTS_CA_BUNDLE", "NIX_SSL_CERT_FILE"):
+            entries = [e for e in env if e["name"] == name]
+            assert entries == [{"name": name, "value": "/etc/ssl/certs/ca-certificates.crt"}]
+
+    @pytest.mark.parametrize("name", ["SSL_CERT_FILE", "REQUESTS_CA_BUNDLE", "NIX_SSL_CERT_FILE"])
+    @pytest.mark.parametrize("scope", ["workflow", "step", "both"])
+    def test_main_tls_explicit_overrides_have_no_duplicate_names(self, tmp_path, monkeypatch, name, scope):
+        workflow_env = {name: "/workflow-ca.pem"} if scope in ("workflow", "both") else None
+        step_env = {name: "/step-ca.pem"} if scope in ("step", "both") else None
+        _manifest, pod = _render_nix_jobset(
+            tmp_path=tmp_path, monkeypatch=monkeypatch, workflow_env=workflow_env, step_env=step_env
+        )
+        main = next(c for c in pod["spec"]["containers"] if c["name"] == "main")
+        entries = [e for e in main["env"] if e["name"] == name]
+        expected = "/workflow-ca.pem" if scope == "workflow" else "/step-ca.pem"
+        assert entries == [{"name": name, "value": expected}]
+
+    def test_main_keeps_resolved_closure_identity_authoritative(self, tmp_path, monkeypatch):
+        _manifest, pod = _render_nix_jobset(
+            tmp_path=tmp_path,
+            monkeypatch=monkeypatch,
+            step_env={"SEEKR_CHAIN_NIX_CLOSURE": "/wrong-closure", "SEEKR_CHAIN_NIX_STORE": "s3://wrong"},
+        )
+        main = next(c for c in pod["spec"]["containers"] if c["name"] == "main")
+        for name, value in {
+            "SEEKR_CHAIN_NIX_CLOSURE": "/nix/store/abc12345def-train",
+            "SEEKR_CHAIN_NIX_STORE": "s3://bucket",
+        }.items():
+            assert [e for e in main["env"] if e["name"] == name] == [{"name": name, "value": value}]
+
     def test_chain_nix_init_container_present(self, tmp_path, monkeypatch):
         _manifest, pod = _render_nix_jobset(tmp_path=tmp_path, monkeypatch=monkeypatch)
         init_names = [c["name"] for c in pod["spec"]["initContainers"]]
