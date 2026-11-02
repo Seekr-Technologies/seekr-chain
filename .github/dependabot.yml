@@ -2,7 +2,11 @@ version: 2
 
 updates:
   - package-ecosystem: "uv"
-    directory: "/"
+    # The root uv updater also discovers direct-child /docker requirements.
+    # Include the deeper dev toolbox explicitly without a duplicate /docker job.
+    directories:
+      - "/"
+      - "/dev/docker"
     schedule:
       interval: "weekly"
     commit-message:

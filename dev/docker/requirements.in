@@ -1,0 +1,3 @@
+# Keep the system bundle aligned with docker/certificate-requirements.txt.
+certifi==2026.10.23
+oci-cli

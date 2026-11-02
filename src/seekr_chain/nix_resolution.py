@@ -55,7 +55,7 @@ logger = logging.getLogger(__name__)
 #
 # K8s caches non-:latest tags per-node forever, and the workflow refuses to
 # overwrite an existing tag.
-_DEFAULT_NIX_RUNNER_IMAGE = "ghcr.io/seekr-technologies/seekr-chain-nix-runner:0.3.1@sha256:286142fa0c34ed67342cb92f40ada09cc52ad2aedd9a1588159872225b440b56"
+_DEFAULT_NIX_RUNNER_IMAGE = "ghcr.io/seekr-technologies/seekr-chain-nix-runner:0.3.2@sha256:45ecc5e79ff34b8a196639bf2677ac20d6494c04c513086c63a2090340b0e946"
 _NIX_RUNNER_IMAGE = _user_config.nix_runner_image or _DEFAULT_NIX_RUNNER_IMAGE
 
 # Default when user_config.nix_compression isn't set. zstd: fast,

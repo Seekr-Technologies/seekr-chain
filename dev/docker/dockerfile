@@ -1,4 +1,4 @@
-FROM python:3.12-slim
+FROM python:3.12.16-slim@sha256:8523d6abeb48ceae0b7240d30c5808fc26cb79c1a635bacdf19cf3baecfbec07
 
 # Install system deps
 RUN apt-get update && apt-get install -y \
@@ -8,9 +8,16 @@ RUN apt-get update && apt-get install -y \
     gnupg \
     && rm -rf /var/lib/apt/lists/*
 
-# Install uv
-RUN curl -LsSf https://astral.sh/uv/install.sh | sh
-ENV PATH="/root/.local/bin:$PATH"
+# Hash-verified security bootstrap (build with the repository root as context).
+COPY docker/certificate-requirements.txt /tmp/certificate-requirements.txt
+COPY docker/build_gates /tmp/build_gates
+RUN python -m pip install --no-cache-dir --only-binary=:all: --require-hashes -r /tmp/certificate-requirements.txt \
+    && rm -rf /etc/ssl/certs && mkdir -p /etc/ssl/certs \
+    && python -c "import certifi, shutil; shutil.copyfile(certifi.where(), '/etc/ssl/certs/ca-certificates.crt')"
+# Copy the patched uv binaries from the official, immutable multi-platform image.
+COPY --from=ghcr.io/astral-sh/uv:0.13.5@sha256:32a7bb39b496babbd997b0a39a4d66c126bdaf5661b302bf6f06abda8deca6ff /uv /uvx /usr/local/bin/
+RUN python /tmp/build_gates/gate_certificates.py \
+    && sh /tmp/build_gates/gate_system_bundle.sh
 
 # Install kubectl (latest stable)
 RUN curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl" \
@@ -24,4 +31,8 @@ RUN curl -sLO "https://github.com/argoproj/argo-workflows/releases/download/v3.5
     && chmod +x "argo-linux-amd64" \
     && mv "./argo-linux-amd64" /usr/local/bin/argo
 
-RUN pip install oci-cli
+COPY dev/docker/requirements.txt /tmp/dev-requirements.txt
+RUN python -m pip install --no-cache-dir --only-binary=:all: --require-hashes -r /tmp/dev-requirements.txt
+
+RUN python /tmp/build_gates/gate_certificates.py \
+    && sh /tmp/build_gates/gate_system_bundle.sh

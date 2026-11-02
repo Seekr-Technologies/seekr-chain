@@ -28,7 +28,7 @@ from seekr_chain.user_config import config as _user_config
 
 logger = logging.getLogger(__name__)
 
-_DEFAULT_CONTROLLER_IMAGE = "ghcr.io/seekr-technologies/seekr-chain-controller:1.1.0@sha256:de8163cc3652deea9a194fd09bf0d2c167ff1cbe4b51bb424c419adda7b8e97b"
+_DEFAULT_CONTROLLER_IMAGE = "ghcr.io/seekr-technologies/seekr-chain-controller:1.1.1@sha256:bd0217f98bdd035fcf6806a3888bf46fa79386fe531becd809e61cb8111b6dae"
 _CONTROLLER_IMAGE = _user_config.controller_image or _DEFAULT_CONTROLLER_IMAGE
 
 # S3 credential env keys always injected into main + controller containers,

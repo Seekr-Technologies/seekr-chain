@@ -18,6 +18,8 @@ jobs:
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       - uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
+        with:
+          version-file: "pyproject.toml"
       - run: uv sync
       - run: uv run inv format --check
 
@@ -31,6 +33,8 @@ jobs:
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       - uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
+        with:
+          version-file: "pyproject.toml"
       - name: Install dependencies
         run: uv sync
       - name: Run unit tests
@@ -63,6 +67,8 @@ jobs:
       - uses: DeterminateSystems/nix-installer-action@ef8a148080ab6020fd15196c2084a2eea5ff2d25 # v22
 
       - uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
+        with:
+          version-file: "pyproject.toml"
 
       - name: Install dependencies
         run: uv sync
@@ -78,3 +84,17 @@ jobs:
           export RUN_TESTS="uv run pytest tests/integration -v -n 4 --durations=10 -s"
           $RUN_TESTS || true
           $RUN_TESTS --last-failed --last-failed-no-failures=none || [ $? -eq 5 ]
+
+  test-image-certificates:
+    name: certificates (${{ matrix.image }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        image: [controller, init, nix-runner]
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - name: Build without stale certificate layers
+        run: docker build --no-cache --pull --file docker/Dockerfile.${{ matrix.image }} --tag certificate-test docker
+      - name: Check final image trust stores
+        run: sh docker/test-certificates.sh certificate-test ${{ matrix.image }}

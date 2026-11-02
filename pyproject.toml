@@ -22,6 +22,8 @@ keywords = ["kubernetes", "argo-workflows", "distributed-training", "job-launche
 dependencies = [
     "boto3>=1.38.23",
     "click>=8.2.1",
+    # eMudhra/emSign compromised CA mitigation (GHSA-6q48-6c7w-9gw2).
+    "certifi>=2026.10.19",
     "jinja2>=3.1.0",
     "kubernetes>=32.0.1",
     "loggerado>=0.3.0",
@@ -62,6 +64,7 @@ build-backend = "hatchling.build"
 packages = ["src/seekr_chain"]
 
 [tool.uv]
+required-version = ">=0.13.4"
 cache-keys = [
   { file = "pyproject.toml" },
   { git = { commit = true, tags = true } }, # This ensures dynamic version stays in sync

@@ -71,6 +71,13 @@ Seekr-chain requires Kubernetes API access to:
 
 Ensure appropriate RBAC policies are in place.
 
+## eMudhra/emSign Certificate Incident
+
+Application and image mitigation, certificate build gates, and the required
+publication/redeployment steps are documented in [docker/README.md](docker/README.md).
+Updating certifi alone does not update pip/uv private trust stores, existing
+container images, or custom Nix closures.
+
 ## Additional Resources
 
 - [Contributing Guidelines](docs/developer/contributing.md)

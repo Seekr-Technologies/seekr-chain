@@ -1,3 +1,13 @@
+# Shared, hash-verified trust source for Python and non-Python TLS clients.
+FROM python:3.12.16-slim@sha256:8523d6abeb48ceae0b7240d30c5808fc26cb79c1a635bacdf19cf3baecfbec07 AS certificates
+COPY certificate-requirements.txt /tmp/certificate-requirements.txt
+RUN python -m pip install --no-cache-dir --only-binary=:all: --require-hashes -r /tmp/certificate-requirements.txt \
+    && rm -rf /etc/ssl/certs && mkdir -p /etc/ssl/certs \
+    && python -c "import certifi, shutil; shutil.copyfile(certifi.where(), '/etc/ssl/certs/ca-certificates.crt')"
+COPY build_gates /tmp/build_gates
+RUN python /tmp/build_gates/gate_certificates.py \
+    && sh /tmp/build_gates/gate_system_bundle.sh
+
 # Bootstrap image for the seekr-chain nix mode.
 #
 # Smallest image that can `nix copy` and then exec. The actual runtime environment
@@ -13,6 +23,7 @@ RUN { \
         echo 'experimental-features = nix-command flakes'; \
         echo 'sandbox = false'; \
         echo 'build-users-group = nixbld'; \
+        echo 'ssl-cert-file = /etc/ssl/certs/ca-certificates.crt'; \
     } >> /etc/nix/nix.conf
 
 # The final image is busybox-based, not nix-src-based — it never has a
@@ -32,7 +43,7 @@ FROM busybox:1.36-musl@sha256:3c6ae8008e2c2eedd141725c30b20d9c36b026eb796688f882
 RUN for tool in \
         sh head awk cat tee touch sleep time mkfifo \
         ps ls find grep sed kill df du wc tail less more env which \
-        chmod chown cp date id mkdir rmdir stat; \
+        chmod chown cp date id mkdir rmdir stat sha256sum; \
     do \
         ln -sf /bin/busybox /bin/$tool; \
     done
@@ -100,3 +111,13 @@ RUN ln -sf /root/.nix-profile/bin/bash /bin/bash
 
 # add bin to path
 ENV PATH=/bin:/root/.nix-profile/bin:/nix/var/nix/profiles/default/bin:/nix/var/nix/profiles/default/sbin
+
+# Outside the immutable/shared Nix store: warm stores must not select old roots.
+RUN /bin/busybox rm -rf /etc/ssl/certs && /bin/busybox mkdir -p /etc/ssl/certs
+COPY --from=certificates /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
+ENV NIX_SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt \
+    SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt \
+    SSL_CERT_DIR=/etc/ssl/certs \
+    CURL_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt
+RUN --mount=type=bind,source=build_gates,target=/tmp/certificate-gates,readonly \
+    sh /tmp/certificate-gates/gate_system_bundle.sh

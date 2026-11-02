@@ -1,12 +1,28 @@
-FROM alpine:3.22.0@sha256:8a1f59ffb675680d47db6337b49d22281a139e9d709335b492be023728e11715 AS s5cmd-download
+# Shared, hash-verified trust source for Python and non-Python TLS clients.
+FROM python:3.12.16-slim@sha256:8523d6abeb48ceae0b7240d30c5808fc26cb79c1a635bacdf19cf3baecfbec07 AS certificates
+COPY certificate-requirements.txt /tmp/certificate-requirements.txt
+RUN python -m pip install --no-cache-dir --only-binary=:all: --require-hashes -r /tmp/certificate-requirements.txt \
+    && rm -rf /etc/ssl/certs && mkdir -p /etc/ssl/certs \
+    && python -c "import certifi, shutil; shutil.copyfile(certifi.where(), '/etc/ssl/certs/ca-certificates.crt')"
+COPY build_gates /tmp/build_gates
+RUN python /tmp/build_gates/gate_certificates.py \
+    && sh /tmp/build_gates/gate_system_bundle.sh
+
+FROM alpine:3.22@sha256:2e0b81d60597f449baa56dc25d355367869d2dca4cd57e866f1e2b52af3eb55f AS s5cmd-download
 ARG TARGETARCH
 ARG S5CMD_VERSION=2.2.2
-RUN apk add --no-cache curl ca-certificates \
-    && ARCH="$([ "$TARGETARCH" = "amd64" ] && echo "64bit" || echo "arm64")" \
+RUN apk add --no-cache curl \
+    && rm -rf /etc/ssl/certs && mkdir -p /etc/ssl/certs
+COPY --from=certificates /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
+RUN ARCH="$([ "$TARGETARCH" = "amd64" ] && echo "64bit" || echo "arm64")" \
     && curl -fsSL "https://github.com/peak/s5cmd/releases/download/v${S5CMD_VERSION}/s5cmd_${S5CMD_VERSION}_Linux-${ARCH}.tar.gz" \
          | tar -xz s5cmd
 
-FROM busybox:1.37-uclibc@sha256:e3a499df044f0129fd2e82a63177e7affe66ba6fd73acc9e231fd7695f06e5e2
+FROM busybox:1.37-uclibc@sha256:31b72538c3019a20336b04c4cebcd47c36511d0b45aa76666804c2845055bbd3
+RUN /bin/busybox rm -rf /etc/ssl/certs && /bin/busybox mkdir -p /etc/ssl/certs
 COPY --from=s5cmd-download /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
 COPY --from=s5cmd-download /s5cmd /bin/s5cmd
 CMD ["/bin/sh"]
+
+RUN --mount=type=bind,source=build_gates,target=/tmp/certificate-gates,readonly \
+    sh /tmp/certificate-gates/gate_system_bundle.sh
