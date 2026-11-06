@@ -47,7 +47,10 @@ def main():
     type=click.Choice([b.value.lower() for b in Backend], case_sensitive=False),
     help="Execution backend (default: k8s)",
 )
-def submit(config, follow, interactive, namespace, backend):
+@click.option(
+    "--nix-closure-cache", type=click.Path(dir_okay=False), default=None, help="Additive Nix closure-path cache file"
+)
+def submit(config, follow, interactive, namespace, backend, nix_closure_cache):
     """
     Submit a job
     """
@@ -65,7 +68,8 @@ def submit(config, follow, interactive, namespace, backend):
     if namespace:
         config.namespace = namespace
 
-    job = seekr_chain.launch_workflow(config, interactive=interactive, backend=backend)
+    kwargs = {} if nix_closure_cache is None else {"nix_closure_cache": nix_closure_cache}
+    job = seekr_chain.launch_workflow(config, interactive=interactive, backend=backend, **kwargs)
 
     if follow and not interactive:
         from seekr_chain.backends.k8s.watched_state import WatchStalledError

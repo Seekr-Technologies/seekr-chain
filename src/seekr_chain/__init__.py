@@ -29,9 +29,19 @@ configure_root_logger()
 
 
 def launch_workflow(
-    config, *, backend: Backend | str = Backend.K8S, interactive: bool = False, attach: bool = True, args=None
+    config,
+    *,
+    backend: Backend | str = Backend.K8S,
+    interactive: bool = False,
+    attach: bool = True,
+    args=None,
+    nix_closure_cache: str | None = None,
 ) -> Workflow:
-    """Launch a workflow on the specified backend. Default is K8S."""
+    """Launch a workflow on the specified backend. Default is K8S.
+
+    ``nix_closure_cache`` overrides the configured additive closure-path cache
+    for K8s submission. Relative paths resolve against the working directory.
+    """
     try:
         backend = Backend(backend.upper() if isinstance(backend, str) else backend)
     except ValueError:
@@ -45,7 +55,8 @@ def launch_workflow(
         )
         backend = Backend.K8S
     if backend == Backend.K8S:
-        return launch_k8s_workflow(config, interactive=interactive, attach=attach, args=args)
+        kwargs = {} if nix_closure_cache is None else {"nix_closure_cache": nix_closure_cache}
+        return launch_k8s_workflow(config, interactive=interactive, attach=attach, args=args, **kwargs)
     if backend == Backend.LOCAL:
         return launch_local_workflow(config, interactive=interactive, attach=attach, args=args)
     raise ValueError(f"Unknown backend: {backend!r}. Available: {list(Backend)}")

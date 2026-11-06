@@ -71,6 +71,7 @@ seekr-chain labels are reserved.
 
 | Setting | Env var | TOML key | Description |
 |---------|---------|----------|-------------|
+| Nix closure-path cache | `SEEKRCHAIN_NIX_CLOSURE_CACHE` | `nix_closure_cache` | Optional additive JSON cache for [checked-in closure paths](../guides/nix-mode.md#check-in-closure-paths-for-ci). TOML paths resolve relative to the declaring TOML file; env paths resolve against CWD. Explicit CLI/Python arguments override this setting. |
 | Datastore root | `SEEKRCHAIN_DATASTORE_ROOT` | `datastore_root` | S3 path where job data is stored, e.g. `s3://my-bucket/seekr-chain/` |
 | Controller ServiceAccount | `SEEKRCHAIN_SERVICE_ACCOUNT` | `service_account` | ServiceAccount for the controller pod; defaults to automatic detection. |
 | Step ServiceAccount | `SEEKRCHAIN_STEP_SERVICE_ACCOUNT` | `step_service_account` | Optional ServiceAccount for step pods; when unset, Kubernetes uses the namespace default. |

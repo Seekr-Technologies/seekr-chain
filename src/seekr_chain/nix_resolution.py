@@ -371,7 +371,9 @@ def _collect_nix_roles_by_step(config: WorkflowConfig) -> list[tuple]:
     return nix_roles_by_step
 
 
-def resolve_nix_steps(config: WorkflowConfig, staged_code_dir: str, staging_dir: str | Path) -> WorkflowConfig:
+def resolve_nix_steps(
+    config: WorkflowConfig, staged_code_dir: str, staging_dir: str | Path, nix_closure_cache: str | None = None
+) -> WorkflowConfig:
     """Walk a WorkflowConfig and augment it with build steps for missing closures.
 
     See module docstring. Mutates and returns ``config``.
@@ -404,6 +406,7 @@ def resolve_nix_steps(config: WorkflowConfig, staged_code_dir: str, staging_dir:
         str(staged_code_dir),
         staging_dir,
         config.namespace or "argo",
+        nix_closure_cache or _user_config.nix_closure_cache,
     )
     if not needed_builds:
         return config
@@ -419,6 +422,7 @@ def _collect_needed_builds(
     staged_root: str,
     staging_dir: str | Path,
     namespace: str,
+    nix_closure_cache: str | None = None,
 ) -> tuple[dict[int, tuple[str, str]], dict[tuple[str, str], NixConfig]]:
     """Walk the nix-mode roles, eval each closure, and return:
 
@@ -474,6 +478,7 @@ def _collect_needed_builds(
                 expression=role.nix.expression,
                 attr=role.nix.attr,
                 system=role.nix.system,
+                nix_closure_cache=nix_closure_cache,
                 source_include=include,
                 source_exclude=exclude,
                 store_uri=store_uri,
@@ -577,10 +582,14 @@ def _inject_build_steps(
     return config
 
 
-def process_nix(config: WorkflowConfig, *, staged_code_dir: str, staging_dir: Path) -> WorkflowConfig:
+def process_nix(
+    config: WorkflowConfig, *, staged_code_dir: str, staging_dir: Path, nix_closure_cache: str | None = None
+) -> WorkflowConfig:
     """Resolve nix-mode steps end to end: eval/build closures, inject build
     steps and warm-node affinity, and materialize any missing nix source
     trees directly into ``staging_dir`` for upload. No-op when ``config``
     has no nix-mode roles.
     """
-    return resolve_nix_steps(config, staged_code_dir=staged_code_dir, staging_dir=staging_dir)
+    return resolve_nix_steps(
+        config, staged_code_dir=staged_code_dir, staging_dir=staging_dir, nix_closure_cache=nix_closure_cache
+    )

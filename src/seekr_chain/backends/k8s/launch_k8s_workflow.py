@@ -482,7 +482,11 @@ def _build_controller_jobset(
 
 
 def launch_k8s_workflow(
-    config: dict | WorkflowConfig, interactive: bool = False, attach: bool = True, args: dict | None = None
+    config: dict | WorkflowConfig,
+    interactive: bool = False,
+    attach: bool = True,
+    args: dict | None = None,
+    nix_closure_cache: str | None = None,
 ):
     """Launch a k8s controller workflow. Returns a K8sWorkflow object."""
     from seekr_chain.backends.k8s.k8s_workflow import K8sWorkflow
@@ -530,7 +534,8 @@ def launch_k8s_workflow(
             local_code_dest = staging_dir / "workspace"
             symlink(Path(config.code.path), local_code_dest, exclude=config.code.exclude, include=config.code.include)
 
-        config = process_nix(config, staged_code_dir=local_code_dest, staging_dir=staging_dir)
+        nix_kwargs = {} if nix_closure_cache is None else {"nix_closure_cache": nix_closure_cache}
+        config = process_nix(config, staged_code_dir=local_code_dest, staging_dir=staging_dir, **nix_kwargs)
 
         s3_creds = {} if external_secret else _get_s3_creds()
 
