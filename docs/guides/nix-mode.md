@@ -86,7 +86,7 @@ and pushes the result. Subsequent submits hit the cache and skip the
 build.
 
 !!! note "Local nix required"
-    Submit needs `nix` on PATH to evaluate the expression's closure path
+    On a closure-path cache miss, submit needs `nix` on PATH to evaluate the expression's closure path
     locally. Install from <https://nixos.org/download>. Eval is pure
     (no compilation, no system-specific code), so a Mac can resolve an
     `x86_64-linux` closure path — only the realization runs in-cluster.
@@ -94,6 +94,78 @@ build.
 ## How it works
 
 There are four moving parts at submit time, three at pod runtime.
+
+### Check in closure paths for CI
+
+Configure an additive closure-path cache in your project's `.seekrchain.toml`:
+
+```toml
+nix_closure_cache = "chain-nix-lock.json"
+```
+
+Submit normally, then commit the resulting file:
+
+```bash
+chain submit train.yaml
+chain submit eval.yaml
+git add chain-nix-lock.json
+```
+
+Multiple config files and Python-generated configs share this cache. Entries
+are identified by the filtered source content (including file paths and modes),
+relative expression, attribute, and target system—not job names or config filenames.
+A changed input adds a new entry; old entries are retained.
+
+An explicit CLI or Python argument overrides the configured path:
+
+```bash
+chain submit train.yaml --nix-closure-cache ./chain-nix-lock.json
+```
+
+```python
+from seekr_chain import launch_workflow
+
+launch_workflow(config, nix_closure_cache="./chain-nix-lock.json")
+```
+
+The option is also accepted by `launch_k8s_workflow`.
+TOML paths resolve relative to the TOML file declaring them. Explicit arguments
+and `SEEKRCHAIN_NIX_CLOSURE_CACHE` paths resolve relative to the current working
+directory. Configuration is loaded once at import time.
+
+On a matching entry, submission uses the recorded store path **without Nix
+installed**. On a miss, existing local/remote memos are tried before evaluating
+with Nix, and the result is added to the file. An entry is saved after successful
+resolution, even if a later binary-cache check or job submission fails.
+
+This file records paths, not built closures. Binary-cache existence checks and
+in-cluster builds still run as usual. With no configured file, behavior is unchanged.
+
+**Source selection matters.** Use `nix.include` / `nix.exclude` to select the
+flake, lock file, imported Nix files, and any local package sources. Otherwise,
+the effective code-upload file set is hashed, so unrelated source changes can
+cause misses. The cache file, its `.lock` sidecar, and `.tmp-*` writer files
+are automatically excluded from Nix hashing, evaluation, and build source trees.
+Do not reference the cache from your flake.
+
+Add writer artifacts to `.gitignore` (commit the JSON file itself):
+
+```gitignore
+chain-nix-lock.json.lock
+chain-nix-lock.json.tmp-*
+```
+
+Writes merge under a POSIX sidecar lock and atomically replace the JSON file,
+with sorted keys and no timestamps for stable diffs. Cache hits do not write
+the file. Malformed or unsupported cache files fail explicitly rather than being
+silently overwritten. Treat committed entries as trusted build metadata, like
+your flake lock file.
+
+Use locked flakes for reproducibility: the source digest cannot detect changes
+to impure external state, unlocked remote inputs, or environment-dependent imports.
+To force regeneration, remove the affected entries (or cache file) **and** any
+corresponding existing local/remote closure memos. There is no automatic pruning
+or strict/read-only miss mode.
 
 ### Submit-time pipeline
 

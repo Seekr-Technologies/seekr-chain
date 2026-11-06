@@ -38,6 +38,7 @@ _ENV_VAR_MAP: dict[str, str] = {
     "SEEKRCHAIN_DATASTORE_KUBERNETES_SECRET": "datastore_kubernetes_secret",
     "SEEKRCHAIN_DATASTORE_ENDPOINT_URL": "datastore_endpoint_url",
     "SEEKRCHAIN_DATASTORE_REGION": "datastore_region",
+    "SEEKRCHAIN_NIX_CLOSURE_CACHE": "nix_closure_cache",
     "SEEKRCHAIN_NIX_STORE": "nix_store",
     "SEEKRCHAIN_NIX_RUNNER_IMAGE": "nix_runner_image",
     "SEEKRCHAIN_NIX_STORE_VOLUME_KIND": "nix_store_volume_kind",
@@ -81,6 +82,10 @@ class UserConfig:
     datastore_region :
         S3 region; configures the local boto3 client and is injected as plain
         ``AWS_REGION`` into pods.
+    nix_closure_cache :
+        Optional additive JSON closure-path cache to commit for CI reuse.
+        TOML-relative paths resolve against the declaring TOML file; env
+        and explicit launch paths resolve against the working directory.
     nix_store :
         Default URI for the nix binary cache (e.g. ``s3://bucket``); any
         nix store type works. Used when a step's ``nix.store`` is not
@@ -126,6 +131,7 @@ class UserConfig:
     datastore_kubernetes_secret: str | None = None
     datastore_endpoint_url: str | None = None
     datastore_region: str | None = None
+    nix_closure_cache: str | None = None
     nix_store: str | None = None
     nix_runner_image: str | None = None
     nix_store_volume_kind: str | None = None
@@ -148,6 +154,13 @@ def _read_toml(path: Path) -> dict:
         return tomllib.load(f)
 
 
+def _toml_values(path: Path) -> dict:
+    values = {k: v for k, v in _read_toml(path).items() if v is not None}
+    if cache := values.get("nix_closure_cache"):
+        values["nix_closure_cache"] = str((path.parent / Path(cache).expanduser()).resolve())
+    return values
+
+
 def _load_config() -> UserConfig:
     """Load and merge all configuration sources, returning a UserConfig."""
     values: dict[str, str] = {}
@@ -155,12 +168,12 @@ def _load_config() -> UserConfig:
     # 4. Global user config (~/.seekrchain.toml) — lowest priority, load first
     global_config = Path.home() / _CONFIG_FILENAME
     if global_config.is_file():
-        values.update({k: v for k, v in _read_toml(global_config).items() if v is not None})
+        values.update(_toml_values(global_config))
 
     # 3. Local project config (.seekrchain.toml, walk up from CWD)
     local_config = _find_file_walking_up(_CONFIG_FILENAME)
     if local_config:
-        values.update({k: v for k, v in _read_toml(local_config).items() if v is not None})
+        values.update(_toml_values(local_config))
 
     # 2. .env file (walk up from CWD)
     dotenv_path = dotenv.find_dotenv(usecwd=True)
@@ -184,6 +197,7 @@ def _load_config() -> UserConfig:
         datastore_kubernetes_secret=values.get("datastore_kubernetes_secret"),
         datastore_endpoint_url=values.get("datastore_endpoint_url"),
         datastore_region=values.get("datastore_region"),
+        nix_closure_cache=values.get("nix_closure_cache"),
         nix_store=values.get("nix_store"),
         nix_runner_image=values.get("nix_runner_image"),
         nix_store_volume_kind=values.get("nix_store_volume_kind"),
