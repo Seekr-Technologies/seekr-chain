@@ -3,46 +3,152 @@ name: Docs
 on:
   pull_request:
     branches: [main]
+  push:
+    branches: [main]
+  # Releases created by GITHUB_TOKEN do not emit workflow-triggering events.
+  # release.yml calls this workflow directly; this also covers manual releases.
   release:
     types: [published]
+  workflow_call:
+    inputs:
+      release_tag:
+        description: Published release tag to document
+        required: true
+        type: string
+  # Rebuild rolling latest, or backfill an existing release snapshot.
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Published stable release tag to backfill (blank publishes latest from main)
+        required: false
+        type: string
 
-permissions: read-all
+permissions:
+  contents: read
+
+# Serialize the complete publish operation, including Mike's branch updates.
+concurrency:
+  group: docs-${{ github.event_name == 'pull_request' && github.ref || 'publish' }}
+  cancel-in-progress: false
 
 jobs:
   build:
     name: Build (strict)
+    if: github.event_name != 'release' || (!github.event.release.prerelease && !github.event.release.draft)
     runs-on: ubuntu-latest
+    outputs:
+      docs_version: ${{ steps.target.outputs.version }}
+      source_sha: ${{ steps.source.outputs.sha }}
     steps:
+      - name: Resolve documentation target
+        id: target
+        if: github.event_name != 'pull_request'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.release_tag || github.event.release.tag_name }}
+        run: |
+          set -euo pipefail
+          if [ -n "$RELEASE_TAG" ]; then
+            test "$RELEASE_TAG" != latest
+            # Only published stable releases may become snapshots.
+            gh api "repos/$GITHUB_REPOSITORY/releases/tags/$RELEASE_TAG" \
+              --jq 'select(.draft == false and .prerelease == false) | .tag_name' > "$RUNNER_TEMP/release-tag"
+            test "$(cat "$RUNNER_TEMP/release-tag")" = "$RELEASE_TAG"
+            echo "version=$RELEASE_TAG" >> "$GITHUB_OUTPUT"
+            echo "ref=refs/tags/$RELEASE_TAG" >> "$GITHUB_OUTPUT"
+          else
+            echo "version=latest" >> "$GITHUB_OUTPUT"
+            echo "ref=refs/heads/main" >> "$GITHUB_OUTPUT"
+          fi
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
+          ref: ${{ steps.target.outputs.ref || github.ref }}
           fetch-depth: 0
           fetch-tags: true
       - uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
         with:
           version-file: "pyproject.toml"
-      - run: uv sync --group docs
-      - run: uv run mkdocs build --strict
+      - run: uv sync --locked --group docs --no-dev
+      - run: uv run --no-sync mkdocs build --strict
+      - name: Record validated source
+        id: source
+        run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
-  deploy:
-    name: Deploy versioned docs
-    if: github.event_name == 'release'
+  publish:
+    name: Update Mike versions and upload site
+    needs: build
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
+          ref: ${{ needs.build.outputs.source_sha }}
           fetch-depth: 0
           fetch-tags: true
       - uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
         with:
           version-file: "pyproject.toml"
-      - run: uv sync --group docs
+      - run: uv sync --locked --group docs --no-dev
       - name: Configure git identity
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-      - name: Deploy docs
+      - name: Update versioned docs
+        env:
+          DOCS_VERSION: ${{ needs.build.outputs.docs_version }}
         run: |
-          uv run mike deploy --push --update-aliases ${{ github.ref_name }} latest
-          uv run mike set-default --push latest
+          set -euo pipefail
+          uv run --no-sync mike list --json > "$RUNNER_TEMP/versions.json"
+          STATE=$(uv run --no-sync python -c '
+          import json, os, sys
+          versions = json.load(sys.stdin)
+          target = os.environ["DOCS_VERSION"]
+          if any(v["version"] == target for v in versions):
+              print("exists")
+          elif any(target in v.get("aliases", []) for v in versions):
+              print("alias")
+          else:
+              print("new")
+          ' < "$RUNNER_TEMP/versions.json")
+          if [ "$DOCS_VERSION" = latest ]; then
+            # Migrate the former alias without deleting its release snapshot.
+            if [ "$STATE" = alias ]; then
+              uv run --no-sync mike delete latest
+            fi
+            uv run --no-sync mike deploy --title latest latest
+          elif [ "$STATE" = new ]; then
+            uv run --no-sync mike deploy "$DOCS_VERSION"
+          elif [ "$STATE" = exists ]; then
+            echo "Keeping immutable snapshot $DOCS_VERSION"
+          else
+            echo "Release tag conflicts with an existing alias" >&2
+            exit 1
+          fi
+          # A release can finish before main's first rolling publication.
+          uv run --no-sync mike set-default --allow-undefined latest
+          git push origin gh-pages
+      - name: Export complete site
+        run: |
+          mkdir -p "$RUNNER_TEMP/pages"
+          git archive gh-pages | tar -x -C "$RUNNER_TEMP/pages"
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@7b1f4a764d45c48632c6b24a0339c27f5614fb0b # v4
+        with:
+          path: ${{ runner.temp }}/pages
+
+  deploy:
+    name: Deploy to GitHub Pages
+    needs: publish
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy Pages artifact
+        id: deployment
+        uses: actions/deploy-pages@d6db90164ac5ed86f2b6aed7e0febac5b3c0c03e # v4

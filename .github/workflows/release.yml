@@ -179,6 +179,17 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
+  publish-docs:
+    name: Publish release documentation
+    needs: [compute-version, create-release]
+    permissions:
+      contents: write
+      pages: write
+      id-token: write
+    uses: ./.github/workflows/docs.yml
+    with:
+      release_tag: ${{ needs.compute-version.outputs.next_version }}
+
   publish-pypi:
     name: Publish to PyPI
     needs: create-release
