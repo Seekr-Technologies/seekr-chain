@@ -1,0 +1,2745 @@
+
+<!doctype html>
+<html lang="en" class="no-js">
+  <head>
+    
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      
+        <meta name="description" content="A no-nonsense job launcher for distributed workloads on Kubernetes">
+      
+      
+      
+        <link rel="canonical" href="https://seekr-technologies.github.io/seekr-chain/latest/guides/nix-mode/">
+      
+      
+        <link rel="prev" href="../multi-node-training/">
+      
+      
+        <link rel="next" href="../persistent-volumes/">
+      
+      
+        
+      
+      
+      <link rel="icon" href="../../assets/images/favicon.png">
+      <meta name="generator" content="mkdocs-ProperDocs 1.6.7, mkdocs-material-9.7.6">
+    
+    
+      
+        <title>Nix-mode Runtime - seekr-chain</title>
+      
+    
+    
+      <link rel="stylesheet" href="../../assets/stylesheets/main.484c7ddc.min.css">
+      
+        
+        <link rel="stylesheet" href="../../assets/stylesheets/palette.ab4e12ef.min.css">
+      
+      
+
+
+    
+    
+      
+    
+    
+      
+        
+        
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+        <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Roboto:300,300i,400,400i,700,700i%7CRoboto+Mono:400,400i,700,700i&display=fallback">
+        <style>:root{--md-text-font:"Roboto";--md-code-font:"Roboto Mono"}</style>
+      
+    
+    
+      <link rel="stylesheet" href="../../assets/_mkdocstrings.css">
+    
+    <script>__md_scope=new URL("../..",location),__md_hash=e=>[...e].reduce(((e,_)=>(e<<5)-e+_.charCodeAt(0)),0),__md_get=(e,_=localStorage,t=__md_scope)=>JSON.parse(_.getItem(t.pathname+"."+e)),__md_set=(e,_,t=localStorage,a=__md_scope)=>{try{t.setItem(a.pathname+"."+e,JSON.stringify(_))}catch(e){}}</script>
+    
+      
+
+    
+    
+  </head>
+  
+  
+    
+    
+      
+    
+    
+    
+    
+    <body dir="ltr" data-md-color-scheme="slate" data-md-color-primary="indigo" data-md-color-accent="indigo">
+  
+    
+    <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
+    <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
+    <label class="md-overlay" for="__drawer"></label>
+    <div data-md-component="skip">
+      
+        
+        <a href="#nix-mode-runtime" class="md-skip">
+          Skip to content
+        </a>
+      
+    </div>
+    <div data-md-component="announce">
+      
+    </div>
+    
+      <div data-md-color-scheme="default" data-md-component="outdated" hidden>
+        
+      </div>
+    
+    
+      
+
+<header class="md-header" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="Header">
+    <a href="../.." title="seekr-chain" class="md-header__button md-logo" aria-label="seekr-chain" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+
+    </a>
+    <label class="md-header__button md-icon" for="__drawer">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M3 6h18v2H3zm0 5h18v2H3zm0 5h18v2H3z"/></svg>
+    </label>
+    <div class="md-header__title" data-md-component="header-title">
+      <div class="md-header__ellipsis">
+        <div class="md-header__topic">
+          <span class="md-ellipsis">
+            seekr-chain
+          </span>
+        </div>
+        <div class="md-header__topic" data-md-component="header-topic">
+          <span class="md-ellipsis">
+            
+              Nix-mode Runtime
+            
+          </span>
+        </div>
+      </div>
+    </div>
+    
+      
+        <form class="md-header__option" data-md-component="palette">
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="" data-md-color-scheme="slate" data-md-color-primary="indigo" data-md-color-accent="indigo"  aria-label="Switch to light mode"  type="radio" name="__palette" id="__palette_0">
+    
+      <label class="md-header__button md-icon" title="Switch to light mode" for="__palette_1" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 18c-.89 0-1.74-.2-2.5-.55C11.56 16.5 13 14.42 13 12s-1.44-4.5-3.5-5.45C10.26 6.2 11.11 6 12 6a6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="" data-md-color-scheme="default" data-md-color-primary="indigo" data-md-color-accent="indigo"  aria-label="Switch to dark mode"  type="radio" name="__palette" id="__palette_1">
+    
+      <label class="md-header__button md-icon" title="Switch to dark mode" for="__palette_0" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a4 4 0 0 0-4 4 4 4 0 0 0 4 4 4 4 0 0 0 4-4 4 4 0 0 0-4-4m0 10a6 6 0 0 1-6-6 6 6 0 0 1 6-6 6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+</form>
+      
+    
+    
+      <script>var palette=__md_get("__palette");if(palette&&palette.color){if("(prefers-color-scheme)"===palette.color.media){var media=matchMedia("(prefers-color-scheme: light)"),input=document.querySelector(media.matches?"[data-md-color-media='(prefers-color-scheme: light)']":"[data-md-color-media='(prefers-color-scheme: dark)']");palette.color.media=input.getAttribute("data-md-color-media"),palette.color.scheme=input.getAttribute("data-md-color-scheme"),palette.color.primary=input.getAttribute("data-md-color-primary"),palette.color.accent=input.getAttribute("data-md-color-accent")}for(var[key,value]of Object.entries(palette.color))document.body.setAttribute("data-md-color-"+key,value)}</script>
+    
+    
+    
+      
+      
+        <label class="md-header__button md-icon" for="__search">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        </label>
+        <div class="md-search" data-md-component="search" role="dialog">
+  <label class="md-search__overlay" for="__search"></label>
+  <div class="md-search__inner" role="search">
+    <form class="md-search__form" name="search">
+      <input type="text" class="md-search__input" name="query" aria-label="Search" placeholder="Search" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false" data-md-component="search-query" required>
+      <label class="md-search__icon md-icon" for="__search">
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+      </label>
+      <nav class="md-search__options" aria-label="Search">
+        
+        <button type="reset" class="md-search__icon md-icon" title="Clear" aria-label="Clear" tabindex="-1">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+        </button>
+      </nav>
+      
+        <div class="md-search__suggest" data-md-component="search-suggest"></div>
+      
+    </form>
+    <div class="md-search__output">
+      <div class="md-search__scrollwrap" tabindex="0" data-md-scrollfix>
+        <div class="md-search-result" data-md-component="search-result">
+          <div class="md-search-result__meta">
+            Initializing search
+          </div>
+          <ol class="md-search-result__list" role="presentation"></ol>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+      
+    
+    
+      <div class="md-header__source">
+        <a href="https://github.com/seekr-technologies/seekr-chain" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    seekr-technologies/seekr-chain
+  </div>
+</a>
+      </div>
+    
+  </nav>
+  
+</header>
+    
+    <div class="md-container" data-md-component="container">
+      
+      
+        
+          
+            
+<nav class="md-tabs" aria-label="Tabs" data-md-component="tabs">
+  <div class="md-grid">
+    <ul class="md-tabs__list">
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="../.." class="md-tabs__link">
+        
+  
+  
+    
+  
+  Home
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../installation/" class="md-tabs__link">
+          
+  
+  
+  Getting Started
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+    
+  
+  
+    
+    
+      <li class="md-tabs__item md-tabs__item--active">
+        <a href="../../features/" class="md-tabs__link">
+          
+  
+  
+  User Guide
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../reference/configuration/" class="md-tabs__link">
+          
+  
+  
+  Reference
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../developer/contributing/" class="md-tabs__link">
+          
+  
+  
+  Development
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="../../comparison/" class="md-tabs__link">
+        
+  
+  
+    
+  
+  Comparison
+
+      </a>
+    </li>
+  
+
+      
+    </ul>
+  </div>
+</nav>
+          
+        
+      
+      <main class="md-main" data-md-component="main">
+        <div class="md-main__inner md-grid">
+          
+            
+              
+              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+
+  
+
+
+<nav class="md-nav md-nav--primary md-nav--lifted" aria-label="Navigation" data-md-level="0">
+  <label class="md-nav__title" for="__drawer">
+    <a href="../.." title="seekr-chain" class="md-nav__button md-logo" aria-label="seekr-chain" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+
+    </a>
+    seekr-chain
+  </label>
+  
+    <div class="md-nav__source">
+      <a href="https://github.com/seekr-technologies/seekr-chain" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    seekr-technologies/seekr-chain
+  </div>
+</a>
+    </div>
+  
+  <ul class="md-nav__list" data-md-scrollfix>
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../.." class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Home
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_2" >
+        
+          
+          <label class="md-nav__link" for="__nav_2" id="__nav_2_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Getting Started
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_2_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_2">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Getting Started
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../installation/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Installation
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../getting-started/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Quick Start
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../examples/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Examples
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+    
+  
+  
+  
+    
+    
+    
+    
+      
+        
+        
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--active md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_3" checked>
+        
+          
+          <label class="md-nav__link" for="__nav_3" id="__nav_3_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    User Guide
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_3_label" aria-expanded="true">
+          <label class="md-nav__title" for="__nav_3">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    User Guide
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../features/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Features
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../interactive-jobs/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Interactive Jobs
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../multi-node-training/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Multi-node Training
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+    
+  
+  
+  
+    <li class="md-nav__item md-nav__item--active">
+      
+      <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
+      
+      
+        
+      
+      
+        <label class="md-nav__link md-nav__link--active" for="__toc">
+          
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Nix-mode Runtime
+  
+
+    
+  </span>
+  
+  
+
+          <span class="md-nav__icon md-icon"></span>
+        </label>
+      
+      <a href="./" class="md-nav__link md-nav__link--active">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Nix-mode Runtime
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+      
+        
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#why-nix-mode" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Why nix-mode?
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#quick-start" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Quick start
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#how-it-works" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        How it works
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="How it works">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#submit-time-pipeline" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Submit-time pipeline
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#pod-time-pipeline" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Pod-time pipeline
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#the-runtime-image" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The runtime image
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#the-closure-fetch-pipeline-visualized" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The closure-fetch pipeline visualized
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#configuration-reference" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Configuration reference
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#architecture-details" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Architecture details
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Architecture details">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#mount-layout" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Mount layout
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#closure-detection-on-the-pod" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Closure detection on the pod
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#warm-cache-scheduling" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Warm-cache scheduling
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#build-step-dedup" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Build-step dedup
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#gc" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        GC
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#recipes" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Recipes
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Recipes">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#lock-your-inputs" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Lock your inputs
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#stabilize-your-closure-hash" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Stabilize your closure hash
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#bake-env-vars-into-the-closure" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Bake env vars into the closure
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#beefy-build-resources" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Beefy build resources
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#nix-build-parallelism" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Nix build parallelism
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#pre-build-manually-refuse-auto-build" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Pre-build manually, refuse auto-build
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#tls-in-the-closure" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        TLS in the closure
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#when-to-use-nix-mode" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        When to use nix-mode
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#trade-offs-vs-image-mode" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Trade-offs vs image-mode
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#troubleshooting" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Troubleshooting
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Troubleshooting">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#nixexpression-must-be-a-path-relative-to-codepath" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        nix.expression must be a path relative to code.path
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#closure-nixstorehash-is-not-in-store-and-nixbuildfalse" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        closure /nix/store/&lt;hash&gt; is not in store ..., and nix.build=False
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#nixs-s3-store-does-not-support-path-prefixes" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        nix's s3:// store does not support path prefixes
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#build-step-succeeds-but-consumer-cant-find-libfooso" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Build step succeeds but consumer can't find libfoo.so
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#closure-already-fully-present-on-node-but-main-container-still-slow-to-start" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        "Closure already fully present on node" but main container still slow to start
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#warm-cache-nodeaffinity-not-steering-pods" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Warm-cache nodeAffinity not steering pods
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#limitations" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Limitations
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#examples" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Examples
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../persistent-volumes/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Working with PVCs
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../secrets/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Secrets Management
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_4" >
+        
+          
+          <label class="md-nav__link" for="__nav_4" id="__nav_4_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Reference
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_4_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_4">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Reference
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../reference/configuration/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Configuration
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../reference/environment-variables/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Environment Variables
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../reference/cli/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    CLI Reference
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../api/seekr_chain/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    API Reference
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_5" >
+        
+          
+          <label class="md-nav__link" for="__nav_5" id="__nav_5_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Development
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_5_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_5">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Development
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../developer/contributing/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Contributing
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../developer/CHANGELOG/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Changelog
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../roadmap/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Roadmap
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../comparison/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Comparison
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+  </ul>
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+            
+              
+              <div class="md-sidebar md-sidebar--secondary" data-md-component="sidebar" data-md-type="toc" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#why-nix-mode" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Why nix-mode?
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#quick-start" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Quick start
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#how-it-works" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        How it works
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="How it works">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#submit-time-pipeline" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Submit-time pipeline
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#pod-time-pipeline" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Pod-time pipeline
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#the-runtime-image" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The runtime image
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#the-closure-fetch-pipeline-visualized" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The closure-fetch pipeline visualized
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#configuration-reference" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Configuration reference
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#architecture-details" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Architecture details
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Architecture details">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#mount-layout" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Mount layout
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#closure-detection-on-the-pod" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Closure detection on the pod
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#warm-cache-scheduling" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Warm-cache scheduling
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#build-step-dedup" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Build-step dedup
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#gc" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        GC
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#recipes" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Recipes
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Recipes">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#lock-your-inputs" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Lock your inputs
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#stabilize-your-closure-hash" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Stabilize your closure hash
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#bake-env-vars-into-the-closure" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Bake env vars into the closure
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#beefy-build-resources" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Beefy build resources
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#nix-build-parallelism" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Nix build parallelism
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#pre-build-manually-refuse-auto-build" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Pre-build manually, refuse auto-build
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#tls-in-the-closure" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        TLS in the closure
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#when-to-use-nix-mode" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        When to use nix-mode
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#trade-offs-vs-image-mode" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Trade-offs vs image-mode
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#troubleshooting" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Troubleshooting
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Troubleshooting">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#nixexpression-must-be-a-path-relative-to-codepath" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        nix.expression must be a path relative to code.path
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#closure-nixstorehash-is-not-in-store-and-nixbuildfalse" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        closure /nix/store/&lt;hash&gt; is not in store ..., and nix.build=False
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#nixs-s3-store-does-not-support-path-prefixes" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        nix's s3:// store does not support path prefixes
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#build-step-succeeds-but-consumer-cant-find-libfooso" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Build step succeeds but consumer can't find libfoo.so
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#closure-already-fully-present-on-node-but-main-container-still-slow-to-start" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        "Closure already fully present on node" but main container still slow to start
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#warm-cache-nodeaffinity-not-steering-pods" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Warm-cache nodeAffinity not steering pods
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#limitations" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Limitations
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#examples" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Examples
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+          
+          
+            <div class="md-content" data-md-component="content">
+              
+              <article class="md-content__inner md-typeset">
+                
+                  
+
+
+  
+  
+
+
+<h1 id="nix-mode-runtime">Nix-mode Runtime<a class="headerlink" href="#nix-mode-runtime" title="Permanent link">&para;</a></h1>
+<p>Nix-mode lets you replace your step's Docker image with a <strong>nix closure</strong> —
+the content-addressed output of evaluating a nix expression. The pod boots
+from a tiny runtime image and pulls only what your job actually needs from
+a nix binary cache, in parallel.</p>
+<h2 id="why-nix-mode">Why nix-mode?<a class="headerlink" href="#why-nix-mode" title="Permanent link">&para;</a></h2>
+<p>Docker images have two bottlenecks for large ML environments:</p>
+<ol>
+<li><strong>Sequential layer extraction.</strong> Even with parallel layer downloads, the
+   container runtime extracts layers sequentially. A 10 GB image stack is
+   minutes of startup latency.</li>
+<li><strong>All-or-nothing layers.</strong> Bumping <code>transformers</code> rebuilds a 100 MB
+   layer; nodes that already have 99% of your dependencies still pull the
+   whole thing.</li>
+</ol>
+<p>Nix-mode flips this:</p>
+<ul>
+<li><strong>Per-path parallel fetches</strong> from object storage. A 14 GB / 220-path
+  closure pulls in under a minute on a cold node, ~1 s on a warm one.</li>
+<li><strong>Content-addressed deduplication.</strong> Two jobs sharing <code>torch</code> share the
+  same <code>/nix/store/&lt;hash&gt;-torch</code> path — fetched once per node, used by
+  every pod.</li>
+<li><strong>Push only what changed.</strong> Bumping <code>transformers</code> re-uploads ~megabytes
+  to the cache, not multi-GB.</li>
+<li><strong>Warm-node caching for free.</strong> Closures land on the node's local
+  hostPath; subsequent pods on the same node skip the fetch entirely.</li>
+</ul>
+<h2 id="quick-start">Quick start<a class="headerlink" href="#quick-start" title="Permanent link">&para;</a></h2>
+<p>A nix-mode step looks like this:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a><span class="nt">name</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">my-job</span>
+<a id="__codelineno-0-2" name="__codelineno-0-2" href="#__codelineno-0-2"></a><span class="nt">namespace</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">argo-workflows</span>
+<a id="__codelineno-0-3" name="__codelineno-0-3" href="#__codelineno-0-3"></a>
+<a id="__codelineno-0-4" name="__codelineno-0-4" href="#__codelineno-0-4"></a><span class="nt">code</span><span class="p">:</span>
+<a id="__codelineno-0-5" name="__codelineno-0-5" href="#__codelineno-0-5"></a><span class="w">  </span><span class="nt">path</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">./</span><span class="w">    </span><span class="c1"># uploaded with the job; flake.nix lives here</span>
+<a id="__codelineno-0-6" name="__codelineno-0-6" href="#__codelineno-0-6"></a>
+<a id="__codelineno-0-7" name="__codelineno-0-7" href="#__codelineno-0-7"></a><span class="nt">steps</span><span class="p">:</span>
+<a id="__codelineno-0-8" name="__codelineno-0-8" href="#__codelineno-0-8"></a><span class="w">  </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">name</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">train</span>
+<a id="__codelineno-0-9" name="__codelineno-0-9" href="#__codelineno-0-9"></a><span class="w">    </span><span class="nt">nix</span><span class="p">:</span>
+<a id="__codelineno-0-10" name="__codelineno-0-10" href="#__codelineno-0-10"></a><span class="w">      </span><span class="nt">expression</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">./</span><span class="w">    </span><span class="c1"># flake at the root of code.path</span>
+<a id="__codelineno-0-11" name="__codelineno-0-11" href="#__codelineno-0-11"></a><span class="w">    </span><span class="nt">script</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">python train.py</span>
+</code></pre></div>
+<p>Alongside <code>config.yaml</code>, you need a <code>flake.nix</code> describing your runtime:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-1-1" name="__codelineno-1-1" href="#__codelineno-1-1"></a><span class="p">{</span>
+<a id="__codelineno-1-2" name="__codelineno-1-2" href="#__codelineno-1-2"></a>  <span class="ss">description</span> <span class="o">=</span> <span class="s2">&quot;My training environment&quot;</span><span class="p">;</span>
+<a id="__codelineno-1-3" name="__codelineno-1-3" href="#__codelineno-1-3"></a>  inputs<span class="o">.</span>nixpkgs<span class="o">.</span><span class="ss">url</span> <span class="o">=</span> <span class="s2">&quot;github:NixOS/nixpkgs/nixos-24.05&quot;</span><span class="p">;</span>
+<a id="__codelineno-1-4" name="__codelineno-1-4" href="#__codelineno-1-4"></a>  <span class="ss">outputs</span> <span class="o">=</span> <span class="p">{</span> self<span class="p">,</span> nixpkgs <span class="p">}:</span>
+<a id="__codelineno-1-5" name="__codelineno-1-5" href="#__codelineno-1-5"></a>    <span class="k">let</span>
+<a id="__codelineno-1-6" name="__codelineno-1-6" href="#__codelineno-1-6"></a>      <span class="ss">systems</span> <span class="o">=</span> <span class="p">[</span> <span class="s2">&quot;x86_64-linux&quot;</span> <span class="s2">&quot;aarch64-linux&quot;</span> <span class="p">];</span>
+<a id="__codelineno-1-7" name="__codelineno-1-7" href="#__codelineno-1-7"></a>      <span class="ss">forAllSystems</span> <span class="o">=</span> f<span class="p">:</span> nixpkgs<span class="o">.</span>lib<span class="o">.</span>genAttrs systems <span class="p">(</span>system<span class="p">:</span> f system<span class="p">);</span>
+<a id="__codelineno-1-8" name="__codelineno-1-8" href="#__codelineno-1-8"></a>    <span class="k">in</span> <span class="p">{</span>
+<a id="__codelineno-1-9" name="__codelineno-1-9" href="#__codelineno-1-9"></a>      <span class="ss">packages</span> <span class="o">=</span> forAllSystems <span class="p">(</span>system<span class="p">:</span>
+<a id="__codelineno-1-10" name="__codelineno-1-10" href="#__codelineno-1-10"></a>        <span class="k">let</span> <span class="ss">pkgs</span> <span class="o">=</span> <span class="nb">import</span> nixpkgs <span class="p">{</span> <span class="k">inherit</span> system<span class="p">;</span> <span class="p">};</span>
+<a id="__codelineno-1-11" name="__codelineno-1-11" href="#__codelineno-1-11"></a>        <span class="k">in</span> <span class="p">{</span>
+<a id="__codelineno-1-12" name="__codelineno-1-12" href="#__codelineno-1-12"></a>          <span class="ss">default</span> <span class="o">=</span> pkgs<span class="o">.</span>buildEnv <span class="p">{</span>
+<a id="__codelineno-1-13" name="__codelineno-1-13" href="#__codelineno-1-13"></a>            <span class="ss">name</span> <span class="o">=</span> <span class="s2">&quot;my-train-env&quot;</span><span class="p">;</span>
+<a id="__codelineno-1-14" name="__codelineno-1-14" href="#__codelineno-1-14"></a>            <span class="ss">paths</span> <span class="o">=</span> <span class="p">[</span>
+<a id="__codelineno-1-15" name="__codelineno-1-15" href="#__codelineno-1-15"></a>              <span class="p">(</span>pkgs<span class="o">.</span>python312<span class="o">.</span>withPackages <span class="p">(</span>ps<span class="p">:</span> <span class="k">with</span> ps<span class="p">;</span> <span class="p">[</span> torch transformers <span class="p">]))</span>
+<a id="__codelineno-1-16" name="__codelineno-1-16" href="#__codelineno-1-16"></a>              pkgs<span class="o">.</span>bash
+<a id="__codelineno-1-17" name="__codelineno-1-17" href="#__codelineno-1-17"></a>              pkgs<span class="o">.</span>coreutils
+<a id="__codelineno-1-18" name="__codelineno-1-18" href="#__codelineno-1-18"></a>              pkgs<span class="o">.</span>cacert    <span class="c1"># required for HTTPS clients in the closure</span>
+<a id="__codelineno-1-19" name="__codelineno-1-19" href="#__codelineno-1-19"></a>            <span class="p">];</span>
+<a id="__codelineno-1-20" name="__codelineno-1-20" href="#__codelineno-1-20"></a>          <span class="p">};</span>
+<a id="__codelineno-1-21" name="__codelineno-1-21" href="#__codelineno-1-21"></a>        <span class="p">});</span>
+<a id="__codelineno-1-22" name="__codelineno-1-22" href="#__codelineno-1-22"></a>    <span class="p">};</span>
+<a id="__codelineno-1-23" name="__codelineno-1-23" href="#__codelineno-1-23"></a><span class="p">}</span>
+</code></pre></div>
+<p>Submit:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-2-1" name="__codelineno-2-1" href="#__codelineno-2-1"></a>chain<span class="w"> </span>submit<span class="w"> </span>-f<span class="w"> </span>config.yaml<span class="w"> </span>--follow
+</code></pre></div>
+<p>If the closure isn't in your configured binary cache, seekr-chain
+automatically injects an in-cluster build step that runs <code>nix build</code>
+and pushes the result. Subsequent submits hit the cache and skip the
+build.</p>
+<div class="admonition note">
+<p class="admonition-title">Local nix required</p>
+<p>Submit needs <code>nix</code> on PATH to evaluate the expression's closure path
+locally. Install from <a href="https://nixos.org/download">https://nixos.org/download</a>. Eval is pure
+(no compilation, no system-specific code), so a Mac can resolve an
+<code>x86_64-linux</code> closure path — only the realization runs in-cluster.</p>
+</div>
+<h2 id="how-it-works">How it works<a class="headerlink" href="#how-it-works" title="Permanent link">&para;</a></h2>
+<p>There are four moving parts at submit time, three at pod runtime.</p>
+<h3 id="submit-time-pipeline">Submit-time pipeline<a class="headerlink" href="#submit-time-pipeline" title="Permanent link">&para;</a></h3>
+<ol>
+<li>
+<p><strong>Evaluate the closure.</strong> seekr-chain runs <code>nix eval</code> locally on your
+   <code>nix.expression</code> to get the content-addressed <code>/nix/store/&lt;hash&gt;-&lt;name&gt;</code>
+   path. This is what determines whether the closure is "in cache" — the
+   hash changes whenever any input changes.</p>
+<p>Eval runs against the <strong>same staged directory that gets uploaded</strong> — your
+<code>code.path</code> filtered by <code>code.include</code>/<code>code.exclude</code>, materialized once —
+not your live working directory. This keeps eval fast (it doesn't copy
+<code>.venv</code>, <code>.git</code>, or caches into the nix store) and, crucially, makes the
+closure you resolve at submit <strong>byte-identical to what the build pod
+builds</strong> from the uploaded bundle. Two consequences worth knowing:</p>
+<ul>
+<li><strong>Uncommitted files count.</strong> The file set is the upload, not git — a
+  brand-new file you haven't committed <em>is</em> seen by the eval (as long as it
+  isn't filtered out by <code>code.exclude</code>). There's no "did I <code>git add</code> it"
+  trap.</li>
+<li><strong>Excluded files are invisible.</strong> If your flake references a file that
+  <code>code.exclude</code> drops (or that isn't matched by a restrictive
+  <code>code.include</code>), the eval won't see it — the same way the build pod
+  wouldn't. If an edit "doesn't take", check your <code>code.include</code>/<code>exclude</code>.</li>
+</ul>
+</li>
+<li>
+<p><strong>Validate <code>nix.expression</code> is inside <code>code.path</code>.</strong> The same string is
+   used at submit time and inside the build pod (which runs <code>nix build</code>
+   from <code>/seekr-chain/workspace</code>). Lexical containment check rejects
+   <code>../escape</code> paths; symlinks inside <code>code.path</code> are allowed because the
+   code upload follows them.</p>
+</li>
+<li>
+<p><strong>Check the binary cache.</strong> A single S3 HEAD on
+   <code>&lt;store&gt;/&lt;closure-hash&gt;.narinfo</code> tells us whether to inject a build
+   step.</p>
+</li>
+<li>
+<p><strong>Inject a build step if missing.</strong> If the closure isn't in the cache
+   and <code>nix.build</code> is <code>true</code> (default), seekr-chain prepends a synthetic
+   step to the workflow that builds + pushes. The user's step gets a
+   <code>depends_on</code> pointing at the build, so Argo schedules them in order.</p>
+</li>
+<li>
+<p><strong>Query warm nodes.</strong> seekr-chain lists pods in the cluster carrying
+   the label <code>seekr-chain.nix/closure=&lt;hash&gt;</code> (set on every nix-mode pod
+   we've ever rendered) and collects their node names. These get
+   injected as a soft <code>nodeAffinity</code> preference on the new pod, steering
+   the scheduler toward nodes that already have the closure on disk.</p>
+</li>
+</ol>
+<h3 id="pod-time-pipeline">Pod-time pipeline<a class="headerlink" href="#pod-time-pipeline" title="Permanent link">&para;</a></h3>
+<p>When the pod starts:</p>
+<ol>
+<li>
+<p><strong><code>chain-init</code></strong> (init container) downloads the job's asset bundle from
+   s3. Same as image-mode.</p>
+</li>
+<li>
+<p><strong><code>chain-nix-init</code></strong> (init container, runs after chain-init):</p>
+<ul>
+<li>Mounts the node's shared hostPath (or emptyDir) volume directly at
+  <code>/nix</code> (<code>subPath=nix</code>), which shadows the runner image's own <code>/nix</code>.
+  Before anything else, <code>nix-bootstrap.sh</code> reseeds <code>/nix</code> from
+  <code>/nix-baked</code> — a full copy of the image's own toolchain, preserved
+  at image-build time specifically for this — so a working <code>nix</code>
+  exists on this now-empty-or-partially-warm mount. Content-addressed
+  paths are immutable, so this reseed is a cheap no-op once a node's
+  <code>/nix</code> already has the toolchain from an earlier pod.</li>
+<li>If the closure root + all transitive deps are already at
+  <code>/nix/store/&lt;hash&gt;</code> (warm cache from a previous pod on this node),
+  it exits in ~1 s without touching s3.</li>
+<li>Otherwise it runs <code>nix copy --from &lt;store&gt; &lt;closure&gt;</code>, with a
+  watchdog that kills hung pulls (stall &gt;120 s or wall &gt;30 min) and
+  retries up to 3 times.</li>
+<li>On completion, marks the closure as a nix gc-root and runs the
+  size-bounded GC over the hostPath store.</li>
+</ul>
+</li>
+<li>
+<p><strong><code>main</code></strong> (the user's container) mounts the same volume at <code>/nix</code>
+   (with <code>subPath=nix</code> so paths surface as <code>/nix/store/&lt;hash&gt;</code> — what
+   the closure's RPATHs were baked against). The entrypoint exports
+   <code>PATH=$CLOSURE/bin:$PATH</code> and <code>LD_LIBRARY_PATH=$CLOSURE/lib:...</code>,
+   then runs your script.</p>
+</li>
+</ol>
+<p>The build pod (see below) uses the identical bootstrap-then-mount
+approach — it's just <code>nix-build.sh</code> invoking <code>nix-bootstrap.sh</code> directly
+rather than a separate init container doing it.</p>
+<h3 id="the-runtime-image">The runtime image<a class="headerlink" href="#the-runtime-image" title="Permanent link">&para;</a></h3>
+<p>Nix-mode pods use a minimal "nix-runner" OCI image
+(<code>docker/Dockerfile.nix-runner</code>) that ships:</p>
+<ul>
+<li><code>nix</code> 2.21.1 (from <code>nixos/nix</code>) — does its own s3 fetches via the
+  baked-in aws-sdk-cpp, so no separate s3 client is needed</li>
+<li><code>bash</code> from nix's default profile</li>
+<li>A static busybox at <code>/bin/</code> for the standard POSIX tools</li>
+<li><strong><code>/nix-baked</code></strong>: a full copy of the image's own <code>/nix</code>, preserved at
+  build time (<code>RUN cp -a /nix /nix-baked</code>). Both <code>chain-nix-init.sh</code> and
+  <code>nix-build.sh</code> mount the shared hostPath/emptyDir volume directly at
+  <code>/nix</code>, shadowing this image's own copy — <code>/nix-baked</code> is what
+  reseeds that mount before either script runs a real nix command. Adds
+  roughly one toolchain's worth of image size; an accepted cost of the
+  bootstrap design, not an oversight.</li>
+</ul>
+<p>Image and runtime config:</p>
+<ul>
+<li>The reference image keeps only its static baseline in
+  <code>/etc/nix/nix.conf</code>, including <code>experimental-features = nix-command
+  flakes</code> and <code>sandbox = false</code>.</li>
+<li><code>nix-build.sh</code> and <code>chain-nix-init.sh</code> each assemble one explicit
+  <code>NIX_CONFIG</code> block for their pod-specific settings. These blocks preserve
+  an existing <code>NIX_CONFIG</code> first and append seekr-chain's managed settings
+  last.</li>
+<li>Build controls such as <code>max-jobs</code> and <code>cores</code> are configuration entries,
+  not <code>nix build</code> flags. This keeps the build command shape stable for
+  compatible runner wrappers.</li>
+<li>Runtime settings such as <code>filter-syscalls = false</code> remain paired with
+  <code>sandbox = false</code>; both are needed in an unprivileged Kubernetes container
+  whose seccomp profile blocks <code>seccomp(2)</code>.</li>
+</ul>
+<p>Future pod-specific Nix settings belong in the centralized <code>NIX_CONFIG</code>
+block for the relevant resource script, rather than scattered command flags
+or runtime edits to <code>/etc/nix/nix.conf</code>. Everything the job actually needs
+still comes from the closure.</p>
+<h3 id="the-closure-fetch-pipeline-visualized">The closure-fetch pipeline visualized<a class="headerlink" href="#the-closure-fetch-pipeline-visualized" title="Permanent link">&para;</a></h3>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-3-1" name="__codelineno-3-1" href="#__codelineno-3-1"></a>┌─────────────────────────────────────────────┐
+<a id="__codelineno-3-2" name="__codelineno-3-2" href="#__codelineno-3-2"></a>│ submit machine                              │
+<a id="__codelineno-3-3" name="__codelineno-3-3" href="#__codelineno-3-3"></a>│   nix eval ./#packages.x86_64-linux.default │
+<a id="__codelineno-3-4" name="__codelineno-3-4" href="#__codelineno-3-4"></a>│     → /nix/store/abc1234-my-env             │
+<a id="__codelineno-3-5" name="__codelineno-3-5" href="#__codelineno-3-5"></a>│   s3 HEAD &lt;store&gt;/abc1234.narinfo           │
+<a id="__codelineno-3-6" name="__codelineno-3-6" href="#__codelineno-3-6"></a>│     → 404 (missing)                         │
+<a id="__codelineno-3-7" name="__codelineno-3-7" href="#__codelineno-3-7"></a>│   inject build step                         │
+<a id="__codelineno-3-8" name="__codelineno-3-8" href="#__codelineno-3-8"></a>└─────────────────────────────────────────────┘
+<a id="__codelineno-3-9" name="__codelineno-3-9" href="#__codelineno-3-9"></a>                  ↓
+<a id="__codelineno-3-10" name="__codelineno-3-10" href="#__codelineno-3-10"></a>┌─────────────────────────────────────────────┐
+<a id="__codelineno-3-11" name="__codelineno-3-11" href="#__codelineno-3-11"></a>│ build pod (image-mode, in-cluster)          │
+<a id="__codelineno-3-12" name="__codelineno-3-12" href="#__codelineno-3-12"></a>│   nix-bootstrap.sh: seed /nix from          │
+<a id="__codelineno-3-13" name="__codelineno-3-13" href="#__codelineno-3-13"></a>│     /nix-baked (once per node)              │
+<a id="__codelineno-3-14" name="__codelineno-3-14" href="#__codelineno-3-14"></a>│   cd /seekr-chain/workspace                 │
+<a id="__codelineno-3-15" name="__codelineno-3-15" href="#__codelineno-3-15"></a>│   nix build path:./#...                     │  ← lands on shared /nix
+<a id="__codelineno-3-16" name="__codelineno-3-16" href="#__codelineno-3-16"></a>│                                              │     as each path builds
+<a id="__codelineno-3-17" name="__codelineno-3-17" href="#__codelineno-3-17"></a>│   nix copy --to s3://store?compression=zstd │  ← durable cache
+<a id="__codelineno-3-18" name="__codelineno-3-18" href="#__codelineno-3-18"></a>└─────────────────────────────────────────────┘
+<a id="__codelineno-3-19" name="__codelineno-3-19" href="#__codelineno-3-19"></a>                  ↓ (depends_on)
+<a id="__codelineno-3-20" name="__codelineno-3-20" href="#__codelineno-3-20"></a>┌─────────────────────────────────────────────┐
+<a id="__codelineno-3-21" name="__codelineno-3-21" href="#__codelineno-3-21"></a>│ user pod                                    │
+<a id="__codelineno-3-22" name="__codelineno-3-22" href="#__codelineno-3-22"></a>│   chain-init: download assets               │
+<a id="__codelineno-3-23" name="__codelineno-3-23" href="#__codelineno-3-23"></a>│   chain-nix-init:                           │
+<a id="__codelineno-3-24" name="__codelineno-3-24" href="#__codelineno-3-24"></a>│     nix-bootstrap.sh: seed /nix from        │
+<a id="__codelineno-3-25" name="__codelineno-3-25" href="#__codelineno-3-25"></a>│       /nix-baked (once per node)            │
+<a id="__codelineno-3-26" name="__codelineno-3-26" href="#__codelineno-3-26"></a>│     [fast path] path-info --recursive       │
+<a id="__codelineno-3-27" name="__codelineno-3-27" href="#__codelineno-3-27"></a>│       all present → skip s3                 │
+<a id="__codelineno-3-28" name="__codelineno-3-28" href="#__codelineno-3-28"></a>│     [normal]   nix copy --from s3           │
+<a id="__codelineno-3-29" name="__codelineno-3-29" href="#__codelineno-3-29"></a>│     nix-gc.sh (size-bounded, async-safe)    │
+<a id="__codelineno-3-30" name="__codelineno-3-30" href="#__codelineno-3-30"></a>│   main: exec user script with closure       │
+<a id="__codelineno-3-31" name="__codelineno-3-31" href="#__codelineno-3-31"></a>│         on PATH + LD_LIBRARY_PATH           │
+<a id="__codelineno-3-32" name="__codelineno-3-32" href="#__codelineno-3-32"></a>└─────────────────────────────────────────────┘
+</code></pre></div>
+<p>Both the build pod and the consumer pod mount the same node-shared <code>/nix</code>
+directly — there's no separate chroot path for either anymore. A build
+pod and a consumer pod that land on the same fresh node coordinate their
+<code>/nix-baked</code> reseed via the same lock file, so only one of them actually
+does the copy.</p>
+<h2 id="configuration-reference">Configuration reference<a class="headerlink" href="#configuration-reference" title="Permanent link">&para;</a></h2>
+<p>Every field on <code>nix:</code> is documented in the auto-generated <a href="../../reference/configuration/#nixconfig">Configuration
+Reference → NixConfig</a>. Global
+defaults (the <code>nix_store</code>, <code>nix_runner_image</code>, etc. you'd set in
+<code>~/.seekrchain.toml</code> or via <code>SEEKRCHAIN_*</code> env vars) are documented on
+the same page under <strong>UserConfig</strong>.</p>
+<p>A typical nix-mode step:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-4-1" name="__codelineno-4-1" href="#__codelineno-4-1"></a><span class="nt">steps</span><span class="p">:</span>
+<a id="__codelineno-4-2" name="__codelineno-4-2" href="#__codelineno-4-2"></a><span class="w">  </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">name</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">train</span>
+<a id="__codelineno-4-3" name="__codelineno-4-3" href="#__codelineno-4-3"></a><span class="w">    </span><span class="nt">nix</span><span class="p">:</span>
+<a id="__codelineno-4-4" name="__codelineno-4-4" href="#__codelineno-4-4"></a><span class="w">      </span><span class="nt">expression</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">./</span>
+<a id="__codelineno-4-5" name="__codelineno-4-5" href="#__codelineno-4-5"></a><span class="w">      </span><span class="c1"># attr: default            # default</span>
+<a id="__codelineno-4-6" name="__codelineno-4-6" href="#__codelineno-4-6"></a><span class="w">      </span><span class="c1"># system: x86_64-linux     # default</span>
+<a id="__codelineno-4-7" name="__codelineno-4-7" href="#__codelineno-4-7"></a><span class="w">      </span><span class="c1"># store: s3://my-cache     # optional; falls back to user config</span>
+<a id="__codelineno-4-8" name="__codelineno-4-8" href="#__codelineno-4-8"></a><span class="w">      </span><span class="c1"># build: true              # default — auto-inject build step if missing</span>
+<a id="__codelineno-4-9" name="__codelineno-4-9" href="#__codelineno-4-9"></a><span class="w">      </span><span class="c1"># build_resources:         # optional — bump for heavy native builds</span>
+<a id="__codelineno-4-10" name="__codelineno-4-10" href="#__codelineno-4-10"></a><span class="w">      </span><span class="c1">#   cpus_per_node: 32</span>
+<a id="__codelineno-4-11" name="__codelineno-4-11" href="#__codelineno-4-11"></a><span class="w">      </span><span class="c1">#   mem_per_node: 256G</span>
+<a id="__codelineno-4-12" name="__codelineno-4-12" href="#__codelineno-4-12"></a><span class="w">      </span><span class="c1"># build_max_jobs: 1         # integer or AUTO; concurrent derivations</span>
+<a id="__codelineno-4-13" name="__codelineno-4-13" href="#__codelineno-4-13"></a><span class="w">      </span><span class="c1"># build_cores: 0            # cores per derivation; 0 means all available</span>
+<a id="__codelineno-4-14" name="__codelineno-4-14" href="#__codelineno-4-14"></a><span class="w">    </span><span class="nt">script</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">python train.py</span>
+</code></pre></div>
+<p>A typical <code>~/.seekrchain.toml</code>:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-5-1" name="__codelineno-5-1" href="#__codelineno-5-1"></a><span class="n">nix_store</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">&quot;s3://my-cache&quot;</span>
+<a id="__codelineno-5-2" name="__codelineno-5-2" href="#__codelineno-5-2"></a><span class="c1"># nix_store_max_size = &quot;128GiB&quot;   # default</span>
+<a id="__codelineno-5-3" name="__codelineno-5-3" href="#__codelineno-5-3"></a><span class="c1"># nix_compression    = &quot;ZSTD&quot;     # default</span>
+</code></pre></div>
+<h2 id="architecture-details">Architecture details<a class="headerlink" href="#architecture-details" title="Permanent link">&para;</a></h2>
+<h3 id="mount-layout">Mount layout<a class="headerlink" href="#mount-layout" title="Permanent link">&para;</a></h3>
+<p>The hostPath store on every node lives at <code>/var/lib/seekr-chain/nix/</code>.
+Every pod that touches nix — consumer role, <code>chain-nix-init</code> init
+container, and auto-injected build step alike — mounts it identically:</p>
+<table>
+<thead>
+<tr>
+<th>Mount point</th>
+<th>subPath</th>
+<th>Why</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>/nix</code></td>
+<td><code>nix</code></td>
+<td>Surfaces the hostPath's <code>nix/</code> subdirectory at <code>/nix</code> in the container — exactly where the closure's binaries' RPATHs expect <code>/nix/store/&lt;hash&gt;</code> to be. Without <code>subPath</code>, a container would see <code>/nix/nix/store/&lt;hash&gt;</code> instead.</td>
+</tr>
+</tbody>
+</table>
+<p>Mounting the shared volume at <code>/nix</code> shadows whatever the runner image
+itself had there, so every one of these containers runs
+<code>nix-bootstrap.sh</code> first (<code>chain-nix-init.sh</code> and <code>nix-build.sh</code> invoke
+it directly; there's no separate init container for the build step). It
+reseeds <code>/nix</code> from <code>/nix-baked</code> — the image's own preserved copy — so a
+working <code>nix</code> toolchain exists before any real nix command runs. See
+<code>resources/nix-bootstrap.sh</code>'s header comment for the full mechanics
+(atomic-lock coordination between pods on the same node, dead-lock
+reclaim, etc.).</p>
+<p>This replaced an earlier design where the auto-injected build step
+mounted a separate <code>/nix-shared</code> path and used <code>--store
+local?root=/nix-shared</code> to redirect its reads/writes there while
+leaving the image's own <code>/nix</code> untouched for the actual build. That
+approach worked but carried real complexity: a separate substituter
+entry for local warm-cache reads, an explicit <code>nix copy --to</code> after
+every successful build to seed the shared volume, and an <code>EXIT</code> trap to
+repeat that seed on failure (since a failed build's progress never
+reached the happy-path copy). Bootstrapping <code>/nix</code> directly — the same
+approach the consumer side already used — eliminates all of that: <code>nix
+build</code> writes each derivation straight into the shared store as it's
+realized, so there's nothing left to copy out or rescue on failure.</p>
+<h3 id="closure-detection-on-the-pod">Closure detection on the pod<a class="headerlink" href="#closure-detection-on-the-pod" title="Permanent link">&para;</a></h3>
+<p>The pod's main container needs to know what closure it's running. seekr-chain
+sets two env vars:</p>
+<ul>
+<li><code>SEEKR_CHAIN_NIX_CLOSURE</code>: <code>/nix/store/&lt;hash&gt;-&lt;name&gt;</code> (resolved at submit)</li>
+<li><code>SEEKR_CHAIN_NIX_STORE</code>: the binary cache URI</li>
+</ul>
+<p>The entrypoint exports <code>PATH=$SEEKR_CHAIN_NIX_CLOSURE/bin:$PATH</code> and
+<code>LD_LIBRARY_PATH=$SEEKR_CHAIN_NIX_CLOSURE/lib:...</code> before running your script.
+Most binaries don't need <code>LD_LIBRARY_PATH</code> (nix bakes RPATH); it's a fallback
+for <code>dlopen</code> calls that resolve unqualified library names (e.g. RCCL loading
+<code>libibverbs.so.1</code>).</p>
+<h3 id="warm-cache-scheduling">Warm-cache scheduling<a class="headerlink" href="#warm-cache-scheduling" title="Permanent link">&para;</a></h3>
+<p>When you submit a job, seekr-chain queries the k8s API for <strong>pods that
+carry the closure label</strong> (<code>seekr-chain.nix/closure=&lt;hash&gt;</code>), regardless of
+phase. Completed pods stick around for the workflow TTL (7 days by default)
+with their <code>spec.nodeName</code> populated — so they serve as a record of "this
+node had this closure on disk recently."</p>
+<p>The list of node names goes into the new pod as a soft <code>nodeAffinity</code>
+preference (weight 90):</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-6-1" name="__codelineno-6-1" href="#__codelineno-6-1"></a><span class="nt">nodeAffinity</span><span class="p">:</span>
+<a id="__codelineno-6-2" name="__codelineno-6-2" href="#__codelineno-6-2"></a><span class="w">  </span><span class="nt">preferredDuringSchedulingIgnoredDuringExecution</span><span class="p">:</span>
+<a id="__codelineno-6-3" name="__codelineno-6-3" href="#__codelineno-6-3"></a><span class="w">  </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">weight</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">90</span>
+<a id="__codelineno-6-4" name="__codelineno-6-4" href="#__codelineno-6-4"></a><span class="w">    </span><span class="nt">preference</span><span class="p">:</span>
+<a id="__codelineno-6-5" name="__codelineno-6-5" href="#__codelineno-6-5"></a><span class="w">      </span><span class="nt">matchExpressions</span><span class="p">:</span>
+<a id="__codelineno-6-6" name="__codelineno-6-6" href="#__codelineno-6-6"></a><span class="w">      </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">key</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">kubernetes.io/hostname</span>
+<a id="__codelineno-6-7" name="__codelineno-6-7" href="#__codelineno-6-7"></a><span class="w">        </span><span class="nt">operator</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">In</span>
+<a id="__codelineno-6-8" name="__codelineno-6-8" href="#__codelineno-6-8"></a><span class="w">        </span><span class="nt">values</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">[</span><span class="nv">node-1</span><span class="p p-Indicator">,</span><span class="w"> </span><span class="nv">node-3</span><span class="p p-Indicator">,</span><span class="w"> </span><span class="nv">node-7</span><span class="p p-Indicator">,</span><span class="w"> </span><span class="nv">...</span><span class="p p-Indicator">]</span>
+</code></pre></div>
+<p>The scheduler scores those nodes higher; if any can fit the pod, it lands
+there and the chain-nix-init fast path triggers (~1 s startup). If they're
+all saturated, the pod lands on a cold node and pulls fresh — degraded but
+not blocked.</p>
+<p>There's also a per-closure <code>podAffinity</code> (weight 50) for <strong>concurrent</strong>
+co-scheduling: multiple pods in the same submit that share a closure attract
+toward each other's node.</p>
+<h3 id="build-step-dedup">Build-step dedup<a class="headerlink" href="#build-step-dedup" title="Permanent link">&para;</a></h3>
+<p>If multiple roles in one workflow share a closure (e.g. a multi-role step
+where all roles use the same env), seekr-chain synthesizes <strong>one</strong> build
+step shared by all consumers via <code>depends_on</code>. The build step name is
+deterministic (<code>nix-build-&lt;hash[:12]&gt;</code>) so two submits that need the same
+closure produce identical step names — no duplication.</p>
+<h3 id="gc">GC<a class="headerlink" href="#gc" title="Permanent link">&para;</a></h3>
+<p><code>chain-nix-init</code> runs <code>resources/nix-gc.sh</code> at the end of every pull. It:</p>
+<ol>
+<li>Reads on-disk size of <code>/nix</code> (or uses the value chain-nix-init
+   just computed for its summary, to avoid a redundant <code>du</code>).</li>
+<li>If under budget (<code>nix_store_max_size</code>, default 128 GiB), exits.</li>
+<li>Otherwise: writes a symlink to the just-pulled closure under
+   <code>/nix/var/nix/gcroots/seekr-chain/active</code> (so nix's GC
+   considers it live), then calls <code>nix store gc --max &lt;overage&gt;</code>.</li>
+</ol>
+<p>nix's GC respects gcroots: the active closure and all its transitive deps
+are protected; everything else (older pulls' closures) is eligible to
+delete. Failures (lock contention, etc.) don't fail the pod.</p>
+<h2 id="recipes">Recipes<a class="headerlink" href="#recipes" title="Permanent link">&para;</a></h2>
+<h3 id="lock-your-inputs">Lock your inputs<a class="headerlink" href="#lock-your-inputs" title="Permanent link">&para;</a></h3>
+<p>Commit your <code>flake.lock</code> alongside <code>flake.nix</code>. The lock pins exact
+nixpkgs commits; without it, every submit gets a fresh nixpkgs which
+re-evaluates to a different closure hash and re-triggers the build.</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-7-1" name="__codelineno-7-1" href="#__codelineno-7-1"></a>nix<span class="w"> </span>flake<span class="w"> </span>lock
+<a id="__codelineno-7-2" name="__codelineno-7-2" href="#__codelineno-7-2"></a>git<span class="w"> </span>add<span class="w"> </span>flake.nix<span class="w"> </span>flake.lock
+</code></pre></div>
+<h3 id="stabilize-your-closure-hash">Stabilize your closure hash<a class="headerlink" href="#stabilize-your-closure-hash" title="Permanent link">&para;</a></h3>
+<p>seekr-chain already evaluates from the curated upload set (so <code>.venv</code>, <code>.git</code>,
+and caches don't affect the hash — see <a href="#submit-time-pipeline">Submit-time
+pipeline</a>). To go further and keep <em>unrelated</em> edits from
+churning the closure — editing a <code>README</code>, reformatting a <code>.nix</code> file, bumping a
+comment — narrow what your flake's derivation actually reads with
+<a href="https://nix.dev/tutorials/working-with-local-files"><code>lib.fileset</code></a>:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-8-1" name="__codelineno-8-1" href="#__codelineno-8-1"></a><span class="k">let</span>
+<a id="__codelineno-8-2" name="__codelineno-8-2" href="#__codelineno-8-2"></a>  <span class="ss">src</span> <span class="o">=</span> pkgs<span class="o">.</span>lib<span class="o">.</span>fileset<span class="o">.</span>toSource <span class="p">{</span>
+<a id="__codelineno-8-3" name="__codelineno-8-3" href="#__codelineno-8-3"></a>    <span class="ss">root</span> <span class="o">=</span> <span class="l">./.</span><span class="p">;</span>
+<a id="__codelineno-8-4" name="__codelineno-8-4" href="#__codelineno-8-4"></a>    <span class="ss">fileset</span> <span class="o">=</span> pkgs<span class="o">.</span>lib<span class="o">.</span>fileset<span class="o">.</span>unions <span class="p">[</span>
+<a id="__codelineno-8-5" name="__codelineno-8-5" href="#__codelineno-8-5"></a>      <span class="l">./requirements.txt</span>
+<a id="__codelineno-8-6" name="__codelineno-8-6" href="#__codelineno-8-6"></a>      <span class="p">(</span>pkgs<span class="o">.</span>lib<span class="o">.</span>fileset<span class="o">.</span>fileFilter <span class="p">(</span>f<span class="p">:</span> f<span class="o">.</span>hasExt <span class="s2">&quot;py&quot;</span><span class="p">)</span> <span class="l">./src</span><span class="p">)</span>
+<a id="__codelineno-8-7" name="__codelineno-8-7" href="#__codelineno-8-7"></a>    <span class="p">];</span>
+<a id="__codelineno-8-8" name="__codelineno-8-8" href="#__codelineno-8-8"></a>  <span class="p">};</span>
+<a id="__codelineno-8-9" name="__codelineno-8-9" href="#__codelineno-8-9"></a><span class="k">in</span>
+<a id="__codelineno-8-10" name="__codelineno-8-10" href="#__codelineno-8-10"></a><span class="c1"># ... use `src` where your derivation needs the code ...</span>
+</code></pre></div>
+<p>This is complementary to the upload filtering: <code>code.exclude</code> controls what's
+<em>uploaded and evaluated</em>, while <code>lib.fileset</code> controls what <em>inside</em> the flake
+feeds a given derivation's hash. Only paths in the fileset trigger a rebuild.</p>
+<h3 id="bake-env-vars-into-the-closure">Bake env vars into the closure<a class="headerlink" href="#bake-env-vars-into-the-closure" title="Permanent link">&para;</a></h3>
+<p>The closure-fetch wrapper sets <code>PATH</code> and <code>LD_LIBRARY_PATH</code>, but anything
+your binary checks at runtime (NCCL settings, RCCL tuning, OMP threads)
+isn't there by default. Use <code>pkgs.writeShellScriptBin</code> to wrap your
+entrypoint with the env you want — the wrapper goes into the closure and
+runs first.</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-9-1" name="__codelineno-9-1" href="#__codelineno-9-1"></a><span class="k">let</span>
+<a id="__codelineno-9-2" name="__codelineno-9-2" href="#__codelineno-9-2"></a>  <span class="ss">tuned-torchrun</span> <span class="o">=</span> pkgs<span class="o">.</span>writeShellScriptBin <span class="s2">&quot;torchrun&quot;</span> <span class="s s-Multiline">&#39;&#39;</span>
+<a id="__codelineno-9-3" name="__codelineno-9-3" href="#__codelineno-9-3"></a><span class="s s-Multiline">    # &#39;:=&#39; sets the default only if unset, so user can still override at submit</span>
+<a id="__codelineno-9-4" name="__codelineno-9-4" href="#__codelineno-9-4"></a><span class="s s-Multiline">    : </span><span class="se">&#39;&#39;$</span><span class="s s-Multiline">{NCCL_IB_GID_INDEX:=3}</span>
+<a id="__codelineno-9-5" name="__codelineno-9-5" href="#__codelineno-9-5"></a><span class="s s-Multiline">    : </span><span class="se">&#39;&#39;$</span><span class="s s-Multiline">{NCCL_CROSS_NIC:=1}</span>
+<a id="__codelineno-9-6" name="__codelineno-9-6" href="#__codelineno-9-6"></a><span class="s s-Multiline">    export NCCL_IB_GID_INDEX NCCL_CROSS_NIC</span>
+<a id="__codelineno-9-7" name="__codelineno-9-7" href="#__codelineno-9-7"></a><span class="s s-Multiline">    exec </span><span class="si">${</span>python<span class="si">}</span><span class="s s-Multiline">/bin/torchrun &quot;$@&quot;</span>
+<a id="__codelineno-9-8" name="__codelineno-9-8" href="#__codelineno-9-8"></a><span class="s s-Multiline">  &#39;&#39;</span><span class="p">;</span>
+<a id="__codelineno-9-9" name="__codelineno-9-9" href="#__codelineno-9-9"></a><span class="k">in</span>
+<a id="__codelineno-9-10" name="__codelineno-9-10" href="#__codelineno-9-10"></a>pkgs<span class="o">.</span>buildEnv <span class="p">{</span>
+<a id="__codelineno-9-11" name="__codelineno-9-11" href="#__codelineno-9-11"></a>  <span class="ss">name</span> <span class="o">=</span> <span class="s2">&quot;my-env&quot;</span><span class="p">;</span>
+<a id="__codelineno-9-12" name="__codelineno-9-12" href="#__codelineno-9-12"></a>  <span class="ss">paths</span> <span class="o">=</span> <span class="p">[</span>
+<a id="__codelineno-9-13" name="__codelineno-9-13" href="#__codelineno-9-13"></a>    <span class="p">(</span>pkgs<span class="o">.</span>lib<span class="o">.</span>hiPrio tuned-torchrun<span class="p">)</span>   <span class="c1"># win the torchrun symlink collision</span>
+<a id="__codelineno-9-14" name="__codelineno-9-14" href="#__codelineno-9-14"></a>    python
+<a id="__codelineno-9-15" name="__codelineno-9-15" href="#__codelineno-9-15"></a>    pkgs<span class="o">.</span>bash pkgs<span class="o">.</span>coreutils pkgs<span class="o">.</span>cacert
+<a id="__codelineno-9-16" name="__codelineno-9-16" href="#__codelineno-9-16"></a>  <span class="p">];</span>
+<a id="__codelineno-9-17" name="__codelineno-9-17" href="#__codelineno-9-17"></a><span class="p">}</span>
+</code></pre></div>
+<p><code>lib.hiPrio</code> makes the wrapper's <code>bin/torchrun</code> win over the python
+package's <code>bin/torchrun</code> in the buildEnv symlink tree.</p>
+<h3 id="beefy-build-resources">Beefy build resources<a class="headerlink" href="#beefy-build-resources" title="Permanent link">&para;</a></h3>
+<p>The auto-injected build step uses modest defaults (4 CPU, 16 GiB RAM, no
+GPU). Native builds (FA, custom kernels, pytorch from source) need much
+more:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-10-1" name="__codelineno-10-1" href="#__codelineno-10-1"></a><span class="nt">steps</span><span class="p">:</span>
+<a id="__codelineno-10-2" name="__codelineno-10-2" href="#__codelineno-10-2"></a><span class="w">  </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">name</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">train</span>
+<a id="__codelineno-10-3" name="__codelineno-10-3" href="#__codelineno-10-3"></a><span class="w">    </span><span class="nt">nix</span><span class="p">:</span>
+<a id="__codelineno-10-4" name="__codelineno-10-4" href="#__codelineno-10-4"></a><span class="w">      </span><span class="nt">expression</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">./</span>
+<a id="__codelineno-10-5" name="__codelineno-10-5" href="#__codelineno-10-5"></a><span class="w">      </span><span class="nt">build_resources</span><span class="p">:</span>
+<a id="__codelineno-10-6" name="__codelineno-10-6" href="#__codelineno-10-6"></a><span class="w">        </span><span class="nt">num_nodes</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">1</span>
+<a id="__codelineno-10-7" name="__codelineno-10-7" href="#__codelineno-10-7"></a><span class="w">        </span><span class="nt">cpus_per_node</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">32</span>
+<a id="__codelineno-10-8" name="__codelineno-10-8" href="#__codelineno-10-8"></a><span class="w">        </span><span class="nt">mem_per_node</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">256G</span>
+<a id="__codelineno-10-9" name="__codelineno-10-9" href="#__codelineno-10-9"></a><span class="w">        </span><span class="nt">ephemeral_storage_per_node</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">500G</span>
+<a id="__codelineno-10-10" name="__codelineno-10-10" href="#__codelineno-10-10"></a><span class="w">        </span><span class="nt">gpus_per_node</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">0</span>
+<a id="__codelineno-10-11" name="__codelineno-10-11" href="#__codelineno-10-11"></a><span class="w">    </span><span class="nt">script</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">python train.py</span>
+</code></pre></div>
+<h3 id="nix-build-parallelism">Nix build parallelism<a class="headerlink" href="#nix-build-parallelism" title="Permanent link">&para;</a></h3>
+<p>Nix defaults to one concurrent derivation (<code>max-jobs = 1</code>) and makes all
+available cores visible to that derivation (<code>cores = 0</code>). These defaults
+can underuse a build pod when a closure contains many independent
+derivations. Configure both values per Nix runtime:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-11-1" name="__codelineno-11-1" href="#__codelineno-11-1"></a><span class="nt">steps</span><span class="p">:</span>
+<a id="__codelineno-11-2" name="__codelineno-11-2" href="#__codelineno-11-2"></a><span class="w">  </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">name</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">train</span>
+<a id="__codelineno-11-3" name="__codelineno-11-3" href="#__codelineno-11-3"></a><span class="w">    </span><span class="nt">nix</span><span class="p">:</span>
+<a id="__codelineno-11-4" name="__codelineno-11-4" href="#__codelineno-11-4"></a><span class="w">      </span><span class="nt">expression</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">./</span>
+<a id="__codelineno-11-5" name="__codelineno-11-5" href="#__codelineno-11-5"></a><span class="w">      </span><span class="nt">build_resources</span><span class="p">:</span>
+<a id="__codelineno-11-6" name="__codelineno-11-6" href="#__codelineno-11-6"></a><span class="w">        </span><span class="nt">cpus_per_node</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">32</span>
+<a id="__codelineno-11-7" name="__codelineno-11-7" href="#__codelineno-11-7"></a><span class="w">        </span><span class="nt">mem_per_node</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">256G</span>
+<a id="__codelineno-11-8" name="__codelineno-11-8" href="#__codelineno-11-8"></a><span class="w">      </span><span class="nt">build_max_jobs</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">4</span>
+<a id="__codelineno-11-9" name="__codelineno-11-9" href="#__codelineno-11-9"></a><span class="w">      </span><span class="nt">build_cores</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">8</span>
+<a id="__codelineno-11-10" name="__codelineno-11-10" href="#__codelineno-11-10"></a><span class="w">    </span><span class="nt">script</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">python train.py</span>
+</code></pre></div>
+<p><code>build_max_jobs</code> accepts a non-negative integer or <code>AUTO</code>;
+case-insensitive spellings such as <code>auto</code> are accepted and normalized.
+<code>build_cores</code> is a non-negative integer. A value of zero retains Nix's
+behavior of exposing all available cores to each derivation. These values are
+applied through the build pod's centralized <code>NIX_CONFIG</code>, keeping the
+wrapper-visible <code>nix build</code> command stable. They tune Nix within the pod; they
+do not change the pod's Kubernetes resource request, which remains controlled
+by <code>build_resources</code>.</p>
+<p>Additional build controls that may be exposed as typed settings in the
+future include per-derivation <code>timeout</code>, <code>max-silent-time</code>,
+<code>keep-going</code>, <code>keep-failed</code>, <code>max-build-log-size</code>, and <code>fallback</code>.
+Cache trust, substituters, sandboxing, build users, and shared-store garbage
+collection remain seekr-chain-managed invariants rather than arbitrary
+per-step options.</p>
+<h3 id="pre-build-manually-refuse-auto-build">Pre-build manually, refuse auto-build<a class="headerlink" href="#pre-build-manually-refuse-auto-build" title="Permanent link">&para;</a></h3>
+<p>For workflows where you want the build to happen in CI or by hand and
+fail-fast otherwise:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-12-1" name="__codelineno-12-1" href="#__codelineno-12-1"></a><span class="nt">steps</span><span class="p">:</span>
+<a id="__codelineno-12-2" name="__codelineno-12-2" href="#__codelineno-12-2"></a><span class="w">  </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">name</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">train</span>
+<a id="__codelineno-12-3" name="__codelineno-12-3" href="#__codelineno-12-3"></a><span class="w">    </span><span class="nt">nix</span><span class="p">:</span>
+<a id="__codelineno-12-4" name="__codelineno-12-4" href="#__codelineno-12-4"></a><span class="w">      </span><span class="nt">expression</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">./</span>
+<a id="__codelineno-12-5" name="__codelineno-12-5" href="#__codelineno-12-5"></a><span class="w">      </span><span class="nt">build</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">false</span><span class="w">   </span><span class="c1"># don&#39;t inject a build step; error at submit if missing</span>
+<a id="__codelineno-12-6" name="__codelineno-12-6" href="#__codelineno-12-6"></a><span class="w">    </span><span class="nt">script</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">python train.py</span>
+</code></pre></div>
+<h3 id="tls-in-the-closure">TLS in the closure<a class="headerlink" href="#tls-in-the-closure" title="Permanent link">&para;</a></h3>
+<p>If your job makes HTTPS requests (pip, requests, urllib, curl), the
+closure needs <code>pkgs.cacert</code>. The runtime image's <code>/nix</code> is shadowed by
+the closure mount, so the image's CA bundle isn't reachable. seekr-chain
+sets <code>SSL_CERT_FILE</code>, <code>REQUESTS_CA_BUNDLE</code>, and <code>NIX_SSL_CERT_FILE</code> to
+<code>$CLOSURE/etc/ssl/certs/ca-bundle.crt</code> — but that path only exists if
+<code>cacert</code> is in your closure.</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-13-1" name="__codelineno-13-1" href="#__codelineno-13-1"></a>pkgs<span class="o">.</span>buildEnv <span class="p">{</span>
+<a id="__codelineno-13-2" name="__codelineno-13-2" href="#__codelineno-13-2"></a>  <span class="ss">name</span> <span class="o">=</span> <span class="s2">&quot;...&quot;</span><span class="p">;</span>
+<a id="__codelineno-13-3" name="__codelineno-13-3" href="#__codelineno-13-3"></a>  <span class="ss">paths</span> <span class="o">=</span> <span class="p">[</span>
+<a id="__codelineno-13-4" name="__codelineno-13-4" href="#__codelineno-13-4"></a>    <span class="c1"># ...your deps...</span>
+<a id="__codelineno-13-5" name="__codelineno-13-5" href="#__codelineno-13-5"></a>    pkgs<span class="o">.</span>cacert    <span class="c1"># ← required for HTTPS</span>
+<a id="__codelineno-13-6" name="__codelineno-13-6" href="#__codelineno-13-6"></a>  <span class="p">];</span>
+<a id="__codelineno-13-7" name="__codelineno-13-7" href="#__codelineno-13-7"></a><span class="p">}</span>
+</code></pre></div>
+<h2 id="when-to-use-nix-mode">When to use nix-mode<a class="headerlink" href="#when-to-use-nix-mode" title="Permanent link">&para;</a></h2>
+<p><strong>Use nix-mode when:</strong></p>
+<ul>
+<li>Your image is large (&gt;2 GB) and pod startup dominates short-job latency</li>
+<li>You iterate on dependencies often and Docker layer rebuilds are slow</li>
+<li>Multiple jobs share most of their dependencies and you want
+  cross-image deduplication</li>
+<li>You want exact reproducibility (closure hash uniquely identifies the
+  runtime)</li>
+</ul>
+<p><strong>Stick with image-mode when:</strong></p>
+<ul>
+<li>Your runtime is a small base image with a few pip installs (closure
+  pull overhead isn't worth the bookkeeping)</li>
+<li>You don't have <code>nix</code> on your submit machine and don't want to install
+  it</li>
+<li>You need an OS-level capability that doesn't fit in a nix closure
+  (e.g. systemd, custom kernel modules, FUSE filesystems)</li>
+<li>Your team isn't comfortable maintaining <code>flake.nix</code> for their
+  environments</li>
+</ul>
+<h2 id="trade-offs-vs-image-mode">Trade-offs vs image-mode<a class="headerlink" href="#trade-offs-vs-image-mode" title="Permanent link">&para;</a></h2>
+<table>
+<thead>
+<tr>
+<th>Axis</th>
+<th>Image-mode</th>
+<th>Nix-mode</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Cold pod startup</td>
+<td>sequential layer extract (mins on multi-GB images)</td>
+<td>parallel per-path fetch + warm-cache (~10-60s)</td>
+</tr>
+<tr>
+<td>Warm pod startup</td>
+<td>full image layer cache</td>
+<td>~1-2 s (path-info check only)</td>
+</tr>
+<tr>
+<td>First-time setup</td>
+<td>none</td>
+<td>install nix locally; write <code>flake.nix</code></td>
+</tr>
+<tr>
+<td>Dependency bump</td>
+<td>rebuild full image layer (or careful layering)</td>
+<td>upload only changed store paths (~MB)</td>
+</tr>
+<tr>
+<td>Image bloat</td>
+<td>accumulates unused layers</td>
+<td>only what's actually depended on</td>
+</tr>
+<tr>
+<td>Build-time</td>
+<td>docker build, your hardware</td>
+<td>in-cluster, on whatever build_resources you set</td>
+</tr>
+<tr>
+<td>Visibility</td>
+<td><code>docker history</code></td>
+<td><code>nix path-info --closure-size</code></td>
+</tr>
+<tr>
+<td>Reproducibility</td>
+<td>image digest</td>
+<td>closure hash (deterministic from flake + lock)</td>
+</tr>
+<tr>
+<td>Storage on registry</td>
+<td>per-image full layers</td>
+<td>per-path content-addressed (deduplicated)</td>
+</tr>
+<tr>
+<td>Cluster setup</td>
+<td>nothing</td>
+<td>binary cache (e.g. s3 bucket) + RBAC for chain to access it</td>
+</tr>
+</tbody>
+</table>
+<h2 id="troubleshooting">Troubleshooting<a class="headerlink" href="#troubleshooting" title="Permanent link">&para;</a></h2>
+<h3 id="nixexpression-must-be-a-path-relative-to-codepath"><code>nix.expression must be a path relative to code.path</code><a class="headerlink" href="#nixexpression-must-be-a-path-relative-to-codepath" title="Permanent link">&para;</a></h3>
+<p>The path you passed to <code>nix.expression</code> is absolute. Use a relative path
+under <code>code.path</code> — both submit-side eval and the build pod's <code>nix build</code>
+interpret it the same way (relative to <code>code.path</code> / <code>/seekr-chain/workspace</code>).</p>
+<h3 id="closure-nixstorehash-is-not-in-store-and-nixbuildfalse"><code>closure /nix/store/&lt;hash&gt; is not in store ..., and nix.build=False</code><a class="headerlink" href="#closure-nixstorehash-is-not-in-store-and-nixbuildfalse" title="Permanent link">&para;</a></h3>
+<p>Closure isn't in the binary cache and you've disabled auto-build. Either:</p>
+<ul>
+<li>Pre-build manually (e.g. <code>nix copy --to s3://store $(nix build --print-out-paths ./)</code>), or</li>
+<li>Set <code>nix.build: true</code> to let seekr-chain inject a build step.</li>
+</ul>
+<h3 id="nixs-s3-store-does-not-support-path-prefixes"><code>nix's s3:// store does not support path prefixes</code><a class="headerlink" href="#nixs-s3-store-does-not-support-path-prefixes" title="Permanent link">&para;</a></h3>
+<p>You set <code>nix_store</code> to something like <code>s3://bucket/some/prefix</code>. nix's
+native s3 store doesn't honor path prefixes — give the cache its own
+bucket. Use <code>s3://bucket?region=us-east-1</code> (bare bucket + query params).</p>
+<h3 id="build-step-succeeds-but-consumer-cant-find-libfooso">Build step succeeds but consumer can't find <code>libfoo.so</code><a class="headerlink" href="#build-step-succeeds-but-consumer-cant-find-libfooso" title="Permanent link">&para;</a></h3>
+<p>The closure exports <code>lib/</code> from each input, but <code>LD_LIBRARY_PATH</code> only
+covers <code>dlopen</code> of unqualified names. If your binary has a hardcoded
+<code>/usr/lib/libfoo.so</code> path, nix isn't involved — fix the build or use
+<code>pkgs.runCommand</code> to patchelf the binary.</p>
+<h3 id="closure-already-fully-present-on-node-but-main-container-still-slow-to-start">"Closure already fully present on node" but main container still slow to start<a class="headerlink" href="#closure-already-fully-present-on-node-but-main-container-still-slow-to-start" title="Permanent link">&para;</a></h3>
+<p>That's the chain-nix-init fast path working correctly. Look at the main
+container's image pull (not the nix-runner image — your <code>main_image</code>,
+if you set one) and at any post-start hooks.</p>
+<h3 id="warm-cache-nodeaffinity-not-steering-pods">Warm-cache nodeAffinity not steering pods<a class="headerlink" href="#warm-cache-nodeaffinity-not-steering-pods" title="Permanent link">&para;</a></h3>
+<p>Run:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-14-1" name="__codelineno-14-1" href="#__codelineno-14-1"></a><span class="c1"># At submit time, check which pods currently carry your closure label</span>
+<a id="__codelineno-14-2" name="__codelineno-14-2" href="#__codelineno-14-2"></a>kubectl<span class="w"> </span>get<span class="w"> </span>pods<span class="w"> </span>-A<span class="w"> </span>-l<span class="w"> </span>seekr-chain.nix/closure<span class="o">=</span>&lt;your-hash&gt;<span class="w"> </span>-o<span class="w"> </span>wide
+</code></pre></div>
+<p>If the list is empty, no pods have been on the cluster with that closure
+recently (workflow TTL is 7 days by default — older pods are gone). The
+first submit pays the cold pull; subsequent ones get the affinity.</p>
+<p>If the list has pods but new pods still land on cold nodes, check:</p>
+<ul>
+<li>Are the listed nodes resource-constrained? Affinity is a <em>preference</em>,
+  not a constraint — saturated nodes get filtered out at Filter time
+  before scoring.</li>
+<li>Does your job have its own affinity rules? Pack affinity (<code>affinity:
+  [{type: POD, direction: ATTRACT, group: ...}]</code>) sums with the closure
+  affinity; they can conflict if the pack group is on cold nodes.</li>
+</ul>
+<h2 id="limitations">Limitations<a class="headerlink" href="#limitations" title="Permanent link">&para;</a></h2>
+<ul>
+<li><strong>No isolation between pods sharing a node.</strong> Every pod's <code>/nix</code> mount
+  is the node's full hostPath store. A pod can read (and theoretically
+  execute) other closures present on the same node. Acceptable in an
+  internal-trust cluster; not yet supported for multi-tenant. See the
+  branch ADR <code>2026-06-25-nix-images.md</code> for the design discussion.</li>
+<li><strong>Closure must be a flake.</strong> Plain <code>.nix</code> files work for eval but the
+  build step's <code>path:&lt;expression&gt;#packages.&lt;system&gt;.&lt;attr&gt;</code> ref requires
+  a flake.</li>
+<li><strong>Eval sees only the uploaded set.</strong> The flake is evaluated from your
+  <code>code.path</code> filtered by <code>code.include</code>/<code>code.exclude</code> — the same bytes the
+  build pod builds. Files dropped by <code>code.exclude</code> (default: <code>.venv</code>, <code>.git</code>,
+  <code>__pycache__</code>, <code>.pytest_cache</code>, <code>.ruff_cache</code>, <code>*.pyc</code>) are invisible to the
+  eval. Uncommitted files are fine; excluded ones are not.</li>
+<li><strong>Submit machine needs <code>nix</code>.</strong> Eval is local. No way around this
+  without a remote eval service. Install from
+  <a href="https://nixos.org/download">https://nixos.org/download</a>.</li>
+<li><strong><code>nix</code> is x86_64/aarch64 Linux only on the cluster side.</strong> macOS and
+  Windows clusters aren't supported (the runtime image is Linux).</li>
+<li><strong>Closure path is system-specific.</strong> Build for the system that matches
+  your cluster (<code>nix.system</code>); a closure built for <code>x86_64-linux</code> won't
+  run on <code>aarch64-linux</code>.</li>
+<li><strong>No periodic GC.</strong> The hostPath store's GC runs only when a new pod
+  pulls a closure that pushes the node over budget. A node with no
+  recent pulls keeps its existing closures indefinitely.</li>
+</ul>
+<h2 id="examples">Examples<a class="headerlink" href="#examples" title="Permanent link">&para;</a></h2>
+<p>The repo's <code>examples/</code> directory has several nix-mode workflows:</p>
+<ul>
+<li><code>examples/6_nix_runtime/</code> — minimal python env</li>
+<li><code>examples/7_nix_rocm_smi/</code> — ROCm tooling smoke test</li>
+<li><code>examples/8_nix_torchrun/</code> — single-node torchrun</li>
+<li><code>examples/9_nix_torchrun_multinode/</code> — multi-node torchrun</li>
+<li><code>examples/10_nix_bandwidth_test/</code> — multi-node ROCm all-reduce
+  bandwidth test (the perf demonstrator: ~297 GB/s on
+  MI300X + ConnectX RoCE, matching image-mode baseline)</li>
+</ul>
+
+
+
+
+
+
+
+
+
+
+
+
+                
+              </article>
+            </div>
+          
+          
+<script>var target=document.getElementById(location.hash.slice(1));target&&target.name&&(target.checked=target.name.startsWith("__tabbed_"))</script>
+        </div>
+        
+          <button type="button" class="md-top md-icon" data-md-component="top" hidden>
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M13 20h-2V8l-5.5 5.5-1.42-1.42L12 4.16l7.92 7.92-1.42 1.42L13 8z"/></svg>
+  Back to top
+</button>
+        
+      </main>
+      
+        <footer class="md-footer">
+  
+  <div class="md-footer-meta md-typeset">
+    <div class="md-footer-meta__inner md-grid">
+      <div class="md-copyright">
+  
+  
+    Made with
+    <a href="https://squidfunk.github.io/mkdocs-material/" target="_blank" rel="noopener">
+      Material for MkDocs
+    </a>
+  
+</div>
+      
+        
+<div class="md-social">
+  
+    
+    
+    
+    
+      
+      
+    
+    <a href="https://github.com/seekr-technologies/seekr-chain" target="_blank" rel="noopener" title="github.com" class="md-social__link">
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M173.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3.3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6m-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5.3-6.2 2.3m44.2-1.7c-2.9.7-4.9 2.6-4.6 4.9.3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9M252.8 8C114.1 8 8 113.3 8 252c0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.7 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.4 17.3 12.1C436.2 457.8 504 362.9 504 252 504 113.3 391.5 8 252.8 8M105.2 352.9c-1.3 1-1 3.3.7 5.2 1.6 1.6 3.9 2.3 5.2 1 1.3-1 1-3.3-.7-5.2-1.6-1.6-3.9-2.3-5.2-1m-10.8-8.1c-.7 1.3.3 2.9 2.3 3.9 1.6 1 3.6.7 4.3-.7.7-1.3-.3-2.9-2.3-3.9-2-.6-3.6-.3-4.3.7m32.4 35.6c-1.6 1.3-1 4.3 1.3 6.2 2.3 2.3 5.2 2.6 6.5 1 1.3-1.3.7-4.3-1.3-6.2-2.2-2.3-5.2-2.6-6.5-1m-11.4-14.7c-1.6 1-1.6 3.6 0 5.9s4.3 3.3 5.6 2.3c1.6-1.3 1.6-3.9 0-6.2-1.4-2.3-4-3.3-5.6-2"/></svg>
+    </a>
+  
+</div>
+      
+    </div>
+  </div>
+</footer>
+      
+    </div>
+    <div class="md-dialog" data-md-component="dialog">
+      <div class="md-dialog__inner md-typeset"></div>
+    </div>
+    
+    
+    
+      
+      
+      <script id="__config" type="application/json">{"annotate": null, "base": "../..", "features": ["navigation.tabs", "navigation.sections", "navigation.expand", "navigation.top", "search.suggest", "search.highlight", "content.code.copy", "content.code.annotate"], "search": "../../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": {"provider": "mike"}}</script>
+    
+    
+      <script src="../../assets/javascripts/bundle.79ae519e.min.js"></script>
+      
+    
+  </body>
+</html>

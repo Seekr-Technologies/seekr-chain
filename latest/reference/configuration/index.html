@@ -1,0 +1,2802 @@
+
+<!doctype html>
+<html lang="en" class="no-js">
+  <head>
+    
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      
+        <meta name="description" content="A no-nonsense job launcher for distributed workloads on Kubernetes">
+      
+      
+      
+        <link rel="canonical" href="https://seekr-technologies.github.io/seekr-chain/latest/reference/configuration/">
+      
+      
+        <link rel="prev" href="../../guides/secrets/">
+      
+      
+        <link rel="next" href="../environment-variables/">
+      
+      
+        
+      
+      
+      <link rel="icon" href="../../assets/images/favicon.png">
+      <meta name="generator" content="mkdocs-ProperDocs 1.6.7, mkdocs-material-9.7.6">
+    
+    
+      
+        <title>Configuration - seekr-chain</title>
+      
+    
+    
+      <link rel="stylesheet" href="../../assets/stylesheets/main.484c7ddc.min.css">
+      
+        
+        <link rel="stylesheet" href="../../assets/stylesheets/palette.ab4e12ef.min.css">
+      
+      
+
+
+    
+    
+      
+    
+    
+      
+        
+        
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+        <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Roboto:300,300i,400,400i,700,700i%7CRoboto+Mono:400,400i,700,700i&display=fallback">
+        <style>:root{--md-text-font:"Roboto";--md-code-font:"Roboto Mono"}</style>
+      
+    
+    
+      <link rel="stylesheet" href="../../assets/_mkdocstrings.css">
+    
+    <script>__md_scope=new URL("../..",location),__md_hash=e=>[...e].reduce(((e,_)=>(e<<5)-e+_.charCodeAt(0)),0),__md_get=(e,_=localStorage,t=__md_scope)=>JSON.parse(_.getItem(t.pathname+"."+e)),__md_set=(e,_,t=localStorage,a=__md_scope)=>{try{t.setItem(a.pathname+"."+e,JSON.stringify(_))}catch(e){}}</script>
+    
+      
+
+    
+    
+  </head>
+  
+  
+    
+    
+      
+    
+    
+    
+    
+    <body dir="ltr" data-md-color-scheme="slate" data-md-color-primary="indigo" data-md-color-accent="indigo">
+  
+    
+    <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
+    <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
+    <label class="md-overlay" for="__drawer"></label>
+    <div data-md-component="skip">
+      
+        
+        <a href="#configuration-reference" class="md-skip">
+          Skip to content
+        </a>
+      
+    </div>
+    <div data-md-component="announce">
+      
+    </div>
+    
+      <div data-md-color-scheme="default" data-md-component="outdated" hidden>
+        
+      </div>
+    
+    
+      
+
+<header class="md-header" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="Header">
+    <a href="../.." title="seekr-chain" class="md-header__button md-logo" aria-label="seekr-chain" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+
+    </a>
+    <label class="md-header__button md-icon" for="__drawer">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M3 6h18v2H3zm0 5h18v2H3zm0 5h18v2H3z"/></svg>
+    </label>
+    <div class="md-header__title" data-md-component="header-title">
+      <div class="md-header__ellipsis">
+        <div class="md-header__topic">
+          <span class="md-ellipsis">
+            seekr-chain
+          </span>
+        </div>
+        <div class="md-header__topic" data-md-component="header-topic">
+          <span class="md-ellipsis">
+            
+              Configuration
+            
+          </span>
+        </div>
+      </div>
+    </div>
+    
+      
+        <form class="md-header__option" data-md-component="palette">
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="" data-md-color-scheme="slate" data-md-color-primary="indigo" data-md-color-accent="indigo"  aria-label="Switch to light mode"  type="radio" name="__palette" id="__palette_0">
+    
+      <label class="md-header__button md-icon" title="Switch to light mode" for="__palette_1" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 18c-.89 0-1.74-.2-2.5-.55C11.56 16.5 13 14.42 13 12s-1.44-4.5-3.5-5.45C10.26 6.2 11.11 6 12 6a6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="" data-md-color-scheme="default" data-md-color-primary="indigo" data-md-color-accent="indigo"  aria-label="Switch to dark mode"  type="radio" name="__palette" id="__palette_1">
+    
+      <label class="md-header__button md-icon" title="Switch to dark mode" for="__palette_0" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a4 4 0 0 0-4 4 4 4 0 0 0 4 4 4 4 0 0 0 4-4 4 4 0 0 0-4-4m0 10a6 6 0 0 1-6-6 6 6 0 0 1 6-6 6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+</form>
+      
+    
+    
+      <script>var palette=__md_get("__palette");if(palette&&palette.color){if("(prefers-color-scheme)"===palette.color.media){var media=matchMedia("(prefers-color-scheme: light)"),input=document.querySelector(media.matches?"[data-md-color-media='(prefers-color-scheme: light)']":"[data-md-color-media='(prefers-color-scheme: dark)']");palette.color.media=input.getAttribute("data-md-color-media"),palette.color.scheme=input.getAttribute("data-md-color-scheme"),palette.color.primary=input.getAttribute("data-md-color-primary"),palette.color.accent=input.getAttribute("data-md-color-accent")}for(var[key,value]of Object.entries(palette.color))document.body.setAttribute("data-md-color-"+key,value)}</script>
+    
+    
+    
+      
+      
+        <label class="md-header__button md-icon" for="__search">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        </label>
+        <div class="md-search" data-md-component="search" role="dialog">
+  <label class="md-search__overlay" for="__search"></label>
+  <div class="md-search__inner" role="search">
+    <form class="md-search__form" name="search">
+      <input type="text" class="md-search__input" name="query" aria-label="Search" placeholder="Search" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false" data-md-component="search-query" required>
+      <label class="md-search__icon md-icon" for="__search">
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+      </label>
+      <nav class="md-search__options" aria-label="Search">
+        
+        <button type="reset" class="md-search__icon md-icon" title="Clear" aria-label="Clear" tabindex="-1">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+        </button>
+      </nav>
+      
+        <div class="md-search__suggest" data-md-component="search-suggest"></div>
+      
+    </form>
+    <div class="md-search__output">
+      <div class="md-search__scrollwrap" tabindex="0" data-md-scrollfix>
+        <div class="md-search-result" data-md-component="search-result">
+          <div class="md-search-result__meta">
+            Initializing search
+          </div>
+          <ol class="md-search-result__list" role="presentation"></ol>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+      
+    
+    
+      <div class="md-header__source">
+        <a href="https://github.com/seekr-technologies/seekr-chain" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    seekr-technologies/seekr-chain
+  </div>
+</a>
+      </div>
+    
+  </nav>
+  
+</header>
+    
+    <div class="md-container" data-md-component="container">
+      
+      
+        
+          
+            
+<nav class="md-tabs" aria-label="Tabs" data-md-component="tabs">
+  <div class="md-grid">
+    <ul class="md-tabs__list">
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="../.." class="md-tabs__link">
+        
+  
+  
+    
+  
+  Home
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../installation/" class="md-tabs__link">
+          
+  
+  
+  Getting Started
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../features/" class="md-tabs__link">
+          
+  
+  
+  User Guide
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+    
+  
+  
+    
+    
+      <li class="md-tabs__item md-tabs__item--active">
+        <a href="./" class="md-tabs__link">
+          
+  
+  
+  Reference
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../developer/contributing/" class="md-tabs__link">
+          
+  
+  
+  Development
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="../../comparison/" class="md-tabs__link">
+        
+  
+  
+    
+  
+  Comparison
+
+      </a>
+    </li>
+  
+
+      
+    </ul>
+  </div>
+</nav>
+          
+        
+      
+      <main class="md-main" data-md-component="main">
+        <div class="md-main__inner md-grid">
+          
+            
+              
+              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+
+  
+
+
+<nav class="md-nav md-nav--primary md-nav--lifted" aria-label="Navigation" data-md-level="0">
+  <label class="md-nav__title" for="__drawer">
+    <a href="../.." title="seekr-chain" class="md-nav__button md-logo" aria-label="seekr-chain" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+
+    </a>
+    seekr-chain
+  </label>
+  
+    <div class="md-nav__source">
+      <a href="https://github.com/seekr-technologies/seekr-chain" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    seekr-technologies/seekr-chain
+  </div>
+</a>
+    </div>
+  
+  <ul class="md-nav__list" data-md-scrollfix>
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../.." class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Home
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_2" >
+        
+          
+          <label class="md-nav__link" for="__nav_2" id="__nav_2_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Getting Started
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_2_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_2">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Getting Started
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../installation/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Installation
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../getting-started/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Quick Start
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../examples/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Examples
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_3" >
+        
+          
+          <label class="md-nav__link" for="__nav_3" id="__nav_3_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    User Guide
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_3_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_3">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    User Guide
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../features/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Features
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../guides/interactive-jobs/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Interactive Jobs
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../guides/multi-node-training/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Multi-node Training
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../guides/nix-mode/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Nix-mode Runtime
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../guides/persistent-volumes/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Working with PVCs
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../guides/secrets/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Secrets Management
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+    
+  
+  
+  
+    
+    
+    
+    
+      
+        
+        
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--active md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_4" checked>
+        
+          
+          <label class="md-nav__link" for="__nav_4" id="__nav_4_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Reference
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_4_label" aria-expanded="true">
+          <label class="md-nav__title" for="__nav_4">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Reference
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+    
+  
+  
+  
+    <li class="md-nav__item md-nav__item--active">
+      
+      <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
+      
+      
+        
+      
+      
+        <label class="md-nav__link md-nav__link--active" for="__toc">
+          
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Configuration
+  
+
+    
+  </span>
+  
+  
+
+          <span class="md-nav__icon md-icon"></span>
+        </label>
+      
+      <a href="./" class="md-nav__link md-nav__link--active">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Configuration
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+      
+        
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#workflowconfig" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        WorkflowConfig
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="WorkflowConfig">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#codeconfig" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        CodeConfig
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#singlerolestepconfig" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        SingleRoleStepConfig
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="SingleRoleStepConfig">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#nixconfig" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        NixConfig
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="NixConfig">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#resourceconfig" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        ResourceConfig
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="ResourceConfig">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#persistentvolumeclaim" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        PersistentVolumeClaim
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#securitycontext" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        SecurityContext
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#dependsoncondition" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        DependsOnCondition
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#failurepolicy" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        FailurePolicy
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="FailurePolicy">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#failurerule" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        FailureRule
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#multirolestepconfig" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        MultiRoleStepConfig
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="MultiRoleStepConfig">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#successpolicy" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        SuccessPolicy
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#rolespecconfig" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        RoleSpecConfig
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#envsource" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        EnvSource
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#secretrefsource" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        SecretRefSource
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="SecretRefSource">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#secretref" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        SecretRef
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#nodeaffinityrule" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        NodeAffinityRule
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#podaffinityrule" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        PodAffinityRule
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#schedulingconfig" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        SchedulingConfig
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#loggingconfig" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        LoggingConfig
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#stepconfig" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        StepConfig
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#enums" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Enums
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Enums">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#gputype" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        GPUType
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../environment-variables/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Environment Variables
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../cli/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    CLI Reference
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../api/seekr_chain/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    API Reference
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_5" >
+        
+          
+          <label class="md-nav__link" for="__nav_5" id="__nav_5_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Development
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_5_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_5">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Development
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../developer/contributing/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Contributing
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../developer/CHANGELOG/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Changelog
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../roadmap/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Roadmap
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../comparison/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Comparison
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+  </ul>
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+            
+              
+              <div class="md-sidebar md-sidebar--secondary" data-md-component="sidebar" data-md-type="toc" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#workflowconfig" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        WorkflowConfig
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="WorkflowConfig">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#codeconfig" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        CodeConfig
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#singlerolestepconfig" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        SingleRoleStepConfig
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="SingleRoleStepConfig">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#nixconfig" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        NixConfig
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="NixConfig">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#resourceconfig" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        ResourceConfig
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="ResourceConfig">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#persistentvolumeclaim" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        PersistentVolumeClaim
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#securitycontext" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        SecurityContext
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#dependsoncondition" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        DependsOnCondition
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#failurepolicy" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        FailurePolicy
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="FailurePolicy">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#failurerule" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        FailureRule
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#multirolestepconfig" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        MultiRoleStepConfig
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="MultiRoleStepConfig">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#successpolicy" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        SuccessPolicy
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#rolespecconfig" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        RoleSpecConfig
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#envsource" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        EnvSource
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#secretrefsource" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        SecretRefSource
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="SecretRefSource">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#secretref" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        SecretRef
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#nodeaffinityrule" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        NodeAffinityRule
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#podaffinityrule" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        PodAffinityRule
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#schedulingconfig" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        SchedulingConfig
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#loggingconfig" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        LoggingConfig
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#stepconfig" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        StepConfig
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#enums" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Enums
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Enums">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#gputype" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        GPUType
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+          
+          
+            <div class="md-content" data-md-component="content">
+              
+              <article class="md-content__inner md-typeset">
+                
+                  
+
+
+
+<h1 id="configuration-reference">Configuration Reference<a class="headerlink" href="#configuration-reference" title="Permanent link">&para;</a></h1>
+<p>This page is auto-generated from the Pydantic models in <a href="https://github.com/seekr-technologies/seekr-chain/blob/main/src/seekr_chain/config.py"><code>config.py</code></a>. All configuration is validated with <code>extra="forbid"</code> — any unknown fields will raise an error.</p>
+<h2 id="workflowconfig">WorkflowConfig<a class="headerlink" href="#workflowconfig" title="Permanent link">&para;</a></h2>
+<p>Top-level workflow configuration. This is the root object for all seekr-chain configs.</p>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Type</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>name</code></td>
+<td><code>str</code></td>
+<td><strong>required</strong></td>
+<td>Workflow name (must be DNS-compliant)</td>
+</tr>
+<tr>
+<td><code>namespace</code></td>
+<td><code>str</code>, optional</td>
+<td><code>argo</code></td>
+<td>Kubernetes namespace for the Argo workflow</td>
+</tr>
+<tr>
+<td><code>code</code></td>
+<td><a href="#codeconfig">CodeConfig</a>, optional</td>
+<td><code>None</code></td>
+<td>Local code directory to upload into job containers</td>
+</tr>
+<tr>
+<td><code>ttl</code></td>
+<td>duration</td>
+<td><code>7d</code></td>
+<td>Time-to-live after completion before automatic cleanup</td>
+</tr>
+<tr>
+<td><code>artifact_ttl</code></td>
+<td>duration</td>
+<td><code>90d</code></td>
+<td>Time-to-live for S3 job artifacts (code package, logs, data) before background cleanup deletes them</td>
+</tr>
+<tr>
+<td><code>steps</code></td>
+<td>list[<a href="#singlerolestepconfig">SingleRoleStepConfig</a> | <a href="#multirolestepconfig">MultiRoleStepConfig</a>]</td>
+<td><strong>required</strong></td>
+<td>List of workflow steps</td>
+</tr>
+<tr>
+<td><code>secrets</code></td>
+<td>dict[<code>str</code>, <code>str</code> | <a href="#envsource">EnvSource</a> | <a href="#secretrefsource">SecretRefSource</a>], optional</td>
+<td><code>None</code></td>
+<td>Secrets injected as environment variables in each step</td>
+</tr>
+<tr>
+<td><code>env</code></td>
+<td>dict[<code>str</code>, <code>str</code>], optional</td>
+<td><code>None</code></td>
+<td>Global environment variables for all steps</td>
+</tr>
+<tr>
+<td><code>affinity</code></td>
+<td>list[<code>Annotated</code>], optional</td>
+<td><code>None</code></td>
+<td>Scheduling rules — list of node and pod affinity/anti-affinity rules</td>
+</tr>
+<tr>
+<td><code>scheduling</code></td>
+<td><a href="#schedulingconfig">SchedulingConfig</a>, optional</td>
+<td><code>None</code></td>
+<td>Queue and priority for job admission (e.g. Kueue LocalQueue)</td>
+</tr>
+<tr>
+<td><code>logging</code></td>
+<td><a href="#loggingconfig">LoggingConfig</a></td>
+<td><em>(see below)</em></td>
+<td>Log collection settings</td>
+</tr>
+<tr>
+<td><code>labels</code></td>
+<td>dict[<code>str</code>, <code>str</code>], optional</td>
+<td><code>None</code></td>
+<td></td>
+</tr>
+<tr>
+<td><code>controller_image</code></td>
+<td><code>str</code>, optional</td>
+<td><code>None</code></td>
+<td></td>
+</tr>
+</tbody>
+</table>
+<h3 id="codeconfig">CodeConfig<a class="headerlink" href="#codeconfig" title="Permanent link">&para;</a></h3>
+<p>Local code directory to upload into job containers. When specified, S3 credentials are automatically injected.</p>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Type</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>path</code></td>
+<td><code>str</code></td>
+<td><strong>required</strong></td>
+<td>Local directory to upload</td>
+</tr>
+<tr>
+<td><code>exclude</code></td>
+<td>list[<code>str</code>], optional</td>
+<td><code>['.venv', '.git', '__pycache__', '.pytest_cache', '.ruff_cache', '*.pyc']</code></td>
+<td>Glob patterns to exclude from upload. The default drops virtualenvs, the git dir, and the Python/test/lint caches that otherwise bloat the upload and (for nix-mode) churn the flake closure between runs. Set <code>exclude: []</code> or add an <code>include</code> to ship any of these.</td>
+</tr>
+<tr>
+<td><code>include</code></td>
+<td>list[<code>str</code>], optional</td>
+<td><code>None</code></td>
+<td>Glob patterns to include (default: everything)</td>
+</tr>
+</tbody>
+</table>
+<h3 id="singlerolestepconfig">SingleRoleStepConfig<a class="headerlink" href="#singlerolestepconfig" title="Permanent link">&para;</a></h3>
+<p>A step with a single role (the most common step type). Inherits all fields from RoleSpecConfig.</p>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Type</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>name</code></td>
+<td><code>str</code></td>
+<td><strong>required</strong></td>
+<td></td>
+</tr>
+<tr>
+<td><code>image</code></td>
+<td><code>str</code>, optional</td>
+<td><code>None</code></td>
+<td></td>
+</tr>
+<tr>
+<td><code>nix</code></td>
+<td><a href="#nixconfig">NixConfig</a>, optional</td>
+<td><code>None</code></td>
+<td></td>
+</tr>
+<tr>
+<td><code>shell</code></td>
+<td><code>str</code></td>
+<td><code>/bin/sh</code></td>
+<td></td>
+</tr>
+<tr>
+<td><code>before_script</code></td>
+<td><code>str</code>, optional</td>
+<td><code>None</code></td>
+<td></td>
+</tr>
+<tr>
+<td><code>script</code></td>
+<td><code>str</code></td>
+<td><strong>required</strong></td>
+<td></td>
+</tr>
+<tr>
+<td><code>after_script</code></td>
+<td><code>str</code>, optional</td>
+<td><code>None</code></td>
+<td></td>
+</tr>
+<tr>
+<td><code>resources</code></td>
+<td><a href="#resourceconfig">ResourceConfig</a></td>
+<td><em>(see below)</em></td>
+<td></td>
+</tr>
+<tr>
+<td><code>depends_on</code></td>
+<td>list[<code>str</code> | <a href="#dependsoncondition">DependsOnCondition</a>], optional</td>
+<td><code>None</code></td>
+<td>Steps that must complete before this one starts</td>
+</tr>
+<tr>
+<td><code>env</code></td>
+<td>dict[<code>str</code>, <code>str</code>], optional</td>
+<td><code>None</code></td>
+<td></td>
+</tr>
+<tr>
+<td><code>failure_policy</code></td>
+<td><a href="#failurepolicy">FailurePolicy</a>, optional</td>
+<td><code>None</code></td>
+<td>Failure handling policy</td>
+</tr>
+<tr>
+<td><code>optional</code></td>
+<td><code>bool</code></td>
+<td><code>False</code></td>
+<td>If True, this step's own failure is excluded from the workflow-level success/failure rollup — useful for a conditional (<code>ON_FAILURE</code>/<code>ALWAYS</code>) cleanup or notification step that shouldn't itself be able to fail the workflow. It still shows as FAILED in <code>chain status</code> and still propagates to its own dependents.</td>
+</tr>
+<tr>
+<td><code>labels</code></td>
+<td>dict[<code>str</code>, <code>str</code>], optional</td>
+<td><code>None</code></td>
+<td></td>
+</tr>
+</tbody>
+</table>
+<h4 id="nixconfig">NixConfig<a class="headerlink" href="#nixconfig" title="Permanent link">&para;</a></h4>
+<p>Use a nix closure as the runtime instead of a Docker image. The role's container runs a minimal "nix-runner" OCI image that holds nix + s5cmd. At pod startup it pulls the closure from the configured binary cache into <code>/nix/store</code> and runs the user script with the closure's <code>bin/</code> on PATH. Image distribution shifts from <code>docker pull</code> (sequential layer extract) to <code>nix copy --from</code> (per-path parallel fetches with cross-image deduplication). At submit time seekr-chain evaluates <code>&lt;expression&gt;#&lt;attr&gt;.outPath</code> locally (requires <code>nix</code> on the submit machine) to compute the content-addressed closure path. If the closure is missing from the store and <code>build=True</code> (default), seekr-chain injects a build step into the DAG that runs <code>nix build</code> + <code>nix copy --to</code> against the store.</p>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Type</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>expression</code></td>
+<td><code>str</code></td>
+<td><code>./</code></td>
+<td>Path to a flake directory or <code>.nix</code> file, relative to <code>code.path</code>. Same string is used at submit time (for eval) and inside the build pod (for <code>nix build</code>).</td>
+</tr>
+<tr>
+<td><code>attr</code></td>
+<td><code>str</code></td>
+<td><code>default</code></td>
+<td>Attribute path within the expression to materialize (default: <code>"default"</code>).</td>
+</tr>
+<tr>
+<td><code>system</code></td>
+<td><code>str</code></td>
+<td><code>x86_64-linux</code></td>
+<td>Target system for the closure (default: <code>"x86_64-linux"</code>).</td>
+</tr>
+<tr>
+<td><code>store</code></td>
+<td><code>str</code>, optional</td>
+<td><code>None</code></td>
+<td>URI for the binary cache (e.g. <code>s3://bucket</code>). Any nix store type works; see https://nix.dev/manual/nix/2.26/store/types/. Defaults to <code>~/.seekrchain.toml</code>'s <code>nix_store</code>.</td>
+</tr>
+<tr>
+<td><code>build</code></td>
+<td><code>bool</code></td>
+<td><code>True</code></td>
+<td>Whether to auto-build a missing closure by injecting a build step into the DAG. Set <code>False</code> to fail at submit time if the closure isn't already in the store — useful to enforce "must be pre-built" semantics for some workflows.</td>
+</tr>
+<tr>
+<td><code>build_resources</code></td>
+<td><a href="#resourceconfig">ResourceConfig</a>, optional</td>
+<td><code>None</code></td>
+<td>Resources for the auto-injected build step. Defaults are modest (4 CPU / 16 GiB RAM / 0 GPU) — fine for small python closures; large native builds (pytorch from source, flash-attn) want much more and should set this explicitly.</td>
+</tr>
+<tr>
+<td><code>build_max_jobs</code></td>
+<td><code>int</code> | Literal['AUTO']</td>
+<td><code>1</code></td>
+<td>Maximum number of derivations Nix may build concurrently. Accepts a non-negative integer or <code>"AUTO"</code> (case-insensitive). Defaults to Nix's standard value of 1.</td>
+</tr>
+<tr>
+<td><code>build_cores</code></td>
+<td><code>int</code></td>
+<td><code>0</code></td>
+<td>Number of build cores Nix exposes to each derivation. Zero means all available cores. Defaults to Nix's standard value of 0.</td>
+</tr>
+<tr>
+<td><code>include</code></td>
+<td>list[<code>str</code>], optional</td>
+<td><code>None</code></td>
+<td>Optional list of root-relative glob patterns that define the source tree staged for nix eval/build. Unset (the default): nix shares <code>code</code>'s filtered tree exactly, no separate copy, no duplicate upload. Set: this <em>replaces</em> <code>code.include</code> for nix (not ANDed with it) — a role can point <code>nix.include</code> at a completely different subtree than <code>code.include</code> and still get real content there. Use this to keep flake invalidation narrow in a large repo where <code>code.include</code> is broad; the tradeoff is a separate materialized copy, so any files also covered by <code>code.include</code> are uploaded twice. In practice that's cheap: nix.include is meant to be a small curated set (flake.nix, lockfiles, ...), and it's only staged/uploaded for closures that still need building, not on every submit.</td>
+</tr>
+<tr>
+<td><code>exclude</code></td>
+<td>list[<code>str</code>], optional</td>
+<td><code>None</code></td>
+<td>Optional list of root-relative glob patterns excluded from the nix source tree. Applied after <code>include</code>. Same replace-not-AND relationship with <code>code.exclude</code> as above.</td>
+</tr>
+</tbody>
+</table>
+<h5 id="resourceconfig">ResourceConfig<a class="headerlink" href="#resourceconfig" title="Permanent link">&para;</a></h5>
+<p>Compute resource requests for a step.</p>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Type</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>num_nodes</code></td>
+<td><code>int</code></td>
+<td><code>1</code></td>
+<td>Number of nodes for this step</td>
+</tr>
+<tr>
+<td><code>cpus_per_node</code></td>
+<td><code>int</code> | <code>str</code> | Literal['AUTO']</td>
+<td><code>4</code></td>
+<td>CPUs per node</td>
+</tr>
+<tr>
+<td><code>mem_per_node</code></td>
+<td><code>str</code> | Literal['AUTO']</td>
+<td><code>32G</code></td>
+<td>Memory per node</td>
+</tr>
+<tr>
+<td><code>ephemeral_storage_per_node</code></td>
+<td><code>str</code> | Literal['AUTO']</td>
+<td><code>100G</code></td>
+<td>Ephemeral storage per node</td>
+</tr>
+<tr>
+<td><code>gpus_per_node</code></td>
+<td><code>int</code></td>
+<td><code>0</code></td>
+<td>Number of GPUs per node</td>
+</tr>
+<tr>
+<td><code>gpu_type</code></td>
+<td>enum(<code>"nvidia.com/gpu"</code>, <code>"amd.com/gpu"</code>, <code>"habana.ai/gaudi"</code>), optional</td>
+<td><code>None</code></td>
+<td>Type of GPU to request</td>
+</tr>
+<tr>
+<td><code>persistent_volume_claims</code></td>
+<td>list[<a href="#persistentvolumeclaim">PersistentVolumeClaim</a>], optional</td>
+<td><code>None</code></td>
+<td>PVCs to mount in this step</td>
+</tr>
+<tr>
+<td><code>shm_size</code></td>
+<td><code>str</code></td>
+<td><code>8G</code></td>
+<td>Shared memory size (e.g. <code>"64M"</code>, <code>"8G"</code>, or <code>"UNLIMITED"</code>)</td>
+</tr>
+<tr>
+<td><code>security</code></td>
+<td><a href="#securitycontext">SecurityContext</a></td>
+<td><em>(see below)</em></td>
+<td>Security context</td>
+</tr>
+<tr>
+<td><code>host_network</code></td>
+<td><code>bool</code></td>
+<td><code>False</code></td>
+<td>Use host networking (default: <code>false</code>). Enable for multi-node jobs that need InfiniBand/RDMA and do not have an SR-IOV or RDMA device plugin configured.</td>
+</tr>
+</tbody>
+</table>
+<h6 id="persistentvolumeclaim">PersistentVolumeClaim<a class="headerlink" href="#persistentvolumeclaim" title="Permanent link">&para;</a></h6>
+<p>A PVC to mount into the step containers.</p>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Type</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>name</code></td>
+<td><code>str</code></td>
+<td><strong>required</strong></td>
+<td>Name of the PVC</td>
+</tr>
+<tr>
+<td><code>mount_path</code></td>
+<td><code>str</code></td>
+<td><strong>required</strong></td>
+<td>Mount path inside the container</td>
+</tr>
+</tbody>
+</table>
+<h6 id="securitycontext">SecurityContext<a class="headerlink" href="#securitycontext" title="Permanent link">&para;</a></h6>
+<p>Security context for the step containers.</p>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Type</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>privileged</code></td>
+<td><code>bool</code></td>
+<td><code>False</code></td>
+<td>Run containers in privileged mode</td>
+</tr>
+</tbody>
+</table>
+<h4 id="dependsoncondition">DependsOnCondition<a class="headerlink" href="#dependsoncondition" title="Permanent link">&para;</a></h4>
+<p>A conditional dependency edge — gates a step on another step's outcome. Reuses <code>FailureRule</code>'s <code>on_exit_codes</code>/<code>operator</code> shape so users only need to learn one exit-code-gating vocabulary.</p>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Type</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>step</code></td>
+<td><code>str</code></td>
+<td><strong>required</strong></td>
+<td>Name of the step this condition depends on.</td>
+</tr>
+<tr>
+<td><code>when</code></td>
+<td>Literal['ON_SUCCESS', 'ON_FAILURE', 'ALWAYS']</td>
+<td><code>ON_SUCCESS</code></td>
+<td><code>ON_SUCCESS</code> (default) requires <code>step</code> to succeed. <code>ON_FAILURE</code> requires <code>step</code> to fail (or be cancelled). <code>ALWAYS</code> is satisfied once <code>step</code> reaches any terminal state, regardless of outcome.</td>
+</tr>
+<tr>
+<td><code>on_exit_codes</code></td>
+<td>list[<code>int</code>], optional</td>
+<td><code>None</code></td>
+<td>Exit codes to match against, gating <code>ON_FAILURE</code> further. Optional; <code>None</code> means any failure matches. Requires <code>when == ON_FAILURE</code>.</td>
+</tr>
+<tr>
+<td><code>operator</code></td>
+<td>Literal['IN', 'NOT_IN']</td>
+<td><code>IN</code></td>
+<td>Whether <code>on_exit_codes</code> is an inclusion or exclusion list.</td>
+</tr>
+</tbody>
+</table>
+<h4 id="failurepolicy">FailurePolicy<a class="headerlink" href="#failurepolicy" title="Permanent link">&para;</a></h4>
+<p>Controls how failures are handled within a step.</p>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Type</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>max_restarts</code></td>
+<td><code>int</code>, optional</td>
+<td><code>0</code></td>
+<td>Maximum number of restarts before failing</td>
+</tr>
+<tr>
+<td><code>rules</code></td>
+<td>list[<a href="#failurerule">FailureRule</a>]</td>
+<td><code>[]</code></td>
+<td>Failure handling rules</td>
+</tr>
+</tbody>
+</table>
+<h5 id="failurerule">FailureRule<a class="headerlink" href="#failurerule" title="Permanent link">&para;</a></h5>
+<p>A rule for handling failures.</p>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Type</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>action</code></td>
+<td>Literal['FAIL_JOB_SET', 'RESTART_JOB_SET', 'RESTART_JOB_SET_AND_IGNORE_MAX_RESTARTS']</td>
+<td><code>RESTART_JOB_SET</code></td>
+<td>Action to take on failure</td>
+</tr>
+<tr>
+<td><code>target_roles</code></td>
+<td>list[<code>str</code>], optional</td>
+<td><code>None</code></td>
+<td>Roles this rule applies to (multi-role steps only)</td>
+</tr>
+<tr>
+<td><code>on_exit_codes</code></td>
+<td>list[<code>int</code>], optional</td>
+<td><code>None</code></td>
+<td>Container exit codes this rule matches. Optional; <code>None</code> means the rule matches all failures unconditionally (today's behavior). When set, <code>action</code> must be <code>FAIL_JOB_SET</code>.</td>
+</tr>
+<tr>
+<td><code>operator</code></td>
+<td>Literal['IN', 'NOT_IN']</td>
+<td><code>IN</code></td>
+<td>Whether <code>on_exit_codes</code> is an inclusion or exclusion list</td>
+</tr>
+</tbody>
+</table>
+<h3 id="multirolestepconfig">MultiRoleStepConfig<a class="headerlink" href="#multirolestepconfig" title="Permanent link">&para;</a></h3>
+<p>A step with multiple roles running in parallel (e.g. server + workers).</p>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Type</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>name</code></td>
+<td><code>str</code></td>
+<td><strong>required</strong></td>
+<td>Step name</td>
+</tr>
+<tr>
+<td><code>depends_on</code></td>
+<td>list[<code>str</code> | <a href="#dependsoncondition">DependsOnCondition</a>], optional</td>
+<td><code>None</code></td>
+<td>Steps that must complete before this one starts</td>
+</tr>
+<tr>
+<td><code>success_policy</code></td>
+<td><a href="#successpolicy">SuccessPolicy</a>, optional</td>
+<td><code>None</code></td>
+<td>When to consider this step successful</td>
+</tr>
+<tr>
+<td><code>failure_policy</code></td>
+<td><a href="#failurepolicy">FailurePolicy</a>, optional</td>
+<td><code>None</code></td>
+<td>Failure handling policy</td>
+</tr>
+<tr>
+<td><code>optional</code></td>
+<td><code>bool</code></td>
+<td><code>False</code></td>
+<td>If True, this step's own failure is excluded from the workflow-level success/failure rollup — useful for a conditional (<code>ON_FAILURE</code>/<code>ALWAYS</code>) cleanup or notification step that shouldn't itself be able to fail the workflow. It still shows as FAILED in <code>chain status</code> and still propagates to its own dependents.</td>
+</tr>
+<tr>
+<td><code>roles</code></td>
+<td>list[<a href="#rolespecconfig">RoleSpecConfig</a>]</td>
+<td><strong>required</strong></td>
+<td>List of roles to run in parallel</td>
+</tr>
+<tr>
+<td><code>labels</code></td>
+<td>dict[<code>str</code>, <code>str</code>], optional</td>
+<td><code>None</code></td>
+<td></td>
+</tr>
+</tbody>
+</table>
+<h4 id="successpolicy">SuccessPolicy<a class="headerlink" href="#successpolicy" title="Permanent link">&para;</a></h4>
+<p>Defines when a multi-role step is considered successful.</p>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Type</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>operator</code></td>
+<td>Literal['ALL', 'ANY']</td>
+<td><code>ALL</code></td>
+<td><code>"ALL"</code> (every role succeeds) or <code>"ANY"</code> (at least one)</td>
+</tr>
+<tr>
+<td><code>target_roles</code></td>
+<td>list[<code>str</code>], optional</td>
+<td><code>None</code></td>
+<td>Roles to evaluate for success (default: all)</td>
+</tr>
+</tbody>
+</table>
+<h4 id="rolespecconfig">RoleSpecConfig<a class="headerlink" href="#rolespecconfig" title="Permanent link">&para;</a></h4>
+<p>Specification for a single role (container) within a step.</p>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Type</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>name</code></td>
+<td><code>str</code></td>
+<td><strong>required</strong></td>
+<td>Role/step name</td>
+</tr>
+<tr>
+<td><code>image</code></td>
+<td><code>str</code>, optional</td>
+<td><code>None</code></td>
+<td>Docker image to run (mutually exclusive with <code>nix</code>).</td>
+</tr>
+<tr>
+<td><code>nix</code></td>
+<td><a href="#nixconfig">NixConfig</a>, optional</td>
+<td><code>None</code></td>
+<td>Nix closure runtime (mutually exclusive with <code>image</code>).</td>
+</tr>
+<tr>
+<td><code>shell</code></td>
+<td><code>str</code></td>
+<td><code>/bin/sh</code></td>
+<td>Shell used to execute the script</td>
+</tr>
+<tr>
+<td><code>before_script</code></td>
+<td><code>str</code>, optional</td>
+<td><code>None</code></td>
+<td>Shell commands to run before the main script</td>
+</tr>
+<tr>
+<td><code>script</code></td>
+<td><code>str</code></td>
+<td><strong>required</strong></td>
+<td>Shell script to execute</td>
+</tr>
+<tr>
+<td><code>after_script</code></td>
+<td><code>str</code>, optional</td>
+<td><code>None</code></td>
+<td>Shell commands to run after the main script</td>
+</tr>
+<tr>
+<td><code>resources</code></td>
+<td><a href="#resourceconfig">ResourceConfig</a></td>
+<td><em>(see below)</em></td>
+<td>Compute resource requests</td>
+</tr>
+<tr>
+<td><code>depends_on</code></td>
+<td>list[<code>str</code> | <a href="#dependsoncondition">DependsOnCondition</a>], optional</td>
+<td><code>None</code></td>
+<td>Steps that must complete before this one starts</td>
+</tr>
+<tr>
+<td><code>env</code></td>
+<td>dict[<code>str</code>, <code>str</code>], optional</td>
+<td><code>None</code></td>
+<td>Environment variables for this role</td>
+</tr>
+</tbody>
+</table>
+<h3 id="envsource">EnvSource<a class="headerlink" href="#envsource" title="Permanent link">&para;</a></h3>
+<p>Read the secret value from the local environment at submit time. The resolved value is stored transiently in the per-job secret store entry and injected as an environment variable in each container.</p>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Type</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>env</code></td>
+<td><code>str</code> | <code>bool</code></td>
+<td><strong>required</strong></td>
+<td>Name of the local environment variable to read, or <code>True</code> to use the same name as the <code>secrets</code> dict key.</td>
+</tr>
+</tbody>
+</table>
+<h3 id="secretrefsource">SecretRefSource<a class="headerlink" href="#secretrefsource" title="Permanent link">&para;</a></h3>
+<p>Reference a secret that already exists in the backend secret store. The value is never read, copied, or logged by seekr-chain — the container runtime resolves it directly from the named secret store entry.</p>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Type</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>secretRef</code></td>
+<td><a href="#secretref">SecretRef</a></td>
+<td><strong>required</strong></td>
+<td>Pointer to the secret store object and key.</td>
+</tr>
+</tbody>
+</table>
+<h4 id="secretref">SecretRef<a class="headerlink" href="#secretref" title="Permanent link">&para;</a></h4>
+<p>Pointer to a key within a backend secret store (e.g. a Kubernetes Secret).</p>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Type</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>name</code></td>
+<td><code>str</code></td>
+<td><strong>required</strong></td>
+<td>Name of the secret store object (e.g. the Kubernetes Secret name).</td>
+</tr>
+<tr>
+<td><code>key</code></td>
+<td><code>str</code>, optional</td>
+<td><code>None</code></td>
+<td>Key within the secret store object. Defaults to the <code>secrets</code> dict key (i.e. the injected environment variable name) when omitted.</td>
+</tr>
+</tbody>
+</table>
+<h3 id="nodeaffinityrule">NodeAffinityRule<a class="headerlink" href="#nodeaffinityrule" title="Permanent link">&para;</a></h3>
+<p>Schedule based on node properties (hostname or labels).</p>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Type</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>type</code></td>
+<td>Literal['NODE']</td>
+<td><strong>required</strong></td>
+<td>Discriminator — always <code>"NODE"</code>.</td>
+</tr>
+<tr>
+<td><code>direction</code></td>
+<td>Literal['ATTRACT', 'REPEL']</td>
+<td><code>ATTRACT</code></td>
+<td><code>"ATTRACT"</code> schedules on matching nodes; <code>"REPEL"</code> avoids them.</td>
+</tr>
+<tr>
+<td><code>hostnames</code></td>
+<td>list[<code>str</code>], optional</td>
+<td><code>None</code></td>
+<td>Match against <code>kubernetes.io/hostname</code>.</td>
+</tr>
+<tr>
+<td><code>labels</code></td>
+<td>dict[<code>str</code>, list[<code>str</code>]], optional</td>
+<td><code>None</code></td>
+<td>Match against arbitrary node labels (key → allowed values).</td>
+</tr>
+<tr>
+<td><code>required</code></td>
+<td><code>bool</code></td>
+<td><code>True</code></td>
+<td><code>True</code> (default) = hard constraint; <code>False</code> = soft preference.</td>
+</tr>
+</tbody>
+</table>
+<h3 id="podaffinityrule">PodAffinityRule<a class="headerlink" href="#podaffinityrule" title="Permanent link">&para;</a></h3>
+<p>Schedule based on where other pods in a named group are running.</p>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Type</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>type</code></td>
+<td>Literal['POD']</td>
+<td><strong>required</strong></td>
+<td>Discriminator — always <code>"POD"</code>.</td>
+</tr>
+<tr>
+<td><code>direction</code></td>
+<td>Literal['ATTRACT', 'REPEL']</td>
+<td><code>ATTRACT</code></td>
+<td><code>"ATTRACT"</code> co-locates with the group; <code>"REPEL"</code> avoids nodes where the group is running.</td>
+</tr>
+<tr>
+<td><code>group</code></td>
+<td><code>str</code></td>
+<td><strong>required</strong></td>
+<td>Shared identifier. All jobs submitted with the same group value carry the label <code>seekr-chain/pg.&lt;group&gt;: "true"</code> on their pods.</td>
+</tr>
+<tr>
+<td><code>required</code></td>
+<td><code>bool</code></td>
+<td><code>False</code></td>
+<td><code>False</code> (default) = soft preference; <code>True</code> = hard constraint. .. warning:: <code>direction="ATTRACT"</code> with <code>required=True</code> will deadlock on a fresh submission — no nodes satisfy the constraint until at least one pod from the group is already running.  Use <code>required=False</code> (the default) unless you are adding jobs to an already-running group.</td>
+</tr>
+</tbody>
+</table>
+<h3 id="schedulingconfig">SchedulingConfig<a class="headerlink" href="#schedulingconfig" title="Permanent link">&para;</a></h3>
+<p>Scheduling configuration for job queue admission. Maps to backend-specific queue primitives (e.g. Kueue LocalQueue on Kubernetes, partition on SLURM).</p>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Type</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>queue</code></td>
+<td><code>str</code></td>
+<td><strong>required</strong></td>
+<td>Queue or partition name to submit this workflow's jobs to</td>
+</tr>
+<tr>
+<td><code>priority</code></td>
+<td><code>str</code>, optional</td>
+<td><code>None</code></td>
+<td>Optional priority class / QOS name</td>
+</tr>
+</tbody>
+</table>
+<h3 id="loggingconfig">LoggingConfig<a class="headerlink" href="#loggingconfig" title="Permanent link">&para;</a></h3>
+<p>Log collection settings.</p>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Type</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>upload_timeout</code></td>
+<td>duration</td>
+<td><code>1m</code></td>
+<td>Timeout for uploading logs to S3</td>
+</tr>
+</tbody>
+</table>
+<h2 id="stepconfig">StepConfig<a class="headerlink" href="#stepconfig" title="Permanent link">&para;</a></h2>
+<p>Each entry in <code>steps</code> is either a <strong>SingleRoleStepConfig</strong> (most common — a single container job) or a <strong>MultiRoleStepConfig</strong> (multiple roles running in parallel, e.g. server + workers). seekr-chain auto-detects which type based on whether the <code>roles</code> field is present.</p>
+<h2 id="enums">Enums<a class="headerlink" href="#enums" title="Permanent link">&para;</a></h2>
+<h3 id="gputype">GPUType<a class="headerlink" href="#gputype" title="Permanent link">&para;</a></h3>
+<table>
+<thead>
+<tr>
+<th>Value</th>
+<th>Resource key</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>nvidia</code></td>
+<td><code>nvidia.com/gpu</code></td>
+</tr>
+<tr>
+<td><code>amd</code></td>
+<td><code>amd.com/gpu</code></td>
+</tr>
+<tr>
+<td><code>habana</code></td>
+<td><code>habana.ai/gaudi</code></td>
+</tr>
+</tbody>
+</table>
+
+
+
+
+
+
+
+
+
+
+
+
+                
+              </article>
+            </div>
+          
+          
+<script>var target=document.getElementById(location.hash.slice(1));target&&target.name&&(target.checked=target.name.startsWith("__tabbed_"))</script>
+        </div>
+        
+          <button type="button" class="md-top md-icon" data-md-component="top" hidden>
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M13 20h-2V8l-5.5 5.5-1.42-1.42L12 4.16l7.92 7.92-1.42 1.42L13 8z"/></svg>
+  Back to top
+</button>
+        
+      </main>
+      
+        <footer class="md-footer">
+  
+  <div class="md-footer-meta md-typeset">
+    <div class="md-footer-meta__inner md-grid">
+      <div class="md-copyright">
+  
+  
+    Made with
+    <a href="https://squidfunk.github.io/mkdocs-material/" target="_blank" rel="noopener">
+      Material for MkDocs
+    </a>
+  
+</div>
+      
+        
+<div class="md-social">
+  
+    
+    
+    
+    
+      
+      
+    
+    <a href="https://github.com/seekr-technologies/seekr-chain" target="_blank" rel="noopener" title="github.com" class="md-social__link">
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M173.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3.3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6m-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5.3-6.2 2.3m44.2-1.7c-2.9.7-4.9 2.6-4.6 4.9.3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9M252.8 8C114.1 8 8 113.3 8 252c0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.7 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.4 17.3 12.1C436.2 457.8 504 362.9 504 252 504 113.3 391.5 8 252.8 8M105.2 352.9c-1.3 1-1 3.3.7 5.2 1.6 1.6 3.9 2.3 5.2 1 1.3-1 1-3.3-.7-5.2-1.6-1.6-3.9-2.3-5.2-1m-10.8-8.1c-.7 1.3.3 2.9 2.3 3.9 1.6 1 3.6.7 4.3-.7.7-1.3-.3-2.9-2.3-3.9-2-.6-3.6-.3-4.3.7m32.4 35.6c-1.6 1.3-1 4.3 1.3 6.2 2.3 2.3 5.2 2.6 6.5 1 1.3-1.3.7-4.3-1.3-6.2-2.2-2.3-5.2-2.6-6.5-1m-11.4-14.7c-1.6 1-1.6 3.6 0 5.9s4.3 3.3 5.6 2.3c1.6-1.3 1.6-3.9 0-6.2-1.4-2.3-4-3.3-5.6-2"/></svg>
+    </a>
+  
+</div>
+      
+    </div>
+  </div>
+</footer>
+      
+    </div>
+    <div class="md-dialog" data-md-component="dialog">
+      <div class="md-dialog__inner md-typeset"></div>
+    </div>
+    
+    
+    
+      
+      
+      <script id="__config" type="application/json">{"annotate": null, "base": "../..", "features": ["navigation.tabs", "navigation.sections", "navigation.expand", "navigation.top", "search.suggest", "search.highlight", "content.code.copy", "content.code.annotate"], "search": "../../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": {"provider": "mike"}}</script>
+    
+    
+      <script src="../../assets/javascripts/bundle.79ae519e.min.js"></script>
+      
+    
+  </body>
+</html>
