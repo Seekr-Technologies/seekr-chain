@@ -99,6 +99,55 @@ When adding new features:
 - Include examples where appropriate
 - Update the CHANGELOG.md
 
+### Building documentation locally
+
+Install the locked documentation dependencies, then preview or validate the site:
+
+```bash
+uv sync --locked --group docs --no-dev
+uv run --no-sync mkdocs serve
+uv run --no-sync mkdocs build --strict
+```
+
+### Publishing documentation (maintainers)
+
+The public site is <https://seekr-technologies.github.io/seekr-chain/>.
+It documents the **latest release**, not the current `main` branch. Documentation-only
+changes appear publicly with the next release; PRs still receive a strict build check.
+
+Mike stores the built versions and the `latest` alias on `gh-pages`. The Docs workflow
+uploads the **entire branch**, including older versions, as a GitHub Pages artifact
+and deploys it to the `github-pages` environment. The root URL redirects to `latest`.
+Do not configure Pages to deploy from the branch: bot pushes using `GITHUB_TOKEN`
+do not trigger branch-based Pages builds.
+
+#### One-time GitHub setup
+
+1. In **Settings → Pages → Build and deployment**, choose **GitHub Actions**.
+2. Ensure organization/repository Actions policies allow the actions used in
+   `.github/workflows/docs.yml` and allow workflows to request write permissions.
+   No personal access token or additional repository secret is required.
+3. If the `github-pages` environment has deployment protection rules, permit
+   deployments from `main` and release tags (`v*`). Approve deployments if your
+   environment requires reviewers. Branch rules/rulesets must also allow the
+   workflow's bot to update `gh-pages`.
+4. After this workflow is merged into `main`, open **Actions → Docs → Run workflow**,
+   select **main**, and run it. This builds the latest published, non-prerelease
+   GitHub release's tag, initializes `gh-pages` if necessary, and publishes the site.
+   At least one published stable release must exist.
+5. Check the deployment URL in the workflow's **Deploy to GitHub Pages** job.
+   No custom domain or DNS configuration is needed for the default URL.
+
+Subsequent automated releases call the Docs workflow directly from `release.yml`.
+This is necessary because releases created with `GITHUB_TOKEN` do not trigger other
+release-event workflows. Stable releases published manually also trigger Docs;
+prereleases are not published to the site.
+
+To retry a failed deployment or rebuild the latest release, rerun **Docs** manually
+on `main`. It always checks out the released tag, so it will not publish unreleased
+documentation changes. Mike updates and Pages deployments are serialized to avoid
+concurrent writes to the version branch.
+
 ## Continuous Integration
 
 CI will automatically run on pull requests to:

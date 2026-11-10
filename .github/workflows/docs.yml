@@ -3,46 +3,107 @@ name: Docs
 on:
   pull_request:
     branches: [main]
+  # Releases created by GITHUB_TOKEN do not emit workflow-triggering events.
+  # release.yml calls this workflow directly; this also covers manual releases.
   release:
     types: [published]
+  workflow_call:
+    inputs:
+      release_tag:
+        description: Published release tag to document
+        required: true
+        type: string
+  # Bootstrap or rebuild the latest published release, not main.
+  workflow_dispatch:
 
-permissions: read-all
+permissions:
+  contents: read
+
+# Serialize the complete publish operation, including Mike's branch updates.
+concurrency:
+  group: docs-${{ github.event_name == 'pull_request' && github.ref || 'publish' }}
+  cancel-in-progress: false
 
 jobs:
   build:
     name: Build (strict)
+    if: github.event_name != 'release' || (!github.event.release.prerelease && !github.event.release.draft)
     runs-on: ubuntu-latest
+    outputs:
+      release_tag: ${{ steps.release.outputs.tag }}
     steps:
+      - name: Resolve release
+        id: release
+        if: github.event_name != 'pull_request'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.release_tag || github.event.release.tag_name }}
+        run: |
+          set -euo pipefail
+          if [ -z "$RELEASE_TAG" ]; then
+            RELEASE_TAG=$(gh api "repos/$GITHUB_REPOSITORY/releases/latest" --jq .tag_name)
+          fi
+          echo "tag=$RELEASE_TAG" >> "$GITHUB_OUTPUT"
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
+          ref: ${{ steps.release.outputs.tag || github.ref }}
           fetch-depth: 0
           fetch-tags: true
       - uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
         with:
           version-file: "pyproject.toml"
-      - run: uv sync --group docs
-      - run: uv run mkdocs build --strict
+      - run: uv sync --locked --group docs --no-dev
+      - run: uv run --no-sync mkdocs build --strict
 
-  deploy:
-    name: Deploy versioned docs
-    if: github.event_name == 'release'
+  publish:
+    name: Update Mike versions and upload site
+    needs: build
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
+          ref: ${{ needs.build.outputs.release_tag }}
           fetch-depth: 0
           fetch-tags: true
       - uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
         with:
           version-file: "pyproject.toml"
-      - run: uv sync --group docs
+      - run: uv sync --locked --group docs --no-dev
       - name: Configure git identity
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-      - name: Deploy docs
+      - name: Update versioned docs
+        env:
+          RELEASE_TAG: ${{ needs.build.outputs.release_tag }}
         run: |
-          uv run mike deploy --push --update-aliases ${{ github.ref_name }} latest
-          uv run mike set-default --push latest
+          set -euo pipefail
+          uv run --no-sync mike deploy --update-aliases "$RELEASE_TAG" latest
+          uv run --no-sync mike set-default latest
+          git push origin gh-pages
+      - name: Export complete site
+        run: |
+          mkdir -p "$RUNNER_TEMP/pages"
+          git archive gh-pages | tar -x -C "$RUNNER_TEMP/pages"
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@7b1f4a764d45c48632c6b24a0339c27f5614fb0b # v4
+        with:
+          path: ${{ runner.temp }}/pages
+
+  deploy:
+    name: Deploy to GitHub Pages
+    needs: publish
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy Pages artifact
+        id: deployment
+        uses: actions/deploy-pages@d6db90164ac5ed86f2b6aed7e0febac5b3c0c03e # v4
