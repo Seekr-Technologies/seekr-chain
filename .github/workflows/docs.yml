@@ -3,6 +3,8 @@ name: Docs
 on:
   pull_request:
     branches: [main]
+  push:
+    branches: [main]
   # Releases created by GITHUB_TOKEN do not emit workflow-triggering events.
   # release.yml calls this workflow directly; this also covers manual releases.
   release:
@@ -13,8 +15,13 @@ on:
         description: Published release tag to document
         required: true
         type: string
-  # Bootstrap or rebuild the latest published release, not main.
+  # Rebuild rolling latest, or backfill an existing release snapshot.
   workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Published stable release tag to backfill (blank publishes latest from main)
+        required: false
+        type: string
 
 permissions:
   contents: read
@@ -30,23 +37,32 @@ jobs:
     if: github.event_name != 'release' || (!github.event.release.prerelease && !github.event.release.draft)
     runs-on: ubuntu-latest
     outputs:
-      release_tag: ${{ steps.release.outputs.tag }}
+      docs_version: ${{ steps.target.outputs.version }}
+      source_sha: ${{ steps.source.outputs.sha }}
     steps:
-      - name: Resolve release
-        id: release
+      - name: Resolve documentation target
+        id: target
         if: github.event_name != 'pull_request'
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ inputs.release_tag || github.event.release.tag_name }}
         run: |
           set -euo pipefail
-          if [ -z "$RELEASE_TAG" ]; then
-            RELEASE_TAG=$(gh api "repos/$GITHUB_REPOSITORY/releases/latest" --jq .tag_name)
+          if [ -n "$RELEASE_TAG" ]; then
+            test "$RELEASE_TAG" != latest
+            # Only published stable releases may become snapshots.
+            gh api "repos/$GITHUB_REPOSITORY/releases/tags/$RELEASE_TAG" \
+              --jq 'select(.draft == false and .prerelease == false) | .tag_name' > "$RUNNER_TEMP/release-tag"
+            test "$(cat "$RUNNER_TEMP/release-tag")" = "$RELEASE_TAG"
+            echo "version=$RELEASE_TAG" >> "$GITHUB_OUTPUT"
+            echo "ref=refs/tags/$RELEASE_TAG" >> "$GITHUB_OUTPUT"
+          else
+            echo "version=latest" >> "$GITHUB_OUTPUT"
+            echo "ref=refs/heads/main" >> "$GITHUB_OUTPUT"
           fi
-          echo "tag=$RELEASE_TAG" >> "$GITHUB_OUTPUT"
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
-          ref: ${{ steps.release.outputs.tag || github.ref }}
+          ref: ${{ steps.target.outputs.ref || github.ref }}
           fetch-depth: 0
           fetch-tags: true
       - uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
@@ -54,6 +70,9 @@ jobs:
           version-file: "pyproject.toml"
       - run: uv sync --locked --group docs --no-dev
       - run: uv run --no-sync mkdocs build --strict
+      - name: Record validated source
+        id: source
+        run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
   publish:
     name: Update Mike versions and upload site
@@ -65,7 +84,7 @@ jobs:
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
-          ref: ${{ needs.build.outputs.release_tag }}
+          ref: ${{ needs.build.outputs.source_sha }}
           fetch-depth: 0
           fetch-tags: true
       - uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
@@ -78,11 +97,37 @@ jobs:
           git config user.email "github-actions[bot]@users.noreply.github.com"
       - name: Update versioned docs
         env:
-          RELEASE_TAG: ${{ needs.build.outputs.release_tag }}
+          DOCS_VERSION: ${{ needs.build.outputs.docs_version }}
         run: |
           set -euo pipefail
-          uv run --no-sync mike deploy --update-aliases "$RELEASE_TAG" latest
-          uv run --no-sync mike set-default latest
+          uv run --no-sync mike list --json > "$RUNNER_TEMP/versions.json"
+          STATE=$(uv run --no-sync python -c '
+          import json, os, sys
+          versions = json.load(sys.stdin)
+          target = os.environ["DOCS_VERSION"]
+          if any(v["version"] == target for v in versions):
+              print("exists")
+          elif any(target in v.get("aliases", []) for v in versions):
+              print("alias")
+          else:
+              print("new")
+          ' < "$RUNNER_TEMP/versions.json")
+          if [ "$DOCS_VERSION" = latest ]; then
+            # Migrate the former alias without deleting its release snapshot.
+            if [ "$STATE" = alias ]; then
+              uv run --no-sync mike delete latest
+            fi
+            uv run --no-sync mike deploy --title latest latest
+          elif [ "$STATE" = new ]; then
+            uv run --no-sync mike deploy "$DOCS_VERSION"
+          elif [ "$STATE" = exists ]; then
+            echo "Keeping immutable snapshot $DOCS_VERSION"
+          else
+            echo "Release tag conflicts with an existing alias" >&2
+            exit 1
+          fi
+          # A release can finish before main's first rolling publication.
+          uv run --no-sync mike set-default --allow-undefined latest
           git push origin gh-pages
       - name: Export complete site
         run: |

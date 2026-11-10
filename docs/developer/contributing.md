@@ -112,10 +112,13 @@ uv run --no-sync mkdocs build --strict
 ### Publishing documentation (maintainers)
 
 The public site is <https://seekr-technologies.github.io/seekr-chain/>.
-It documents the **latest release**, not the current `main` branch. Documentation-only
-changes appear publicly with the next release; PRs still receive a strict build check.
+The default **latest** version follows `main`, including documentation-only and
+`no-bump:` changes. It may describe unreleased features. Release versions (for example,
+**v1.2.3**) remain exact, immutable snapshots available in the version selector.
+PRs receive a strict build check without publishing.
 
-Mike stores the built versions and the `latest` alias on `gh-pages`. The Docs workflow
+Mike stores the built versions on `gh-pages`. `latest` is an independent rolling
+version, not an alias for a release. Its selector label is simply **latest**. The Docs workflow
 uploads the **entire branch**, including older versions, as a GitHub Pages artifact
 and deploys it to the `github-pages` environment. The root URL redirects to `latest`.
 Do not configure Pages to deploy from the branch: bot pushes using `GITHUB_TOKEN`
@@ -131,22 +134,30 @@ do not trigger branch-based Pages builds.
    deployments from `main` and release tags (`v*`). Approve deployments if your
    environment requires reviewers. Branch rules/rulesets must also allow the
    workflow's bot to update `gh-pages`.
-4. After this workflow is merged into `main`, open **Actions → Docs → Run workflow**,
-   select **main**, and run it. This builds the latest published, non-prerelease
-   GitHub release's tag, initializes `gh-pages` if necessary, and publishes the site.
-   At least one published stable release must exist.
+4. Merging this workflow into `main` publishes **latest** automatically, initializing
+   `gh-pages` if needed. No release is required. To bootstrap or retry manually,
+   open **Actions → Docs → Run workflow**, select **main**, and leave `release_tag` blank.
+   To add a missing historical snapshot, enter its published stable release tag
+   (for example, `v1.2.3`). Existing snapshots are never overwritten.
 5. Check the deployment URL in the workflow's **Deploy to GitHub Pages** job.
    No custom domain or DNS configuration is needed for the default URL.
 
-Subsequent automated releases call the Docs workflow directly from `release.yml`.
-This is necessary because releases created with `GITHUB_TOKEN` do not trigger other
-release-event workflows. Stable releases published manually also trigger Docs;
-prereleases are not published to the site.
+Every push to `main` rebuilds **latest**, independently of package version bumps.
+Automated releases also call the Docs workflow directly from `release.yml` to add a
+snapshot built from the release tag. This is necessary because releases created with
+`GITHUB_TOKEN` do not trigger other release-event workflows. Stable releases published
+manually also add snapshots; prereleases are not published. Release publication never
+moves **latest** back to a release snapshot.
 
-To retry a failed deployment or rebuild the latest release, rerun **Docs** manually
-on `main`. It always checks out the released tag, so it will not publish unreleased
-documentation changes. Mike updates and Pages deployments are serialized to avoid
-concurrent writes to the version branch.
+To retry publishing, run **Docs** manually on `main`: leave `release_tag` blank for
+**latest**, or supply a stable release tag to add/redeploy that snapshot. Existing
+snapshots are retained unchanged, even on retries. Mike updates and Pages deployments
+are serialized to avoid concurrent writes. Rolling runs resolve the current `main`
+head when they start and publish the exact commit validated by the build job.
+
+Repositories with the former `latest` release alias are migrated automatically on
+the first rolling publication: only the alias is removed, preserving its release
+snapshot, and a standalone version labeled **latest** replaces it.
 
 ## Continuous Integration
 
