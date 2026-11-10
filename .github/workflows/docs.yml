@@ -60,12 +60,12 @@ jobs:
             echo "version=latest" >> "$GITHUB_OUTPUT"
             echo "ref=refs/heads/main" >> "$GITHUB_OUTPUT"
           fi
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ steps.target.outputs.ref || github.ref }}
           fetch-depth: 0
           fetch-tags: true
-      - uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
         with:
           version-file: "pyproject.toml"
       - run: uv sync --locked --group docs --no-dev
@@ -82,12 +82,12 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ needs.build.outputs.source_sha }}
           fetch-depth: 0
           fetch-tags: true
-      - uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
         with:
           version-file: "pyproject.toml"
       - run: uv sync --locked --group docs --no-dev
@@ -134,7 +134,7 @@ jobs:
           mkdir -p "$RUNNER_TEMP/pages"
           git archive gh-pages | tar -x -C "$RUNNER_TEMP/pages"
       - name: Upload Pages artifact
-        uses: actions/upload-pages-artifact@7b1f4a764d45c48632c6b24a0339c27f5614fb0b # v4
+        uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
         with:
           path: ${{ runner.temp }}/pages
 
@@ -151,4 +151,4 @@ jobs:
     steps:
       - name: Deploy Pages artifact
         id: deployment
-        uses: actions/deploy-pages@d6db90164ac5ed86f2b6aed7e0febac5b3c0c03e # v4
+        uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5.0.1
