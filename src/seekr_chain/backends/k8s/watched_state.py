@@ -483,6 +483,14 @@ class ReconnectingWatcher:
                     logger.debug("%s watch resourceVersion too old (410); re-listing from scratch", spec.kind)
                     resource_version = ""
                     continue
+                if e.status == 401 and e.headers is None and e.body is None:
+                    # Watch ERROR events arrive inside HTTP 200 streams, after
+                    # ApiClient.call_api returned. Refresh before our existing
+                    # bounded/backoff reconnect; do not replay delivered events.
+                    try:
+                        kube.refresh_auth()
+                    except Exception as refresh_error:
+                        e = refresh_error
                 delay = self._record_failure(spec.kind, e)
                 self._stop.wait(delay)
             except Exception as e:

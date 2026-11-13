@@ -287,7 +287,9 @@ class _FailingWatch:
 
     def stream(self, func, **kwargs):
         if _stream_kind(kwargs) == "job":
-            raise ApiException(status=401, reason="Unauthorized")
+            error = ApiException(status=401, reason="Unauthorized")
+            error.headers = {}  # HTTP handshake failure, not an ERROR event in HTTP 200.
+            raise error
         time.sleep(0.02)
         return iter(())
 
