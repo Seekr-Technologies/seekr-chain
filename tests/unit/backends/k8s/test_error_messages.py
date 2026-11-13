@@ -13,7 +13,7 @@ class TestLoadKubeconfig:
         from seekr_chain.k8s_api import load_kubeconfig
 
         with patch(
-            "kubernetes.config.load_kube_config",
+            "seekr_chain.k8s_api._load_configuration",
             side_effect=kubernetes.config.ConfigException("no config found"),
         ):
             with pytest.raises(RuntimeError, match="Failed to load Kubernetes config"):
@@ -26,7 +26,7 @@ class TestLoadKubeconfig:
         from seekr_chain.k8s_api import load_kubeconfig
 
         with patch(
-            "kubernetes.config.load_kube_config",
+            "seekr_chain.k8s_api._load_configuration",
             side_effect=kubernetes.config.ConfigException("test"),
         ):
             with pytest.raises(RuntimeError, match="KUBECONFIG"):

@@ -1,52 +1,48 @@
 # Task: fix-token-refresh
 
-**Status**: in-progress
+**Status**: complete (implementation; release rollout pending)
 **Branch**: fix-token-refresh
 **Created**: 2026-11-13 10:40
 
 ## Objective
 
-## Problem
-
-seekr-chain 0.35.1 caches kubeconfig loading and Kubernetes API clients in `seekr_chain/k8s_api.py`. This is reasonable for a long-running service, but Python Kubernetes 35.0.0 reads kubeconfig `tokenFile` credentials once without establishing an expiry. Its existing refresh hook therefore does not reread that file.
-
-When Kubernetes rotates a projected service-account token, the cached client continues sending the old token. Once that token expires, later submissions from the same API worker can fail authentication despite a valid token on disk. This was reproduced offline: token A remained in the cached client's authorization header after the file changed to token B; a fresh client read B.
-
-The new DEV/STAGE deployment configuration uses the standard pod token file. PROD uses external Secrets whose expiry/rotation policy is unknown; do not assume production immunity. Metaflow avoided cross-request caching by launching fresh submission subprocesses per request.
-
-## Proposed fix
-
-Keep client caching. Correct token-file authentication centrally in `seekr_chain/k8s_api.py`:
-
-1. When the active kubeconfig authentication source is `tokenFile`, install a scoped `Configuration.refresh_api_key_hook` for the clients created by this provider.
-2. On each authenticated request, reopen/read the token file and update that configuration's `api_key["authorization"]` with the current Bearer token. Reopen by path rather than retaining a file descriptor so projected-file replacement is observed.
-3. Preserve relative-path resolution and existing authentication precedence. Leave inline-token, exec-plugin, certificate, and other authentication/refresh behavior unchanged.
-4. Ensure all cached API client types receive the rotation-aware configuration. Do not reset process-global clients or reload global kubeconfig on every submission; callers may be concurrent or use other cluster configurations.
-5. If the file is unreadable or empty, fail clearly without exposing credentials. Do not silently retain an unusable credential or log token values.
-
-This avoids guessing JWT expiry, introducing long-lived credentials, or relying on worker restarts. If the implementation uses in-cluster authentication instead, it must explicitly select that mode and preserve existing remote-kubeconfig behavior—do not infer it merely because a service runs inside Kubernetes.
-
-## Focused regression
-
-Use the real cached provider/client with a temporary token-file kubeconfig; no live cluster is needed:
-
-- Initialize once with token A; verify the outgoing auth header.
-- Replace the token file with B; issue another authenticated operation through the **same client** and verify B is sent.
-- Cover projected-style atomic/symlink replacement, empty/missing token files, and unchanged server/CA settings.
-- Verify non-tokenFile authentication retains its existing behavior, including exec refresh where supported.
-
-Use a small transport receiver to observe actual request headers rather than mocking the refresh hook itself. Publish the corrected chain release and update the consuming application dependency before enabling the new local-auth deployment wiring.
-
-## Agreed Plan
-
-*(To be filled in after planning discussion)*
-
-## Progress Log
-
-*(Steps will appear here once the plan is agreed)*
+Keep cached Kubernetes clients usable after kubeconfig token-file rotation in a long-lived worker, without changing other authentication or process-global configuration.
 
 ## Summary
 
-*(Fill in on completion — then remove Agreed Plan and Progress Log above.
-Cover: key decisions made, patterns established, files changed, gotchas,
-and anything a future agent working in this repo should know.)*
+### Evidence and decision
+
+Reproduced offline on Python 3.12 / Kubernetes 35.0.0 before implementation: a local HTTP receiver accepted synthetic token A, then rejected all three cached client types after atomic replacement with B because they still sent A (401). A fresh client read B (200). A prototype scoped reread hook made those same cached clients send B successfully, including projected-style `..data` symlink replacement. This models expiry by rejecting the old credential; no live-cluster expiration test was performed.
+
+Keep client/configuration caching. Reopen the active token file by path on each authenticated request rather than guessing JWT expiry, retaining descriptors, restarting workers, or switching implicitly to in-cluster authentication.
+
+### Implementation
+
+- `src/seekr_chain/k8s_api.py`: load a provider-owned `Configuration` using upstream `KubeConfigMerger` and a narrow `KubeConfigLoader` subclass. Preserve merged-file path provenance and credential persistence. All three cached API types explicitly receive this configuration; global defaults and unrelated clients are untouched.
+- Override only the token-file authentication branch. Upstream still selects auth-provider before token, token before exec, and inline token before tokenFile. Non-file auth retains upstream hooks.
+- Reread hooks observe overwrite, atomic rename, and projected-volume symlink replacement. Empty/whitespace, missing, unreadable, or undecodable files raise credential-free errors before HTTP transport; successful later reads recover without reconstructing the client. Initial loading also fails safely.
+- `tests/unit/backends/k8s/test_token_refresh.py`: real generated API operations against a local HTTP receiver cover all three cached types, rotation/replacements, failure/recovery, auth precedence, exec expiry refresh through a real subprocess, concurrent requests, global isolation, merged relative paths, and server/CA/TLS/certificate settings.
+- Existing provider caching/error tests in `test_k8s_api.py` and `test_error_messages.py` now patch the provider configuration-loading seam.
+- The exploratory script was superseded by permanent regression tests.
+- At user request, the refresh callback uses `functools.partial` on module-level `_refresh_token_file`, binding path/key without a closure or dedicated callable class. Request-time rereading and caching behavior are unchanged.
+
+### Compatibility / gotchas
+
+The extension uses protected upstream loader methods to avoid duplicating auth precedence. Recheck the regression suite when upgrading Kubernetes. Kubernetes 32/35 populate `api_key["authorization"]`; 36 populates `api_key["BearerToken"]`. The hook updates whichever key upstream populated.
+
+HTTP receiver tests verify actual headers without mocking hooks. Separate HTTPS configuration comparisons verify server, CA, verification, TLS name, and certificate/key settings against upstream; they do not perform a TLS handshake.
+
+For the minimum-version test only, cryptography 50.0.2's native module crashed on import with an illegal instruction in this container; using cryptography 44.0.3 allowed the check. No dependency or lockfile changes were made, and the environment was restored with `uv sync`.
+
+### Validation
+
+- Full unit suite: **1050 passed**, separately on Kubernetes **35.0.0** and locked **36.0.2**.
+- Focused provider/auth/error suite: **78 passed** on **32.0.1**, **35.0.0**, and **36.0.2**.
+- Negative control: substituting upstream's unmodified token loading/config hook made all **9 rotation regressions fail** with the stale header.
+- Ruff lint/format and `git diff --check` passed.
+- Partial-callback follow-up: focused suite **78 passed** on locked **36.0.2**; Ruff lint/format and diff checks passed.
+- No live cluster required or used.
+
+### Rollout
+
+Publish the corrected chain release and update the consuming application's dependency **before enabling local-auth deployment wiring**. Publication and the consuming-application change were not performed here. DEV/STAGE use projected pod tokens; PROD uses external Secrets with unknown expiry/rotation policy and must not be assumed immune.
