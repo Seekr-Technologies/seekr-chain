@@ -6,7 +6,7 @@ Building a client parses the kubeconfig and sets up TLS, which is wasted work
 when repeated — and the clients are safe to share, so ``kube`` builds each one
 once and hands out the same instance forever. Nothing else in the package should
 call ``kubernetes.config.*`` or ``kubernetes.client.*Api()`` directly;
-``tests/unit/test_k8s_api.py`` has a guard test that enforces this.
+``tests/unit/backends/k8s/test_k8s_api.py`` has a guard test that enforces this.
 
 The one sanctioned exception is ``backends/k8s/resources/controller/``, which
 ships standalone into the controller pod and cannot import ``seekr_chain``.
@@ -28,9 +28,10 @@ Downstream code keeps taking clients as explicit arguments (see
 import logging
 import os
 import threading
-from functools import lru_cache
+from functools import lru_cache, partial
 
 import kubernetes
+from kubernetes.config.kube_config import KUBE_CONFIG_DEFAULT_LOCATION, KubeConfigLoader, KubeConfigMerger
 
 logger = logging.getLogger(__name__)
 
@@ -69,12 +70,70 @@ class _lazy:
             return obj.__dict__[self._name]
 
 
+def _read_token_file(path):
+    """Reopen by path: projected volumes replace symlinks, not file contents."""
+    try:
+        with open(path) as stream:
+            token = stream.read().strip()
+    except (OSError, UnicodeError):
+        raise RuntimeError("Cannot read Kubernetes token file") from None
+    if not token:
+        raise RuntimeError("Kubernetes token file is empty")
+    return "Bearer " + token
+
+
+def _refresh_token_file(configuration, *, path: str, key: str):
+    """Reread the token file before authenticating a request."""
+    configuration.api_key[key] = _read_token_file(path)
+
+
+class _TokenFileLoader(KubeConfigLoader):
+    """Extend only the upstream tokenFile branch, retaining auth precedence.
+
+    These protected loader seams let upstream select the active user and auth
+    source (auth-provider wins over token, which wins over exec). Keep coverage
+    against supported Kubernetes versions when updating the dependency.
+    """
+
+    def _load_user_token(self):
+        if self._user and "token" not in self._user and "tokenFile" in self._user:
+            self._token_file = os.path.normpath(
+                os.path.join(self._get_base_path(self._user.path), self._user["tokenFile"])
+            )
+            self.token = _read_token_file(self._token_file)
+            return True
+        return super()._load_user_token()
+
+    def _set_config(self, configuration):
+        super()._set_config(configuration)
+        if hasattr(self, "_token_file"):
+            # Kubernetes 36 renamed this key; use the one upstream populated.
+            key = "BearerToken" if "BearerToken" in configuration.api_key else "authorization"
+            configuration.refresh_api_key_hook = partial(_refresh_token_file, path=self._token_file, key=key)
+
+
+def _load_configuration(config_file=None):
+    # Match load_kube_config's merging, relative paths and credential persistence,
+    # but never mutate Configuration's process-global default.
+    merger = KubeConfigMerger(config_file if config_file is not None else KUBE_CONFIG_DEFAULT_LOCATION)
+    if merger.config is None:
+        raise kubernetes.config.ConfigException("Invalid kube-config file. No configuration found.")
+    loader = _TokenFileLoader(config_dict=merger.config, config_base_path=None, config_persister=merger.save_changes)
+    configuration = kubernetes.client.Configuration()
+    loader.load_and_set(configuration)
+    return configuration
+
+
 @lru_cache()
-def load_kubeconfig() -> None:
-    """Load kubeconfig once with a friendly error on failure."""
+def load_kubeconfig() -> kubernetes.client.Configuration:
+    """Return the cached provider-owned config, without changing global defaults.
+
+    Token-file credentials are reread for each authenticated request; other
+    authentication sources retain Kubernetes' own refresh behavior.
+    """
     with _lock:
         try:
-            kubernetes.config.load_kube_config(config_file=os.environ.get("KUBECONFIG"))
+            return _load_configuration(config_file=os.environ.get("KUBECONFIG"))
         except kubernetes.config.ConfigException as e:
             raise RuntimeError(
                 f"Failed to load Kubernetes config: {e}\n\n"
@@ -89,18 +148,15 @@ class _KubeApi:
 
     @_lazy
     def core_v1(self) -> kubernetes.client.CoreV1Api:
-        load_kubeconfig()
-        return kubernetes.client.CoreV1Api()
+        return kubernetes.client.CoreV1Api(kubernetes.client.ApiClient(load_kubeconfig()))
 
     @_lazy
     def batch_v1(self) -> kubernetes.client.BatchV1Api:
-        load_kubeconfig()
-        return kubernetes.client.BatchV1Api()
+        return kubernetes.client.BatchV1Api(kubernetes.client.ApiClient(load_kubeconfig()))
 
     @_lazy
     def custom_objects(self) -> kubernetes.client.CustomObjectsApi:
-        load_kubeconfig()
-        return kubernetes.client.CustomObjectsApi()
+        return kubernetes.client.CustomObjectsApi(kubernetes.client.ApiClient(load_kubeconfig()))
 
     @_lazy
     def namespace(self) -> str:

@@ -12,6 +12,7 @@ import time
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+import kubernetes
 import pytest
 
 from seekr_chain import k8s_api
@@ -38,7 +39,7 @@ CLIENTS = ["core_v1", "batch_v1", "custom_objects"]
 @pytest.fixture
 def no_kubeconfig_load():
     """Neutralize kubeconfig loading so accessors work with no cluster present."""
-    with patch("kubernetes.config.load_kube_config"):
+    with patch("seekr_chain.k8s_api._load_configuration", return_value=kubernetes.client.Configuration()):
         yield
 
 
@@ -54,7 +55,9 @@ class TestClientCaching:
         assert getattr(kube, name) is not first
 
     def test_kubeconfig_loaded_once_across_accessors(self):
-        with patch("kubernetes.config.load_kube_config") as mock_load:
+        with patch(
+            "seekr_chain.k8s_api._load_configuration", return_value=kubernetes.client.Configuration()
+        ) as mock_load:
             kube.core_v1
             kube.batch_v1
             kube.custom_objects
@@ -105,7 +108,7 @@ class TestThreadSafety:
         """
         builds = []
 
-        def slow_build():
+        def slow_build(*args):
             time.sleep(0.05)
             builds.append(1)
             return MagicMock()
@@ -132,7 +135,9 @@ class TestThreadSafety:
             start.wait()
             kube.core_v1
 
-        with patch("kubernetes.config.load_kube_config") as mock_load:
+        with patch(
+            "seekr_chain.k8s_api._load_configuration", return_value=kubernetes.client.Configuration()
+        ) as mock_load:
             threads = [threading.Thread(target=grab) for _ in range(8)]
             for t in threads:
                 t.start()
@@ -151,13 +156,17 @@ class TestThreadSafety:
 class TestLoadKubeconfig:
     def test_honors_kubeconfig_env(self, monkeypatch):
         monkeypatch.setenv("KUBECONFIG", "/nowhere/config")
-        with patch("kubernetes.config.load_kube_config") as mock_load:
+        with patch(
+            "seekr_chain.k8s_api._load_configuration", return_value=kubernetes.client.Configuration()
+        ) as mock_load:
             k8s_api.load_kubeconfig()
         mock_load.assert_called_once_with(config_file="/nowhere/config")
 
     def test_passes_none_when_env_unset(self, monkeypatch):
         monkeypatch.delenv("KUBECONFIG", raising=False)
-        with patch("kubernetes.config.load_kube_config") as mock_load:
+        with patch(
+            "seekr_chain.k8s_api._load_configuration", return_value=kubernetes.client.Configuration()
+        ) as mock_load:
             k8s_api.load_kubeconfig()
         mock_load.assert_called_once_with(config_file=None)
 
@@ -221,10 +230,8 @@ class TestReset:
 
 class TestErrorWrapping:
     def test_config_exception_becomes_actionable_runtime_error(self):
-        import kubernetes
-
         with patch(
-            "kubernetes.config.load_kube_config",
+            "seekr_chain.k8s_api._load_configuration",
             side_effect=kubernetes.config.ConfigException("boom"),
         ):
             with pytest.raises(RuntimeError, match="KUBECONFIG"):
@@ -232,10 +239,8 @@ class TestErrorWrapping:
 
     def test_failed_load_is_not_cached_as_success(self):
         """A failed load must keep raising, not leave a half-built client behind."""
-        import kubernetes
-
         with patch(
-            "kubernetes.config.load_kube_config",
+            "seekr_chain.k8s_api._load_configuration",
             side_effect=kubernetes.config.ConfigException("boom"),
         ):
             with pytest.raises(RuntimeError):
