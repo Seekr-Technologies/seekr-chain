@@ -30,6 +30,7 @@ from pathlib import Path
 from urllib.parse import urlsplit, urlunsplit
 
 from seekr_chain import constants, remote_fs
+from seekr_chain import nix_closure_cache as closure_cache
 from seekr_chain.symlink import copy_filtered, fingerprint_filtered_tree
 
 logger = logging.getLogger(__name__)
@@ -203,6 +204,7 @@ def maybe_eval_closure(
     source_include: list[str] | None = None,
     source_exclude: list[str] | None = None,
     store_uri: str | None = None,
+    nix_closure_cache: str | None = None,
 ) -> MaybeEvalClosureResult:
     """Resolve a closure path, using local/remote memo stores when available.
 
@@ -210,9 +212,14 @@ def maybe_eval_closure(
     keyed by the digest of that filtered nix source set. A cache miss
     materializes the copied source tree into ``staging_dir``, evals there,
     and writes both local and best-effort remote memo entries. A remote hit
-    backfills the local cache.
+    backfills the local cache. An explicit ``nix_closure_cache`` is checked
+    first and populated from memo hits or successful evaluation. Its file
+    and writer artifacts are always excluded from the dedicated Nix tree.
     """
     expression_rel = os.path.relpath(resolved_expression, os.path.normpath(code_path))
+    cache_path = Path(nix_closure_cache).expanduser().resolve() if nix_closure_cache else None
+    if cache_path is not None:
+        source_exclude = [*(source_exclude or []), *closure_cache.source_exclusions(cache_path, code_path)]
     separate_nix_source = source_include is not None or source_exclude is not None
     if not separate_nix_source:
         staged_expression = os.path.normpath(os.path.join(staged_root, expression_rel))
@@ -228,13 +235,33 @@ def maybe_eval_closure(
         include=source_include,
         exclude=source_exclude,
     )
-    closure = lookup_cached_closure_path(
-        source_digest,
-        expression_rel,
-        attr=attr,
-        system=system,
-        store_uri=store_uri,
-    )
+    key_hash = _closure_memo_key_hash(source_digest, expression_rel, attr, system)
+    closure = closure_cache.lookup(cache_path, key_hash) if cache_path else None
+
+    def persist(closure: str) -> None:
+        if cache_path is not None:
+            closure_cache.store(
+                cache_path,
+                key_hash,
+                source_digest=source_digest,
+                expression=expression_rel,
+                attr=attr,
+                system=system,
+                closure=closure,
+            )
+
+    if closure is None:
+        closure = lookup_cached_closure_path(
+            source_digest,
+            expression_rel,
+            attr=attr,
+            system=system,
+            store_uri=store_uri,
+        )
+        if closure is not None:
+            persist(closure)
+    else:
+        logger.info("Reusing nix closure from %s (source=%s)", cache_path, source_digest[:12])
     source_subdir = f"nix-workspaces/{source_digest}/workspace"
     if closure is not None:
         closure_in_store = _closure_in_store(store_uri, closure)
@@ -273,6 +300,7 @@ def maybe_eval_closure(
             "in-cluster builds."
         )
     closure = eval_closure_path(staged_expression, attr=attr, system=system)
+    persist(closure)
     store_cached_closure_path(
         source_digest,
         expression_rel,

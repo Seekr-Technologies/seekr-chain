@@ -116,3 +116,30 @@ class TestAllConfigFields:
         with no_dotenv(), no_toml_files():
             cfg = _load_config()
         assert getattr(cfg, field) is None
+
+
+@pytest.mark.parametrize("layer", ["local", "global"])
+def test_closure_cache_toml_relative_to_declaring_file(monkeypatch, tmp_path, layer):
+    monkeypatch.delenv("SEEKRCHAIN_NIX_CLOSURE_CACHE", raising=False)
+    home = tmp_path / "home"
+    project = tmp_path / "project"
+    home.mkdir()
+    project.mkdir()
+    directory = project if layer == "local" else home
+    toml = directory / ".seekrchain.toml"
+    toml.write_text('nix_closure_cache = "locks/nix.json"\n')
+    nested = project / "nested"
+    nested.mkdir()
+    monkeypatch.chdir(nested)
+    with no_dotenv(), patch("seekr_chain.user_config.Path.home", return_value=home):
+        cfg = _load_config()
+    assert cfg.nix_closure_cache == str(directory / "locks/nix.json")
+
+
+def test_closure_cache_env_overrides_toml_without_rebasing(monkeypatch, tmp_path):
+    monkeypatch.setenv("SEEKRCHAIN_NIX_CLOSURE_CACHE", "relative-env.json")
+    toml = tmp_path / ".seekrchain.toml"
+    toml.write_text('nix_closure_cache = "toml.json"\n')
+    with no_dotenv(), patch("seekr_chain.user_config._find_file_walking_up", return_value=toml):
+        cfg = _load_config()
+    assert cfg.nix_closure_cache == "relative-env.json"
